@@ -54,7 +54,9 @@ pip install -r requirements.txt
 
 ## 运行结果
 
-![AI Agent 问答示例](./屏幕截图%202026-03-28%20204811.png)
+![AI Agent 问答示例](./index.png)
+
+![知识库管理示例](./rag-databases-manage.png)
 
 ## 功能特性
 

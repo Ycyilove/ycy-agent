@@ -50,14 +50,14 @@ app.add_middleware(
 
 MODESCOPE_API_KEY = os.getenv("MODESCOPE_API_KEY", "ms-96302da9-c430-4be7-b972-91beb2966f43")
 MODESCOPE_BASE_URL = "https://api-inference.modelscope.cn/v1"
-DEFAULT_MODEL = "deepseek-ai/DeepSeek-R1"
+DEFAULT_MODEL = "deepseek-ai/DeepSeek-V4-Flash"
 
 # 模型来源配置
 MODEL_SOURCE = ModelSource.ONLINE  # 可选: ONLINE (在线API) 或 LOCAL (本地模型)
 
 # 本地模型配置
 LOCAL_MODEL_CONFIG = LocalModelConfig(
-    model_name="deepseek-ai/DeepSeek-R1",
+    model_name="deepseek-ai/DeepSeek-V4-Flash",
     model_path=os.getenv("LOCAL_MODEL_PATH", None),  # 本地模型路径，留空则从ModelScope下载
     device=os.getenv("DEVICE", "cpu"),  # 可选: cpu, cuda, auto
     max_tokens=2048,
@@ -196,7 +196,7 @@ class MultimodalClient:
         text_content = ""
         
         with self.client.messages.stream(
-            model='deepseek-ai/DeepSeek-R1',
+            model='deepseek-ai/DeepSeek-V4-Flash',
             messages=messages,
             max_tokens=max_tokens,
             extra_headers={
@@ -224,7 +224,7 @@ class MultimodalClient:
     def analyze(self, messages: List[Dict], max_tokens: int = 2048) -> str:
         """同步分析多模态内容"""
         message = self.client.messages.create(
-            model='deepseek-ai/DeepSeek-R1',
+            model='deepseek-ai/DeepSeek-V4-Flash',
             messages=messages,
             max_tokens=max_tokens
         )
