@@ -6,6 +6,7 @@ from .document_parser import DocumentParser, DocumentParserFactory
 from .text_chunker import TextChunker
 from .vector_store import FAISSVectorStore
 from .retrieval import RetrievalService
+from .resources import ResourceKind, ResourceManager, ResourceRecord
 
 __all__ = [
     'DocumentParser',
@@ -13,4 +14,7 @@ __all__ = [
     'TextChunker',
     'FAISSVectorStore',
     'RetrievalService',
+    'ResourceKind',
+    'ResourceManager',
+    'ResourceRecord',
 ]

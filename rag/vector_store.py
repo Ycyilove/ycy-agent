@@ -3,9 +3,16 @@ FAISS向量存储模块
 本地生成向量并存入FAISS索引，持久化保存索引文件避免重复向量化
 """
 import os
-# 配置 HuggingFace 国内镜像源（在导入 sentence_transformers 之前设置）
-os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
-os.environ['TRANSFORMERS_OFFLINE'] = '0'  # 允许在线下载
+
+# ── HuggingFace 离线配置 ──
+# 目的：避免 SentenceTransformer 加载时联网检查（国内网络下每次超时 20+ 秒）
+# 若需要首次下载模型，请临时注释掉 HF_HUB_OFFLINE
+os.environ.setdefault('HF_ENDPOINT', 'https://hf-mirror.com')
+os.environ.setdefault('HF_HOME', os.path.join(os.path.dirname(os.path.dirname(__file__)), 'models'))
+os.environ.setdefault('HUGGINGFACE_HUB_CACHE', os.environ['HF_HOME'])
+os.environ.setdefault('HF_HUB_OFFLINE', '1')          # ← 关键：默认离线
+os.environ.setdefault('TRANSFORMERS_OFFLINE', '1')     # ← 关键：默认离线
+
 import json
 import pickle
 import hashlib
@@ -39,14 +46,47 @@ class FAISSVectorStore:
         self._load_index()
 
     def _init_embeddings(self):
-        """初始化嵌入模型"""
-        print(f"[模型下载] 正在从镜像源下载嵌入模型: {self.embedding_model}")
-        print("[模型下载] 这可能需要几分钟时间，请耐心等待...")
+        """初始化嵌入模型。
+
+        加载策略：
+            1. 先尝试 local_files_only=True（只在本地缓存里找，不走网络）
+            2. 如果本地没有缓存 → 降级为联网下载
+            3. 记录实际走了哪条路径，方便排查
+
+        为什么优先本地：
+            - HuggingFace 的 SentenceTransformer 默认会联网检查
+              config.json / processor_config.json 等是否有更新
+            - 这一步在国内网络下经常超时（20 秒以上）
+            - 模型已缓存时，这些检查完全没必要
+        """
         from sentence_transformers import SentenceTransformer
-        print("[模型下载] 模型下载完成，正在加载模型...")
+
+        # ── 优先：从本地缓存加载 ──
+        print(f"[模型加载] 尝试从本地缓存加载: {self.embedding_model}")
+        try:
+            self.embeddings = SentenceTransformer(
+                self.embedding_model,
+                local_files_only=True,
+            )
+            self.embedding_dimension = (
+                self.embeddings.get_sentence_embedding_dimension()
+            )
+            print("[模型加载] ✅ 本地缓存加载成功！")
+            return
+        except Exception as local_error:
+            print(
+                f"[模型加载] 本地缓存不可用（{type(local_error).__name__}），"
+                f"将联网下载"
+            )
+
+        # ── 降级：联网下载 ──
+        print(f"[模型下载] 正在从镜像源下载嵌入模型: {self.embedding_model}")
+        print("[模型下载] 首次下载约 90MB，请耐心等待...")
         self.embeddings = SentenceTransformer(self.embedding_model)
-        self.embedding_dimension = self.embeddings.get_sentence_embedding_dimension()
-        print("[模型下载] 模型加载成功！")
+        self.embedding_dimension = (
+            self.embeddings.get_sentence_embedding_dimension()
+        )
+        print("[模型加载] ✅ 下载并加载成功！")
 
     def _load_index(self):
         """加载已存在的索引"""
@@ -212,9 +252,11 @@ class FAISSVectorStore:
             remaining_indices = [i for i in all_indices if i not in indices_to_remove]
 
             if remaining_indices:
-                self.index = faiss.IndexFlatL2(self.embedding_dimension)
+                # Read the vectors before replacing the index; reconstructing
+                # from the new empty index would lose every remaining vector.
                 vectors = self.index.reconstruct_n(0, self.index.ntotal)
                 remaining_vectors = vectors[remaining_indices]
+                self.index = faiss.IndexFlatL2(self.embedding_dimension)
                 self.index.add(remaining_vectors)
             else:
                 self.index = None
