@@ -209,6 +209,8 @@ export default function TaskComposer() {
     const controller = new AbortController();
     registerStream(taskId, controller);
 
+    const autoDiscoverMcp =
+      localStorage.getItem('dsh.autoDiscoverMcpTools') === 'true';
 
     try {
       const stream = await streamAgentTask({

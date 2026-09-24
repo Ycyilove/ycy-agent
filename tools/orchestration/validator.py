@@ -11,9 +11,11 @@ import re
 # 副作用动词
 _SIDE_EFFECT_VERBS = (
     "创建", "新建", "写入", "写一个", "写个", "编辑", "修改", "改",
+    "修复", "修正", "改正", "更正", "补充", "补齐", "增加", "添加",
     "移动", "重命名", "删除", "移除", "复制", "拷贝",
     "create", "write", "edit", "modify", "move", "rename",
     "delete", "remove", "copy", "mkdir",
+    "fix", "repair", "patch", "correct", "update",
 )
 
 # 读取动词

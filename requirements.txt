@@ -39,3 +39,15 @@ pymysql>=1.1.0
 
 # Model Context Protocol 客户端
 mcp>=1.0.0
+
+# Langfuse 可观测性
+langfuse>=2.0.0
+
+# E2B 沙箱
+e2b-code-interpreter>=1.0.0
+
+# Mem0 结构化记忆
+mem0ai>=0.1.0
+qdrant-client>=1.7.0
+
+python-dotenv>=1.0.0

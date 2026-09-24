@@ -345,6 +345,7 @@ class ToolCallResult:
     result: Any = None
     error: str = None
     execution_time: float = 0.0
+    parameters: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -463,6 +464,7 @@ class ToolAgent:
         start_time = time.time()
         tool_name = tool_call.tool_name
         tool_func = self.registry.get_tool(tool_name)
+        params = tool_call.parameters or {}
 
         # 动态 MCP 路由
         if tool_func is None and self._is_mcp_tool_name(tool_name):
@@ -472,10 +474,13 @@ class ToolAgent:
                     tool_name=tool_name, success=False,
                     error=f"工具 {tool_name} 未注册且 MCPClientManager 未注入。",
                     execution_time=time.time() - start_time,
+                    parameters=params,
                 )
-            logger.info("[dsh][mcp] dynamic route: %s", tool_name)
+            logger.info(
+                "[dsh][mcp] dynamic route: %s params=%r", tool_name, params,
+            )
             try:
-                result = await mcp_client.call_tool(tool_name, tool_call.parameters or {})
+                result = await mcp_client.call_tool(tool_name, params)
                 if isinstance(result, dict):
                     success = result.get("success", True)
                     error_message = None if success else result.get("error")
@@ -485,6 +490,7 @@ class ToolAgent:
                 return ToolCallResult(
                     tool_name=tool_name, success=success, result=result,
                     error=error_message, execution_time=time.time() - start_time,
+                    parameters=params,
                 )
             except Exception as error:
                 logger.exception("[dsh][mcp] dynamic route failed: %s", tool_name)
@@ -504,6 +510,7 @@ class ToolAgent:
                     tool_name=tool_name, success=False,
                     error=str(error) + hint,
                     execution_time=time.time() - start_time,
+                    parameters=params,
                 )
 
         if tool_func is None:
@@ -511,10 +518,11 @@ class ToolAgent:
                 tool_name=tool_name, success=False,
                 error=f"工具不存在: {tool_name}",
                 execution_time=time.time() - start_time,
+                parameters=params,
             )
 
         try:
-            result = tool_func(**tool_call.parameters)
+            result = tool_func(**params)
             if inspect.isawaitable(result):
                 result = await result
             execution_time = time.time() - start_time
@@ -527,11 +535,30 @@ class ToolAgent:
             return ToolCallResult(
                 tool_name=tool_name, success=success, result=result,
                 error=error_message, execution_time=execution_time,
+                parameters=params,
+            )
+        except TypeError as error:
+            # 参数名错误 → 给出工具接受的关键字
+            try:
+                sig = inspect.signature(tool_func)
+                accepted = list(sig.parameters.keys())
+            except Exception:
+                accepted = []
+            hint = (
+                f"\n\n⚠️ 参数名错误。工具 `{tool_name}` 接受的关键字："
+                f"{accepted}\n你传入的：{list(params.keys())}"
+            )
+            return ToolCallResult(
+                tool_name=tool_name, success=False,
+                error=str(error) + hint,
+                execution_time=time.time() - start_time,
+                parameters=params,
             )
         except Exception as error:
             return ToolCallResult(
                 tool_name=tool_name, success=False, error=str(error),
                 execution_time=time.time() - start_time,
+                parameters=params,
             )
 
     def format_tool_result(self, result: ToolCallResult) -> str:

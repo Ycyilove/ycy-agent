@@ -124,13 +124,19 @@ def list_files(directory: str, pattern: str = None, include_subdirs: bool = Fals
                 "modified": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
             })
 
+        abs_dir = os.path.abspath(directory)
         return {
             "success": True,
-            "directory": directory,
+            "directory": abs_dir,
             "files_count": len(files),
             "dirs_count": len(dirs),
             "files": sorted(files_info, key=lambda x: x['name']),
-            "directories": sorted(dirs_info, key=lambda x: x['name'])
+            "directories": sorted(dirs_info, key=lambda x: x['name']),
+            "message": (
+                f"已列出 {abs_dir}："
+                f"{len(files)} 个文件、{len(dirs)} 个子目录"
+                + (f"（过滤：{pattern}）" if pattern else "")
+            ),
         }
 
     except Exception as e:
@@ -359,10 +365,19 @@ def write_file(file_path: str, content: str, encoding: str = "utf-8") -> Dict[st
         os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
         with open(file_path, "w", encoding=encoding) as f:
             f.write(content)
+        abs_path = os.path.abspath(file_path)
         return {
             "success": True,
-            "message": f"已写入 {len(content)} 字符到 {file_path}",
-            "file_path": file_path,
+            "message": (
+                f"已写入 {abs_path}"
+                f"（{len(content)} 字符，{len(content.encode(encoding))} 字节，"
+                f"{content.count(chr(10)) + (1 if content else 0)} 行）"
+            ),
+            "file_path": abs_path,
+            "size": len(content),
+            "bytes": len(content.encode(encoding)),
+            "line_count": content.count("\n") + (1 if content else 0),
+            "encoding": encoding,
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -390,11 +405,43 @@ def edit_file(file_path: str, old_text: str, new_text: str) -> Dict[str, Any]:
         with open(file_path, "r", encoding="utf-8") as f:
             content = f.read()
         if old_text not in content:
-            return {"success": False, "error": f"文件中未找到 '{old_text}'"}
+            preview = old_text[:80] + ("..." if len(old_text) > 80 else "")
+            return {
+                "success": False,
+                "error": (
+                    f"文件中未找到要替换的内容。"
+                    f"你传入的 old_text（前 80 字符）：{preview!r}\n"
+                    f"提示：old_text 必须逐字匹配文件内容（含空格、缩进、换行）。"
+                ),
+                "file_path": os.path.abspath(file_path),
+                "old_text_preview": preview,
+            }
         new_content = content.replace(old_text, new_text, 1)
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(new_content)
-        return {"success": True, "message": f"已替换 {file_path}"}
+        abs_path = os.path.abspath(file_path)
+        delta_lines = (
+            new_content.count("\n") - content.count("\n")
+        )
+        return {
+            "success": True,
+            "message": (
+                f"已替换 {abs_path}"
+                f"（old_text {len(old_text)} 字符 → new_text {len(new_text)} 字符"
+                + (
+                    f"，行数 {delta_lines:+d}"
+                    if delta_lines != 0
+                    else ""
+                )
+                + "）"
+            ),
+            "file_path": abs_path,
+            "old_text_preview": old_text[:80],
+            "new_text_preview": new_text[:80],
+            "old_size": len(content),
+            "new_size": len(new_content),
+            "delta_lines": delta_lines,
+        }
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -412,10 +459,19 @@ def edit_file(file_path: str, old_text: str, new_text: str) -> Dict[str, Any]:
 def create_directory(directory: str) -> Dict[str, Any]:
     """创建目录。"""
     try:
-        if not is_safe_path(os.path.abspath(directory)):
+        abs_dir = os.path.abspath(directory)
+        if not is_safe_path(abs_dir):
             return {"success": False, "error": "操作被拒绝：路径受保护"}
-        os.makedirs(directory, exist_ok=True)
-        return {"success": True, "message": f"已创建目录 {directory}"}
+        already_existed = os.path.exists(abs_dir)
+        os.makedirs(abs_dir, exist_ok=True)
+        return {
+            "success": True,
+            "message": (
+                f"目录已{'存在' if already_existed else '创建'}：{abs_dir}"
+            ),
+            "directory": abs_dir,
+            "already_existed": already_existed,
+        }
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -439,11 +495,14 @@ def move_file(source: str, destination: str) -> Dict[str, Any]:
         if not is_safe_path(os.path.abspath(destination)):
             return {"success": False, "error": "目标路径受保护"}
         os.makedirs(os.path.dirname(destination) or ".", exist_ok=True)
-        shutil.move(source, destination)
+        abs_src = os.path.abspath(source)
+        abs_dst = os.path.abspath(destination)
+        shutil.move(abs_src, abs_dst)
         return {
             "success": True,
-            "message": f"已移动",
-            "new_path": destination,
+            "message": f"已移动：{abs_src} → {abs_dst}",
+            "source": abs_src,
+            "new_path": abs_dst,
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -467,11 +526,20 @@ def read_text_file(file_path: str, encoding: str = "utf-8") -> Dict[str, Any]:
             return {"success": False, "error": "路径受保护"}
         with open(file_path, "r", encoding=encoding) as f:
             content = f.read()
+        truncated = len(content) > 50000
         return {
             "success": True,
             "content": content[:50000],
-            "file_path": file_path,
+            "file_path": os.path.abspath(file_path),
             "size": len(content),
+            "line_count": content.count("\n") + (1 if content else 0),
+            "truncated": truncated,
+            "message": (
+                f"已读取 {os.path.abspath(file_path)}"
+                f"（{len(content)} 字符，{content.count(chr(10)) + 1} 行"
+                + ("，已截断前 50000 字符" if truncated else "")
+                + "）"
+            ),
         }
     except Exception as e:
         return {"success": False, "error": str(e)}

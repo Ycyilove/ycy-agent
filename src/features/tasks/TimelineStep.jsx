@@ -5,6 +5,7 @@ import Icon from '../../shared/ui/Icon';
 import { I } from '../../shared/ui/icons';
 import DiffPreview from './DiffPreview';
 import ApprovalCard from './ApprovalCard';
+import { useApp } from '../../app/state/AppContext';
 
 const STATUS_COLOR = {
   running: 'text-[var(--accent)]',
@@ -211,11 +212,18 @@ function ResourceBlock({ resources }) {
 }
 
 export default function TimelineStep({ step, taskId, isLast }) {
+  const { state } = useApp();
   const [expanded, setExpanded] = useState(false);
 
   const statusColor = STATUS_COLOR[step.status] || 'text-[var(--dim)]';
   const statusIcon = STATUS_ICON[step.status] || I.chevron;
   const hasDetail = step.path || step.diff || step.log || step.approval;
+
+  // 这个 approval 是否已被前端处理过（客户端权威状态）
+  const approvalId = step.approval?.id;
+  const approvalResolved = Boolean(
+    approvalId && state.resolvedApprovalIds?.has(approvalId)
+  );
 
   if (step.kind === 'user') {
     return (
@@ -357,7 +365,7 @@ export default function TimelineStep({ step, taskId, isLast }) {
                 {step.log}
               </pre>
             )}
-            {step.approval && (
+            {step.approval && !approvalResolved && (
               <ApprovalCard
                 approval={step.approval}
                 taskId={taskId}
@@ -367,7 +375,10 @@ export default function TimelineStep({ step, taskId, isLast }) {
           </div>
         )}
 
-        {!expanded && step.approval && step.status === 'waiting' && (
+        {!expanded
+          && step.approval
+          && !approvalResolved
+          && step.status === 'waiting' && (
           <div className="mt-2">
             <ApprovalCard
               approval={step.approval}

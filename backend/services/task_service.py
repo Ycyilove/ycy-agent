@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
 from tools.agent import ToolAgent, ToolCallRequest, ToolCallResult
+from tools.orchestration.state import OrchestratorState
 
 from .prompts import (
     attachment_context as build_attachment_context,
@@ -35,6 +36,8 @@ from .stream_parser import (
     parse_provider_chunk,
 )
 
+from .llm_debug_log import begin_turn, end_turn
+from .observability import set_turn_context
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +62,14 @@ class PendingApproval:
     title: str
     turn_id: str = ""
     path: Optional[str] = None
+
+    # ── orchestrator 恢复所需信息 ──
+    goal: str = ""
+    mode: str = "plan"
+    workspace: Optional[List[str]] = None
+    auto_discover_mcp: bool = False
+    step_index: int = 1
+    state_snapshot: Optional[dict] = None
 
 
 def sse_event(event_type: str, **payload: Any) -> str:
@@ -466,7 +477,24 @@ class AgentTaskService:
                 tool_context=tool_context,
             )
             messages = list(prior_messages) + [{"role": "user", "content": prompt}]
-            provider = self._llm_provider().stream_generate(messages, mode="quick")
+            provider = self._llm_provider().stream_generate(messages, mode="deep")
+
+            # 落盘 stream_answer 的输入
+            try:
+                from .llm_debug_log import dump_llm_call
+                full_prompt = "\n\n".join(
+                    f"[{m.get('role', 'user')}]\n{m.get('content', '')}"
+                    for m in messages
+                )
+                dump_llm_call(
+                    kind="stream_answer",
+                    prompt=full_prompt,
+                    response=None,   # 流式响应在结束时才拿到，下面单独落盘
+                    model=None,
+                    extra={"mode": mode, "message": message[:200]},
+                )
+            except Exception:
+                logger.exception("dump stream_answer prompt failed")
 
         # 用 StreamSplitter 解析
         splitter_events: List[Dict[str, Any]] = []
@@ -532,6 +560,21 @@ class AgentTaskService:
         )
         yield self._emit_step(task_id, final_answer)
 
+        # 落盘 stream_answer 的响应
+        try:
+            from .llm_debug_log import dump_llm_call
+            dump_llm_call(
+                kind="stream_answer_response",
+                prompt="",                      # prompt 已经落过，不重复
+                response=answer_text,
+                extra={
+                    "thinking_len": len(thinking_text or ""),
+                    "answer_len": len(answer_text or ""),
+                },
+            )
+        except Exception:
+            logger.exception("dump stream_answer response failed")
+
         self._session_provider().add_message(session_id, "assistant", answer_text)
         self._persist_task_status(task_id, "done")
         yield sse_event("done", task_status="done")
@@ -548,15 +591,36 @@ class AgentTaskService:
     ) -> AsyncIterator[str]:
         step_id = step_id or f"{task_id}:{turn_id}:tool:{uuid.uuid4().hex[:8]}"
         label = f"执行工具：{tool_call.tool_name}"
+        logger.info(
+            "[dsh][task_service] _execute_tool start: %s params=%r",
+            tool_call.tool_name, tool_call.parameters,
+        )
 
         running_step = self._step(
-            step_id, label, "running", "action", path=self._tool_path(tool_call)
+            step_id, label, "running", "action",
+            path=self._tool_path(tool_call),
         )
         yield self._emit_step(task_id, running_step)
 
-        result = await self._agent_provider().execute_tool_async(tool_call)
+        try:
+            result = await self._agent_provider().execute_tool_async(tool_call)
+            logger.info(
+                "[dsh][task_service] _execute_tool done: %s success=%r error=%r",
+                tool_call.tool_name, result.success, result.error,
+            )
+        except Exception:
+            logger.exception(
+                "[dsh][task_service] _execute_tool raised: %s",
+                tool_call.tool_name,
+            )
+            raise
+
         log = self._agent_provider().format_tool_result(result)
         status = "done" if result.success else "failed"
+        logger.info(
+            "[dsh][task_service] _execute_tool formatted: %s status=%s log=%r",
+            tool_call.tool_name, status, log[:300],
+        )
 
         done_step = self._step(
             step_id,
@@ -577,6 +641,220 @@ class AgentTaskService:
         self._persist_task_status(task_id, final_status)
         yield sse_event("done", task_status=final_status)
 
+    # ────────── orchestrator 事件 → SSE ──────────
+
+    async def _process_orchestrator_event(
+        self,
+        event: Dict[str, Any],
+        *,
+        task_id: str,
+        session_id: str,
+        turn_id: str,
+        message: str,
+        mode: str,
+        workspace: Optional[List[str]],
+        auto_discover_mcp: bool,
+        analysis_step_id: str,
+        tool_execution_context: List[str],
+        accumulated_resources: List[Dict[str, Any]],
+        event_prefix: str = "orch",
+    ) -> AsyncIterator[str]:
+        """处理单个 orchestrator 事件，产出 SSE。
+
+        调用方负责维护 tool_execution_context / accumulated_resources，
+        并在 approval_required 后退出循环（见调用方）。
+        """
+        event_type = event.get("type")
+
+        if event_type == "thinking":
+            thought = (event.get("thought") or "").strip()
+            if thought:
+                log_text = (event.get("log") or thought).strip()
+                yield self._emit_step(
+                    task_id,
+                    self._step(
+                        f"{task_id}:{turn_id}:{event_prefix}-think:{event['step']}",
+                        thought[:120],
+                        "done",
+                        "think",
+                        log=log_text,
+                    ),
+                )
+
+        elif event_type == "approval_required":
+            tool_call = event["tool_call"]
+            reason = event.get("reason") or "需要用户确认"
+            approval_id = f"approval-{uuid.uuid4().hex}"
+            tool_step_id = f"{task_id}:{turn_id}:approval:{approval_id}"
+            title = f"确认执行工具：{tool_call.tool_name}（{reason}）"
+
+            pending = PendingApproval(
+                task_id=task_id,
+                session_id=session_id,
+                step_id=tool_step_id,
+                approval_id=approval_id,
+                tool_call=tool_call,
+                title=title,
+                turn_id=turn_id,
+                path=self._tool_path(tool_call),
+                goal=message,
+                mode=mode,
+                workspace=workspace,
+                auto_discover_mcp=auto_discover_mcp,
+                step_index=event.get("step", 1),
+                state_snapshot=event.get("state_snapshot"),
+            )
+            with self._lock:
+                self._pending[approval_id] = pending
+
+            approval = {
+                "id": approval_id,
+                "title": title,
+                "toolName": tool_call.tool_name,
+                "parameters": tool_call.parameters,
+                "dangerLevel": "medium",
+                "path": pending.path,
+                "taskId": task_id,
+                "stepId": tool_step_id,
+            }
+            waiting_step = self._step(
+                tool_step_id,
+                title,
+                "waiting",
+                "action",
+                path=pending.path,
+                approval=approval,
+            )
+            yield self._emit_step(
+                task_id,
+                self._step(
+                    analysis_step_id, "任务分析完成", "done", "think"
+                ),
+            )
+            yield self._emit_step(task_id, waiting_step)
+            self._persist_task_status(task_id, "waiting")
+            yield sse_event("done", task_status="waiting")
+
+        elif event_type == "tool_start":
+            tool_call = event["tool_call"]
+            yield self._emit_step(
+                task_id,
+                self._step(
+                    f"{task_id}:{turn_id}:{event_prefix}-tool:{event['step']}",
+                    f"调用工具：{tool_call.tool_name}",
+                    "running",
+                    "action",
+                    path=self._tool_path(tool_call),
+                ),
+            )
+
+        elif event_type == "tool_result":
+            tool_call = event["tool_call"]
+            result = event["result"]
+            status = "done" if result.success else "failed"
+            label = (
+                f"调用工具：{tool_call.tool_name}"
+                if result.success
+                else f"调用工具：{tool_call.tool_name}（失败）"
+            )
+
+            log_parts: List[str] = []
+            if event.get("log"):
+                log_parts.append(str(event["log"]))
+
+            result_payload = getattr(result, "result", None)
+            if result_payload is not None:
+                try:
+                    if isinstance(result_payload, (dict, list, tuple)):
+                        payload_text = json.dumps(
+                            result_payload, ensure_ascii=False, indent=2
+                        )
+                    else:
+                        payload_text = str(result_payload)
+                    if len(payload_text) > 4000:
+                        payload_text = payload_text[:4000] + "\n… (truncated)"
+                    log_parts.append("【原始返回】\n" + payload_text)
+                except Exception:
+                    logger.exception("拼接工具原始返回失败")
+
+            if not result.success and getattr(result, "error", None):
+                log_parts.append(f"【错误】{result.error}")
+
+            combined_log = "\n\n".join(log_parts) if log_parts else None
+
+            yield self._emit_step(
+                task_id,
+                self._step(
+                    f"{task_id}:{turn_id}:{event_prefix}-tool:{event['step']}",
+                    label,
+                    status,
+                    "action",
+                    path=self._tool_path(tool_call),
+                    log=combined_log,
+                ),
+            )
+
+            if result.result is not None:
+                try:
+                    if isinstance(result.result, dict):
+                        payload = json.dumps(result.result, ensure_ascii=False)
+                    else:
+                        payload = str(result.result)
+                    tag = "成功" if result.success else "失败"
+                    err_note = (
+                        f"\n错误: {result.error}"
+                        if not result.success and result.error
+                        else ""
+                    )
+                    tool_execution_context.append(
+                        f"【工具 {tool_call.tool_name} 返回（{tag}）】"
+                        f"{err_note}\n{payload[:8000]}"
+                    )
+                except Exception:
+                    logger.exception("累积工具结果失败")
+
+            try:
+                found = self._extract_resources_from_tool_result(result)
+                if found:
+                    accumulated_resources.extend(found)
+            except Exception:
+                logger.exception("提取工具资源失败")
+
+            file_log = self._file_log_entry(tool_call, result)
+            if file_log:
+                yield sse_event("file_log", entry=file_log)
+
+        elif event_type == "done":
+            yield self._emit_step(
+                task_id,
+                self._step(
+                    analysis_step_id, "任务分析完成", "done", "think"
+                ),
+            )
+
+        elif event_type == "max_steps":
+            yield self._emit_step(
+                task_id,
+                self._step(
+                    analysis_step_id,
+                    f"已达最大步数 {event['steps']}",
+                    "done",
+                    "think",
+                ),
+            )
+
+        elif event_type == "error":
+            yield sse_event(
+                "error", message=event.get("message", "编排失败")
+            )
+            yield self._emit_step(
+                task_id,
+                self._step(
+                    analysis_step_id, "任务分析失败", "failed", "think"
+                ),
+            )
+
+
     # ────────── 主入口 ──────────
 
     async def stream_task(
@@ -596,330 +874,262 @@ class AgentTaskService:
         mode = mode if mode in MODES else "plan"
         session_id = self._ensure_session(session_id, message)
 
-        # 打开自动发现时，重置本任务已试过的 MCP server 集合；
-        # 关闭时不做任何事（orchestrator 会因为 allowed_tool_names 里没有
-        # search_and_connect_mcp 而根本不会触发 discovery）。
-        if auto_discover_mcp:
-            try:
-                from tools.mcp_discovery import reset_tried_servers
-                reset_tried_servers()
-            except Exception:
-                logger.exception("重置 MCP discovery 状态失败")
-                
-        memory = self._session_provider()
-        prior_messages = (
-            memory.get_conversation_context(session_id, 20)
-            if session_id
-            else history
-        )
-        if not prior_messages:
-            prior_messages = history
-        self._record_session_input(session_id, message, attachments)
-
-        self._persist_task(
-            task_id=task_id,
+        # ── 开启 turn：把本次提问的所有 LLM 调用归到同一目录 ──
+        begin_turn(
             session_id=session_id,
-            message=message,
-            mode=mode,
-            workspace=workspace,
-            attachments=attachments,
+            task_id=task_id,
+            question=message,
         )
+        with set_turn_context(
+            session_id=session_id,
+            task_id=task_id,
+            question=message,
+        ):
+          try:
+            # 打开自动发现时，重置本任务已试过的 MCP server 集合；
+            # 关闭时不做任何事（orchestrator 会因为 allowed_tool_names 里没有
+            # search_and_connect_mcp 而根本不会触发 discovery）。
+            if auto_discover_mcp:
+                try:
+                    from tools.mcp_discovery import reset_tried_servers
+                    reset_tried_servers()
+                except Exception:
+                    logger.exception("重置 MCP discovery 状态失败")
+                    
+            memory = self._session_provider()
+            prior_messages = (
+                memory.get_conversation_context(session_id, 20)
+                if session_id
+                else history
+            )
+            if not prior_messages:
+                prior_messages = history
+            self._record_session_input(session_id, message, attachments)
 
-        yield sse_event(
-            "task", task_id=task_id, session_id=session_id, turn_id=turn_id
-        )
+            # ── Mem0：从用户消息提取路径 ──
+            try:
+                from .memory_layer import remember_user_message
+                remember_user_message(session_id, message)
+            except Exception:
+                logger.exception("remember_user_message 失败")
 
-        if message.strip():
+            self._persist_task(
+                task_id=task_id,
+                session_id=session_id,
+                message=message,
+                mode=mode,
+                workspace=workspace,
+                attachments=attachments,
+            )
+
+            yield sse_event(
+                "task", task_id=task_id, session_id=session_id, turn_id=turn_id
+            )
+
+            if message.strip():
+                yield self._emit_step(
+                    task_id,
+                    self._step(
+                        f"{task_id}:{turn_id}:user",
+                        message.strip(),
+                        "done",
+                        "user",
+                    ),
+                )
+
+            for index, attachment in enumerate(attachments):
+                step = self._step(
+                    f"{task_id}:{turn_id}:attachment:{index}",
+                    f"接收附件：{attachment_label(attachment)}",
+                    "done",
+                    "action",
+                    path=attachment_label(attachment),
+                )
+                yield self._emit_step(task_id, step)
+
+            analysis_step_id = f"{task_id}:{turn_id}:analysis"
             yield self._emit_step(
                 task_id,
-                self._step(
-                    f"{task_id}:{turn_id}:user",
-                    message.strip(),
-                    "done",
-                    "user",
-                ),
+                self._step(analysis_step_id, "正在理解任务…", "running", "think"),
             )
 
-        for index, attachment in enumerate(attachments):
-            step = self._step(
-                f"{task_id}:{turn_id}:attachment:{index}",
-                f"接收附件：{attachment_label(attachment)}",
-                "done",
-                "action",
-                path=attachment_label(attachment),
-            )
-            yield self._emit_step(task_id, step)
+            if mode == "ask":
+                allowed_dangers: Optional[set] = {"safe"}
+            else:
+                allowed_dangers = {"safe", "medium", "high"}
 
-        analysis_step_id = f"{task_id}:{turn_id}:analysis"
-        yield self._emit_step(
-            task_id,
-            self._step(analysis_step_id, "正在理解任务…", "running", "think"),
-        )
+            accumulated_resources: List[Dict[str, Any]] = []
+            accumulated_resources.extend(self._collect_session_resources(session_id))
+            tool_execution_context: List[str] = []
 
-        if mode == "ask":
-            allowed_dangers: Optional[set] = {"safe"}
-        else:
-            allowed_dangers = {"safe", "medium", "high"}
+            used_orchestrator = False
+            if self._orchestrator_provider is not None:
+                used_orchestrator = True
+                orchestrator = self._orchestrator_provider()
+                async for event in orchestrator.run(
+                    message,
+                    allowed_danger_levels=allowed_dangers,
+                    allow_mcp_discovery=auto_discover_mcp,
+                    workspace_paths=self._normalise_workspace(workspace) if mode == "plan" else None,
+                    plan_mode=(mode == "plan"),
+                    prior_messages=prior_messages,
+                    session_id=session_id,
+                ):
+                    async for evt in self._process_orchestrator_event(
+                        event,
+                        task_id=task_id,
+                        session_id=session_id,
+                        turn_id=turn_id,
+                        message=message,
+                        mode=mode,
+                        workspace=workspace,
+                        auto_discover_mcp=auto_discover_mcp,
+                        analysis_step_id=analysis_step_id,
+                        tool_execution_context=tool_execution_context,
+                        accumulated_resources=accumulated_resources,
+                        event_prefix="orch",
+                    ):
+                        yield evt
+                    if event.get("type") == "approval_required":
+                        return
 
-        accumulated_resources: List[Dict[str, Any]] = []
-        accumulated_resources.extend(self._collect_session_resources(session_id))
-        tool_execution_context: List[str] = []
-
-        used_orchestrator = False
-        if self._orchestrator_provider is not None:
-            used_orchestrator = True
-            orchestrator = self._orchestrator_provider()
-            async for event in orchestrator.run(
-                message,
-                allowed_danger_levels=allowed_dangers,
-                allow_mcp_discovery=auto_discover_mcp,
-            ):
-                event_type = event.get("type")
-
-                if event_type == "thinking":
-                    thought = (event.get("thought") or "").strip()
-                    if thought:
-                        yield self._emit_step(
-                            task_id,
-                            self._step(
-                                f"{task_id}:{turn_id}:orch-think:{event['step']}",
-                                thought[:120],
-                                "done",
-                                "think",
-                            ),
-                        )
-
-                elif event_type == "tool_start":
-                    tool_call = event["tool_call"]
-                    yield self._emit_step(
-                        task_id,
-                        self._step(
-                            f"{task_id}:{turn_id}:orch-tool:{event['step']}",
-                            f"调用工具：{tool_call.tool_name}",
-                            "running",
-                            "action",
-                            path=self._tool_path(tool_call),
-                        ),
-                    )
-
-                elif event_type == "tool_result":
-                    tool_call = event["tool_call"]
-                    result = event["result"]
-                    status = "done" if result.success else "failed"
-                    label = (
-                        f"调用工具：{tool_call.tool_name}"
-                        if result.success
-                        else f"调用工具：{tool_call.tool_name}（失败）"
-                    )
-                    yield self._emit_step(
-                        task_id,
-                        self._step(
-                            f"{task_id}:{turn_id}:orch-tool:{event['step']}",
-                            label,
-                            status,
-                            "action",
-                            path=self._tool_path(tool_call),
-                            log=event.get("log"),
-                        ),
-                    )
-
-                    if result.result is not None:
-                        try:
-                            if isinstance(result.result, dict):
-                                payload = json.dumps(
-                                    result.result, ensure_ascii=False
-                                )
-                            else:
-                                payload = str(result.result)
-                            status_tag = "成功" if result.success else "失败"
-                            error_note = (
-                                f"\n错误: {result.error}"
-                                if not result.success and result.error
-                                else ""
-                            )
-                            tool_execution_context.append(
-                                f"【工具 {tool_call.tool_name} 返回（{status_tag}）】"
-                                f"{error_note}\n{payload[:8000]}"
-                            )
-                        except Exception:
-                            logger.exception("累积工具结果失败")
-
+            # 无 orchestrator 时的回退路径
+            if not used_orchestrator:
+                tool_call: Optional[ToolCallRequest] = None
+                if mode != "ask":
                     try:
-                        found = self._extract_resources_from_tool_result(result)
-                        if found:
-                            accumulated_resources.extend(found)
-                    except Exception:
-                        logger.exception("提取工具资源失败")
+                        attachment_names = ", ".join(
+                            attachment_label(item) for item in attachments
+                        )
+                        intent_message = message
+                        if attachment_names:
+                            intent_message += f"\n当前附件：{attachment_names}"
+                        intent = self._agent_provider().analyze_intent(
+                            intent_message, use_llm=True
+                        )
+                        tool_call = self._agent_provider().prepare_tool_call(intent)
+                    except Exception as error:
+                        yield sse_event("error", message=f"任务分析失败：{error}")
 
-                    file_log = self._file_log_entry(tool_call, result)
-                    if file_log:
-                        yield sse_event("file_log", entry=file_log)
-
-                elif event_type == "done":
-                    yield self._emit_step(
-                        task_id,
-                        self._step(
-                            analysis_step_id, "任务分析完成", "done", "think"
-                        ),
+                if tool_call:
+                    workspace_paths = self._normalise_workspace(workspace)
+                    needs_confirmation = (
+                        mode == "plan"
+                        or tool_call.user_confirmation_needed
+                        or self._needs_workspace_confirmation(tool_call, workspace_paths)
                     )
-
-                elif event_type == "max_steps":
                     yield self._emit_step(
                         task_id,
                         self._step(
                             analysis_step_id,
-                            f"已达最大步数 {event['steps']}",
+                            f"已识别操作：{tool_call.tool_name}",
                             "done",
                             "think",
                         ),
                     )
+                    if needs_confirmation:
+                        approval_id = f"approval-{uuid.uuid4().hex}"
+                        tool_step_id = f"{task_id}:{turn_id}:approval:{approval_id}"
+                        title = f"确认执行工具：{tool_call.tool_name}"
+                        pending = PendingApproval(
+                            task_id=task_id,
+                            session_id=session_id,
+                            step_id=tool_step_id,
+                            approval_id=approval_id,
+                            tool_call=tool_call,
+                            title=title,
+                            turn_id=turn_id,
+                            path=self._tool_path(tool_call),
+                        )
+                        with self._lock:
+                            self._pending[approval_id] = pending
 
-                elif event_type == "error":
-                    yield sse_event(
-                        "error", message=event.get("message", "编排失败")
-                    )
-                    yield self._emit_step(
-                        task_id,
-                        self._step(
-                            analysis_step_id, "任务分析失败", "failed", "think"
-                        ),
-                    )
+                        approval = {
+                            "id": approval_id,
+                            "title": title,
+                            "toolName": tool_call.tool_name,
+                            "parameters": tool_call.parameters,
+                            "dangerLevel": "high"
+                            if tool_call.user_confirmation_needed
+                            else "medium",
+                            "path": pending.path,
+                            "taskId": task_id,
+                            "stepId": tool_step_id,
+                        }
+                        waiting_step = self._step(
+                            tool_step_id,
+                            title,
+                            "waiting",
+                            "action",
+                            path=pending.path,
+                            approval=approval,
+                        )
+                        yield self._emit_step(task_id, waiting_step)
+                        self._persist_task_status(task_id, "waiting")
+                        yield sse_event("done", task_status="waiting")
+                        return
 
-        # 无 orchestrator 时的回退路径
-        if not used_orchestrator:
-            tool_call: Optional[ToolCallRequest] = None
-            if mode != "ask":
-                try:
-                    attachment_names = ", ".join(
-                        attachment_label(item) for item in attachments
-                    )
-                    intent_message = message
-                    if attachment_names:
-                        intent_message += f"\n当前附件：{attachment_names}"
-                    intent = self._agent_provider().analyze_intent(
-                        intent_message, use_llm=True
-                    )
-                    tool_call = self._agent_provider().prepare_tool_call(intent)
-                except Exception as error:
-                    yield sse_event("error", message=f"任务分析失败：{error}")
+                    async for event in self._execute_tool(
+                        task_id, session_id, tool_call, turn_id
+                    ):
+                        yield event
 
-            if tool_call:
-                workspace_paths = self._normalise_workspace(workspace)
-                needs_confirmation = (
-                    mode == "plan"
-                    or tool_call.user_confirmation_needed
-                    or self._needs_workspace_confirmation(tool_call, workspace_paths)
-                )
+                    try:
+                        fallback_result = await self._agent_provider().execute_tool_async(
+                            tool_call
+                        )
+                        if fallback_result.success and fallback_result.result is not None:
+                            if isinstance(fallback_result.result, dict):
+                                payload = json.dumps(
+                                    fallback_result.result, ensure_ascii=False
+                                )
+                            else:
+                                payload = str(fallback_result.result)
+                            tool_execution_context.append(
+                                f"【工具 {tool_call.tool_name} 返回】\n{payload[:8000]}"
+                            )
+                    except Exception:
+                        logger.exception("回退路径累积工具结果失败")
+
+                    return
+
                 yield self._emit_step(
                     task_id,
                     self._step(
-                        analysis_step_id,
-                        f"已识别操作：{tool_call.tool_name}",
-                        "done",
-                        "think",
+                        analysis_step_id, "已完成任务分析", "done", "think"
                     ),
                 )
-                if needs_confirmation:
-                    approval_id = f"approval-{uuid.uuid4().hex}"
-                    tool_step_id = f"{task_id}:{turn_id}:approval:{approval_id}"
-                    title = f"确认执行工具：{tool_call.tool_name}"
-                    pending = PendingApproval(
-                        task_id=task_id,
-                        session_id=session_id,
-                        step_id=tool_step_id,
-                        approval_id=approval_id,
-                        tool_call=tool_call,
-                        title=title,
-                        turn_id=turn_id,
-                        path=self._tool_path(tool_call),
-                    )
-                    with self._lock:
-                        self._pending[approval_id] = pending
 
-                    approval = {
-                        "id": approval_id,
-                        "title": title,
-                        "toolName": tool_call.tool_name,
-                        "parameters": tool_call.parameters,
-                        "dangerLevel": "high"
-                        if tool_call.user_confirmation_needed
-                        else "medium",
-                        "path": pending.path,
-                        "taskId": task_id,
-                        "stepId": tool_step_id,
-                    }
-                    waiting_step = self._step(
-                        tool_step_id,
-                        title,
-                        "waiting",
-                        "action",
-                        path=pending.path,
-                        approval=approval,
-                    )
-                    yield self._emit_step(task_id, waiting_step)
-                    self._persist_task_status(task_id, "waiting")
-                    yield sse_event("done", task_status="waiting")
-                    return
+            if accumulated_resources:
+                yield self._emit_step(
+                    task_id,
+                    self._step(
+                        f"{task_id}:{turn_id}:resources",
+                        f"相关资源 {len(accumulated_resources)} 个",
+                        "done",
+                        "resource",
+                        resources=accumulated_resources,
+                    ),
+                )
 
-                async for event in self._execute_tool(
-                    task_id, session_id, tool_call, turn_id
-                ):
-                    yield event
+            rag_context: Optional[str] = None
+            rag_resources: Optional[List[Dict[str, Any]]] = None
 
-                try:
-                    fallback_result = await self._agent_provider().execute_tool_async(
-                        tool_call
-                    )
-                    if fallback_result.success and fallback_result.result is not None:
-                        if isinstance(fallback_result.result, dict):
-                            payload = json.dumps(
-                                fallback_result.result, ensure_ascii=False
-                            )
-                        else:
-                            payload = str(fallback_result.result)
-                        tool_execution_context.append(
-                            f"【工具 {tool_call.tool_name} 返回】\n{payload[:8000]}"
-                        )
-                except Exception:
-                    logger.exception("回退路径累积工具结果失败")
-
-                return
-
-            yield self._emit_step(
+            async for event in self._stream_answer(
                 task_id,
-                self._step(
-                    analysis_step_id, "已完成任务分析", "done", "think"
-                ),
-            )
-
-        if accumulated_resources:
-            yield self._emit_step(
-                task_id,
-                self._step(
-                    f"{task_id}:{turn_id}:resources",
-                    f"相关资源 {len(accumulated_resources)} 个",
-                    "done",
-                    "resource",
-                    resources=accumulated_resources,
-                ),
-            )
-
-        rag_context: Optional[str] = None
-        rag_resources: Optional[List[Dict[str, Any]]] = None
-
-        async for event in self._stream_answer(
-            task_id,
-            session_id,
-            prior_messages,
-            message,
-            mode,
-            attachments,
-            turn_id,
-            rag_context=rag_context,
-            rag_resources=rag_resources,
-            tool_context=tool_execution_context,
-        ):
-            yield event
+                session_id,
+                prior_messages,
+                message,
+                mode,
+                attachments,
+                turn_id,
+                rag_context=rag_context,
+                rag_resources=rag_resources,
+                tool_context=tool_execution_context,
+            ):
+                yield event
+          finally:
+            end_turn()
 
     async def stream_approval(
         self,
@@ -928,10 +1138,17 @@ class AgentTaskService:
         action: str,
     ) -> AsyncIterator[str]:
         with self._lock:
+            logger.info(
+                "[dsh][task_service] stream_approval: task_id=%r approval_id=%r "
+                "pending_keys=%r",
+                task_id, approval_id, list(self._pending.keys()),
+            )
             pending = self._pending.pop(approval_id, None)
         if pending is None or pending.task_id != task_id:
-            yield sse_event("error", message="审批已失效或不存在")
-            yield sse_event("done", task_status="failed")
+            logger.info(
+                "[dsh][task_service] stream_approval: id 已失效，静默忽略"
+            )
+            yield sse_event("done", task_status="stale")
             return
 
         if action not in {"allow", "allow-always"}:
@@ -953,11 +1170,271 @@ class AgentTaskService:
             yield sse_event("done", task_status="failed")
             return
 
-        async for event in self._execute_tool(
-            pending.task_id,
-            pending.session_id,
-            pending.tool_call,
-            pending.turn_id or "",
-            pending.step_id,
+        # ── 执行工具（内联，避免走 _execute_tool 的抽象层） ──
+        tool_call = pending.tool_call
+        step_id = pending.step_id
+        label = f"执行工具：{tool_call.tool_name}"
+
+        yield self._emit_step(
+            task_id,
+            self._step(
+                step_id,
+                label,
+                "running",
+                "action",
+                path=self._tool_path(tool_call),
+            ),
+        )
+
+        logger.info(
+            "[dsh][task_service] approval executing: %s params=%r",
+            tool_call.tool_name, tool_call.parameters,
+        )
+
+        try:
+            result = await self._agent_provider().execute_tool_async(tool_call)
+        except Exception as error:
+            logger.exception(
+                "[dsh][task_service] approval execution raised: %s",
+                tool_call.tool_name,
+            )
+            result = ToolCallResult(
+                tool_name=tool_call.tool_name,
+                success=False,
+                error=str(error),
+            )
+
+        log = self._agent_provider().format_tool_result(result)
+        status = "done" if result.success else "failed"
+        logger.info(
+            "[dsh][task_service] approval executed: %s\n"
+            "  params=%r\n"
+            "  success=%r\n"
+            "  error=%r\n"
+            "  result_type=%s\n"
+            "  result_preview=%r",
+            tool_call.tool_name,
+            tool_call.parameters,
+            result.success,
+            result.error,
+            type(result.result).__name__,
+            (
+                str(result.result)[:500]
+                if result.result is not None
+                else None
+            ),
+        )
+
+        # 组合 log（格式化结果 + 原始返回）
+        log_parts: List[str] = []
+        if log:
+            log_parts.append(str(log))
+        result_payload = getattr(result, "result", None)
+        if result_payload is not None:
+            try:
+                if isinstance(result_payload, (dict, list, tuple)):
+                    payload_text = json.dumps(
+                        result_payload, ensure_ascii=False, indent=2
+                    )
+                else:
+                    payload_text = str(result_payload)
+                if len(payload_text) > 4000:
+                    payload_text = payload_text[:4000] + "\n… (truncated)"
+                log_parts.append("【原始返回】\n" + payload_text)
+            except Exception:
+                logger.exception("拼接工具原始返回失败")
+        if not result.success and getattr(result, "error", None):
+            log_parts.append(f"【错误】{result.error}")
+        combined_log = "\n\n".join(log_parts) if log_parts else None
+
+        yield self._emit_step(
+            task_id,
+            self._step(
+                step_id,
+                label if result.success else f"{label}（失败）",
+                status,
+                "action",
+                path=self._tool_path(tool_call),
+                log=combined_log,
+            ),
+        )
+
+        file_log = self._file_log_entry(tool_call, result)
+        if file_log:
+            yield sse_event("file_log", entry=file_log)
+
+        # ── 无法恢复 orchestrator → 直接结束 ──
+        if (
+            pending.state_snapshot is None
+            or self._orchestrator_provider is None
         ):
-            yield event
+            final_status = "done" if result.success else "failed"
+            self._session_provider().add_message(
+                pending.session_id, "assistant", log
+            )
+            self._persist_task_status(task_id, final_status)
+            yield sse_event("done", task_status=final_status)
+            return
+
+        # ── 注入结果到 state，恢复 orchestrator ──
+        state = OrchestratorState.from_snapshot(pending.state_snapshot)
+        step_num = pending.step_index
+
+        if result.success:
+            state.mark_success(tool_call.tool_name, tool_call.parameters, step_num)
+            state.add_history(
+                f"Step {step_num}: {tool_call.tool_name}({tool_call.parameters}) "
+                f"→ OK: {log[:400]}"
+            )
+
+            # ── Mem0：审批后成功也写事实 ──
+            try:
+                from .memory_layer import remember_tool_success
+                remember_tool_success(
+                    session_id=state.session_id or pending.session_id,
+                    tool_name=tool_call.tool_name,
+                    params=tool_call.parameters,
+                    result=result.result,
+                )
+            except Exception:
+                logger.exception("remember_tool_success (approval) 失败")
+        else:
+            state.mark_failure(
+                tool_call.tool_name, tool_call.parameters, result.error or ""
+            )
+            state.add_history(
+                f"Step {step_num}: {tool_call.tool_name}({tool_call.parameters}) "
+                f"→ FAIL: {log[:400]}"
+            )
+
+        logger.info(
+            "[dsh][task_service] stream_approval: resuming orchestrator "
+            "from step %d (success=%r)",
+            pending.step_index + 1, result.success,
+        )
+
+        # ── 恢复 orchestrator ──
+        async for evt in self._resume_orchestrator(
+            pending=pending,
+            state=state,
+            start_step=pending.step_index + 1,
+            last_tool_name=tool_call.tool_name,
+            last_tool_ok=result.success,
+            last_tool_log=log,
+        ):
+            yield evt
+
+
+    async def _resume_orchestrator(
+        self,
+        *,
+        pending: PendingApproval,
+        state: OrchestratorState,
+        start_step: int,
+        last_tool_name: str,
+        last_tool_ok: bool,
+        last_tool_log: str,
+    ) -> AsyncIterator[str]:
+        """从审批后的状态恢复 orchestrator，继续循环。
+
+        自动注入最后一次工具执行的结果，让 LLM 决定下一步。
+        """
+        task_id = pending.task_id
+        session_id = pending.session_id
+        turn_id = pending.turn_id or uuid.uuid4().hex[:8]
+        message = pending.goal
+        mode = pending.mode
+        workspace = pending.workspace
+        auto_discover_mcp = pending.auto_discover_mcp
+        memory = self._session_provider()
+        prior_messages = (
+            memory.get_conversation_context(session_id, 20)
+            if session_id
+            else []
+        )
+        
+        analysis_step_id = f"{task_id}:{turn_id}:analysis-resume"
+
+        if mode == "ask":
+            allowed_dangers: Optional[set] = {"safe"}
+        else:
+            allowed_dangers = {"safe", "medium", "high"}
+
+        # 把最后一次工具结果作为上下文传入
+        tag = "成功" if last_tool_ok else "失败"
+        tool_execution_context: List[str] = [
+            f"【工具 {last_tool_name} 返回（{tag}）】\n"
+            f"{(last_tool_log or '')[:8000]}"
+        ]
+        accumulated_resources: List[Dict[str, Any]] = []
+        accumulated_resources.extend(
+            self._collect_session_resources(session_id)
+        )
+
+        orchestrator = self._orchestrator_provider()
+        async for event in orchestrator.run(
+            message,
+            allowed_danger_levels=allowed_dangers,
+            allow_mcp_discovery=auto_discover_mcp,
+            workspace_paths=(
+                self._normalise_workspace(workspace)
+                if mode == "plan"
+                else None
+            ),
+            plan_mode=(mode == "plan"),
+            resume_state=state,
+            resume_from_step=start_step,
+            prior_messages=prior_messages,
+            session_id=session_id,
+        ):
+            async for evt in self._process_orchestrator_event(
+                event,
+                task_id=task_id,
+                session_id=session_id,
+                turn_id=turn_id,
+                message=message,
+                mode=mode,
+                workspace=workspace,
+                auto_discover_mcp=auto_discover_mcp,
+                analysis_step_id=analysis_step_id,
+                tool_execution_context=tool_execution_context,
+                accumulated_resources=accumulated_resources,
+                event_prefix="resume",
+            ):
+                yield evt
+            if event.get("type") == "approval_required":
+                return
+
+        # orchestrator 正常结束（done / max_steps / error）
+        if accumulated_resources:
+            yield self._emit_step(
+                task_id,
+                self._step(
+                    f"{task_id}:{turn_id}:resources",
+                    f"相关资源 {len(accumulated_resources)} 个",
+                    "done",
+                    "resource",
+                    resources=accumulated_resources,
+                ),
+            )
+
+        memory = self._session_provider()
+        prior_messages = (
+            memory.get_conversation_context(session_id, 20)
+            if session_id
+            else []
+        )
+
+        async for evt in self._stream_answer(
+            task_id,
+            session_id,
+            prior_messages,
+            message,
+            mode,
+            [],  # 无附件
+            turn_id,
+            rag_context=None,
+            rag_resources=None,
+            tool_context=tool_execution_context,
+        ):
+            yield evt

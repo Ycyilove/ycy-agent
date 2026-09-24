@@ -52,6 +52,7 @@ from contextlib import redirect_stdout, redirect_stderr
 from typing import Dict, Any, Optional
 
 from .. import tool, get_registry
+from backend.services.sandbox_backend import get_backend as _get_e2b_backend
 
 DANGEROUS_PATTERNS = [
     r'import\s+os\b',
@@ -299,6 +300,24 @@ def run_python_code(code: str, timeout: int = 10) -> ExecutionResult:
     """在安全沙箱中执行Python代码"""
     import time
     start_time = time.time()
+
+    # ── E2B 分支（失败自动回退本地） ──
+    e2b = _get_e2b_backend()
+    if e2b is not None:
+        try:
+            payload = e2b.execute(code, timeout=timeout)
+            return ExecutionResult(
+                success=payload["success"],
+                output=payload["output"],
+                error=payload["error"],
+                execution_time=payload["execution_time"],
+            )
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception(
+                "[sandbox] E2B 执行失败，回退本地沙箱"
+            )
+            # 继续走本地实现
 
     security_error = check_code_security(code)
     if security_error:

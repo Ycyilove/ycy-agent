@@ -37,7 +37,7 @@ async function fetchMcpServers() {
   return Array.isArray(data) ? data : data.servers || [];
 }
 
-export function MCPProvider({ children, autoRefreshMs = 30000 }) {
+export function MCPProvider({ children }) {
   const [state, dispatch] = useReducer(reducer, initialState);
 
   const refresh = useCallback(async () => {
@@ -98,18 +98,46 @@ export function MCPProvider({ children, autoRefreshMs = 30000 }) {
     return res.json();
   }, []);
 
-  useEffect(() => {
-    // 首次用 reload：保证读的是最新文件
-    reload();
-    if (autoRefreshMs > 0) {
-      const timer = setInterval(reload, autoRefreshMs);
-      return () => clearInterval(timer);
+  const toggleServer = useCallback(async (name, enabled) => {
+    const res = await fetch(
+      `${API_BASE}/api/mcp/servers/${encodeURIComponent(name)}/toggle`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(
+          typeof enabled === 'boolean' ? { enabled } : {}
+        ),
+      }
+    );
+    if (!res.ok) {
+      let msg = `切换失败: ${res.status}`;
+      try {
+        const data = await res.json();
+        if (data?.detail) msg = data.detail;
+      } catch {
+        /* ignore */
+      }
+      throw new Error(msg);
     }
-  }, [reload, autoRefreshMs]);
+    return res.json();
+  }, []);
+
+  useEffect(() => {
+    // 首次加载一次；不做定时轮询，避免每 30s 重复请求
+    reload();
+  }, [reload]);
 
   return (
     <MCPContext.Provider
-      value={{ state, dispatch, refresh, reload, addServer, removeServer }}
+      value={{
+        state,
+        dispatch,
+        refresh,
+        reload,
+        addServer,
+        removeServer,
+        toggleServer,
+      }}
     >
       {children}
     </MCPContext.Provider>

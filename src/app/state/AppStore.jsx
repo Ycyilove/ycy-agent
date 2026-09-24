@@ -14,6 +14,9 @@ const initialState = {
   trash: [],
   approvals: [],
   rightCollapsed: false,
+  // 已被前端处理过的 approval id 集合。
+  // 客户端权威，不会被后端 SSE 覆盖。
+  resolvedApprovalIds: new Set(),
 };
 
 function reducer(state, action) {
@@ -249,11 +252,15 @@ function reducer(state, action) {
         ],
       };
 
-    case 'RESOLVE_APPROVAL':
+    case 'RESOLVE_APPROVAL': {
+      const nextResolved = new Set(state.resolvedApprovalIds);
+      nextResolved.add(action.id);
       return {
         ...state,
         approvals: state.approvals.filter((item) => item.id !== action.id),
+        resolvedApprovalIds: nextResolved,
       };
+    }
 
     // ── 工作区：作用在会话上 ──
     case 'ADD_WORKSPACE_DIR': {

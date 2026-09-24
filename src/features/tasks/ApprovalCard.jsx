@@ -1,19 +1,30 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { approveAgentTask } from '../../services/api';
 import { useApp } from '../../app/state/AppContext';
 
 export default function ApprovalCard({ approval, taskId, stepId }) {
   const { dispatch } = useApp();
-  const [resolved, setResolved] = useState(false);
   const [busy, setBusy] = useState(false);
+  const resolvedRef = useRef(false);      // ← 用 ref，跨重渲染保持
 
   const resolve = async (requestedAction) => {
-    if (busy) return;
+    if (resolvedRef.current || busy) return;
+    resolvedRef.current = true;
+
     const resolvedAction = requestedAction === 'save-as' ? 'allow' : requestedAction;
     const currentTaskId = approval.taskId || taskId;
     const currentStepId = approval.stepId || stepId;
     setBusy(true);
-    setResolved(true);
+
+    // 立刻把 step 状态改成 running，让父组件隐藏卡片
+    if (currentStepId) {
+      dispatch({
+        type: 'UPDATE_STEP',
+        taskId: currentTaskId,
+        stepId: currentStepId,
+        patch: { status: 'running' },
+      });
+    }
     dispatch({ type: 'RESOLVE_APPROVAL', id: approval.id });
 
     try {
@@ -52,14 +63,18 @@ export default function ApprovalCard({ approval, taskId, stepId }) {
     }
   };
 
-  if (resolved) return null;
+  // 不再依赖 resolved state 隐藏卡片——父组件根据 step.status 处理
 
   return (
     <div className="rounded-md border border-[var(--warning)]/40 bg-[var(--warning)]/5 p-3">
       <div className="mb-2 flex items-start gap-2">
         <span className="mt-0.5 text-[var(--warning)]">⚠</span>
         <div className="min-w-0 flex-1">
-          <div className="text-sm text-[var(--text)]">{approval.title}</div>
+          {approval.toolName && (
+            <div className="text-[11px] text-[var(--muted)]">
+              工具：<span className="font-mono">{approval.toolName}</span>
+            </div>
+          )}
           {approval.path && (
             <div className="mt-1 truncate font-mono text-[11px] text-[var(--muted)]" title={approval.path}>
               {approval.path}
@@ -71,14 +86,14 @@ export default function ApprovalCard({ approval, taskId, stepId }) {
       <div className="flex flex-wrap items-center gap-2">
         <button
           onClick={() => resolve('allow')}
-          disabled={busy}
+          disabled={busy || resolvedRef.current}
           className="rounded-md bg-[var(--warning)] px-3 py-1 text-xs font-medium text-[var(--bg)] transition-colors hover:bg-[var(--accent-hover)] disabled:opacity-50"
         >
           允许
         </button>
         <button
           onClick={() => resolve('deny')}
-          disabled={busy}
+          disabled={busy || resolvedRef.current}
           className="rounded-md border border-[var(--border)] px-3 py-1 text-xs text-[var(--muted)] transition-colors hover:border-[var(--border-hover)] hover:text-[var(--text)] disabled:opacity-50"
         >
           拒绝
@@ -86,7 +101,7 @@ export default function ApprovalCard({ approval, taskId, stepId }) {
         {approval.canSaveAs && (
           <button
             onClick={() => resolve('save-as')}
-            disabled={busy}
+            disabled={busy || resolvedRef.current}
             className="rounded-md border border-[var(--border)] px-3 py-1 text-xs text-[var(--muted)] transition-colors hover:border-[var(--border-hover)] hover:text-[var(--text)] disabled:opacity-50"
           >
             另存为…
@@ -94,7 +109,7 @@ export default function ApprovalCard({ approval, taskId, stepId }) {
         )}
         <button
           onClick={() => resolve('allow-always')}
-          disabled={busy}
+          disabled={busy || resolvedRef.current}
           className="ml-auto text-[11px] text-[var(--dim)] transition-colors hover:text-[var(--muted)] disabled:opacity-50"
         >
           本次会话始终允许
