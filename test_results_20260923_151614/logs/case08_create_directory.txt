@@ -1,0 +1,83 @@
+﻿=== REQUEST ===
+POST http://localhost:8000/api/agent/tasks/stream
+Content-Type: application/x-www-form-urlencoded
+Body: message=%E5%9C%A8%20D%3A%2Fycy%2FLLM%2FLLM%2Fdata%20%E4%B8%8B%E5%88%9B%E5%BB%BA%E5%90%8D%E4%B8%BA%20'newdir'%20%E7%9A%84%E7%A9%BA%E7%9B%AE%E5%BD%95&mode=ask&history=[]&workspace=[]&skills=[]
+
+=== RESPONSE (HTTP 200 OK) ===
+data: {"type": "task", "task_id": "task-c7cd759f662e4db49f4320b8d7965cb5", "session_id": "eb33a007-06cc-4879-a850-1aec54f8250f", "turn_id": "d4f77963"}
+
+data: {"type": "step", "step": {"id": "task-c7cd759f662e4db49f4320b8d7965cb5:d4f77963:user", "label": "在 D:/ycy/LLM/LLM/data 下创建名为 'newdir' 的空目录", "status": "done", "kind": "user"}}
+
+data: {"type": "step", "step": {"id": "task-c7cd759f662e4db49f4320b8d7965cb5:d4f77963:analysis", "label": "正在理解任务…", "status": "running", "kind": "think"}}
+
+data: {"type": "step", "step": {"id": "task-c7cd759f662e4db49f4320b8d7965cb5:d4f77963:orch-think:1", "label": "直接调用内置工具create_directory完成创建目录的操作", "status": "done", "kind": "think"}}
+
+data: {"type": "step", "step": {"id": "task-c7cd759f662e4db49f4320b8d7965cb5:d4f77963:orch-tool:1", "label": "调用工具：create_directory", "status": "running", "kind": "action", "path": "D:/ycy/LLM/LLM/data/newdir"}}
+
+data: {"type": "step", "step": {"id": "task-c7cd759f662e4db49f4320b8d7965cb5:d4f77963:orch-tool:1", "label": "调用工具：create_directory", "status": "done", "kind": "action", "path": "D:/ycy/LLM/LLM/data/newdir", "log": "✅ 工具 [create_directory] 执行成功\n⏱️ 耗时: 0.002s\n\n📝 结果: 已创建目录 D:/ycy/LLM/LLM/data/newdir\n"}}
+
+data: {"type": "step", "step": {"id": "task-c7cd759f662e4db49f4320b8d7965cb5:d4f77963:orch-think:2", "label": "用户目标已在Step 1中完成", "status": "done", "kind": "think"}}
+
+data: {"type": "step", "step": {"id": "task-c7cd759f662e4db49f4320b8d7965cb5:d4f77963:analysis", "label": "任务分析完成", "status": "done", "kind": "think"}}
+
+data: {"type": "step", "step": {"id": "task-c7cd759f662e4db49f4320b8d7965cb5:d4f77963:thinking", "label": "思考过程", "status": "running", "kind": "think", "log": ""}}
+
+data: {"type": "step", "step": {"id": "task-c7cd759f662e4db49f4320b8d7965cb5:d4f77963:thinking", "label": "思考过程", "status": "running", "kind": "think", "log": ""}}
+
+data: {"type": "step", "step": {"id": "task-c7cd759f662e4db49f4320b8d7965cb5:d4f77963:thinking", "label": "思考过程", "status": "running", "kind": "think", "log": "\n\n"}}
+
+data: {"type": "step", "step": {"id": "task-c7cd759f662e4db49f4320b8d7965cb5:d4f77963:thinking", "label": "思考过程", "status": "running", "kind": "think", "log": "\n\n目录"}}
+
+data: {"type": "step", "step": {"id": "task-c7cd759f662e4db49f4320b8d7965cb5:d4f77963:thinking", "label": "思考过程", "status": "running", "kind": "think", "log": "\n\n目录 '"}}
+
+data: {"type": "step", "step": {"id": "task-c7cd759f662e4db49f4320b8d7965cb5:d4f77963:thinking", "label": "思考过程", "status": "running", "kind": "think", "log": "\n\n目录 'new"}}
+
+data: {"type": "step", "step": {"id": "task-c7cd759f662e4db49f4320b8d7965cb5:d4f77963:thinking", "label": "思考过程", "status": "running", "kind": "think", "log": "\n\n目录 'newdir"}}
+
+data: {"type": "step", "step": {"id": "task-c7cd759f662e4db49f4320b8d7965cb5:d4f77963:thinking", "label": "思考过程", "status": "running", "kind": "think", "log": "\n\n目录 'newdir'"}}
+
+data: {"type": "step", "step": {"id": "task-c7cd759f662e4db49f4320b8d7965cb5:d4f77963:thinking", "label": "思考过程", "status": "running", "kind": "think", "log": "\n\n目录 'newdir' 已"}}
+
+data: {"type": "step", "step": {"id": "task-c7cd759f662e4db49f4320b8d7965cb5:d4f77963:thinking", "label": "思考过程", "status": "running", "kind": "think", "log": "\n\n目录 'newdir' 已成功"}}
+
+data: {"type": "step", "step": {"id": "task-c7cd759f662e4db49f4320b8d7965cb5:d4f77963:thinking", "label": "思考过程", "status": "running", "kind": "think", "log": "\n\n目录 'newdir' 已成功创建"}}
+
+data: {"type": "step", "step": {"id": "task-c7cd759f662e4db49f4320b8d7965cb5:d4f77963:thinking", "label": "思考过程", "status": "running", "kind": "think", "log": "\n\n目录 'newdir' 已成功创建在"}}
+
+data: {"type": "step", "step": {"id": "task-c7cd759f662e4db49f4320b8d7965cb5:d4f77963:thinking", "label": "思考过程", "status": "running", "kind": "think", "log": "\n\n目录 'newdir' 已成功创建在路径"}}
+
+data: {"type": "step", "step": {"id": "task-c7cd759f662e4db49f4320b8d7965cb5:d4f77963:thinking", "label": "思考过程", "status": "running", "kind": "think", "log": "\n\n目录 'newdir' 已成功创建在路径 D"}}
+
+data: {"type": "step", "step": {"id": "task-c7cd759f662e4db49f4320b8d7965cb5:d4f77963:thinking", "label": "思考过程", "status": "running", "kind": "think", "log": "\n\n目录 'newdir' 已成功创建在路径 D:/"}}
+
+data: {"type": "step", "step": {"id": "task-c7cd759f662e4db49f4320b8d7965cb5:d4f77963:thinking", "label": "思考过程", "status": "running", "kind": "think", "log": "\n\n目录 'newdir' 已成功创建在路径 D:/yc"}}
+
+data: {"type": "step", "step": {"id": "task-c7cd759f662e4db49f4320b8d7965cb5:d4f77963:thinking", "label": "思考过程", "status": "running", "kind": "think", "log": "\n\n目录 'newdir' 已成功创建在路径 D:/ycy"}}
+
+data: {"type": "step", "step": {"id": "task-c7cd759f662e4db49f4320b8d7965cb5:d4f77963:thinking", "label": "思考过程", "status": "running", "kind": "think", "log": "\n\n目录 'newdir' 已成功创建在路径 D:/ycy/"}}
+
+data: {"type": "step", "step": {"id": "task-c7cd759f662e4db49f4320b8d7965cb5:d4f77963:thinking", "label": "思考过程", "status": "running", "kind": "think", "log": "\n\n目录 'newdir' 已成功创建在路径 D:/ycy/LL"}}
+
+data: {"type": "step", "step": {"id": "task-c7cd759f662e4db49f4320b8d7965cb5:d4f77963:thinking", "label": "思考过程", "status": "running", "kind": "think", "log": "\n\n目录 'newdir' 已成功创建在路径 D:/ycy/LLM"}}
+
+data: {"type": "step", "step": {"id": "task-c7cd759f662e4db49f4320b8d7965cb5:d4f77963:thinking", "label": "思考过程", "status": "running", "kind": "think", "log": "\n\n目录 'newdir' 已成功创建在路径 D:/ycy/LLM/"}}
+
+data: {"type": "step", "step": {"id": "task-c7cd759f662e4db49f4320b8d7965cb5:d4f77963:thinking", "label": "思考过程", "status": "running", "kind": "think", "log": "\n\n目录 'newdir' 已成功创建在路径 D:/ycy/LLM/LL"}}
+
+data: {"type": "step", "step": {"id": "task-c7cd759f662e4db49f4320b8d7965cb5:d4f77963:thinking", "label": "思考过程", "status": "running", "kind": "think", "log": "\n\n目录 'newdir' 已成功创建在路径 D:/ycy/LLM/LLM"}}
+
+data: {"type": "step", "step": {"id": "task-c7cd759f662e4db49f4320b8d7965cb5:d4f77963:thinking", "label": "思考过程", "status": "running", "kind": "think", "log": "\n\n目录 'newdir' 已成功创建在路径 D:/ycy/LLM/LLM/data"}}
+
+data: {"type": "step", "step": {"id": "task-c7cd759f662e4db49f4320b8d7965cb5:d4f77963:thinking", "label": "思考过程", "status": "running", "kind": "think", "log": "\n\n目录 'newdir' 已成功创建在路径 D:/ycy/LLM/LLM/data 下"}}
+
+data: {"type": "step", "step": {"id": "task-c7cd759f662e4db49f4320b8d7965cb5:d4f77963:thinking", "label": "思考过程", "status": "running", "kind": "think", "log": "\n\n目录 'newdir' 已成功创建在路径 D:/ycy/LLM/LLM/data 下。"}}
+
+data: {"type": "step", "step": {"id": "task-c7cd759f662e4db49f4320b8d7965cb5:d4f77963:thinking", "label": "思考过程", "status": "done", "kind": "think", "log": ""}}
+
+data: {"type": "step", "step": {"id": "task-c7cd759f662e4db49f4320b8d7965cb5:d4f77963:answer", "label": "Agent 回复", "status": "done", "kind": "answer", "log": "\n\n目录 'newdir' 已成功创建在路径 D:/ycy/LLM/LLM/data 下。"}}
+
+data: {"type": "done", "task_status": "done"}
+
+data: [DONE]
+
+

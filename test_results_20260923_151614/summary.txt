@@ -1,0 +1,29 @@
+﻿测试时间: 2026-09-23 15:22:54
+Base URL: http://localhost:8000
+Data Dir: D:/ycy/LLM/LLM/data
+
+总计: 9  通过: 6  失败: 3
+
+[PASS] 0.1 服务健康检查 (0s)
+       ok
+[FAIL] 0.2 模块预加载 (0s)
+       未就绪
+[PASS] 0.3 MCP 状态 (0s)
+       14 tools
+[PASS] 0.4 RAG 状态 (0s)
+       files=1 chunks=1059
+[PASS] 用例1: 列出目录 (78.94s)
+       调用工具：mcp__filesystem__list_directory
+       log: D:\ycy\LLM\LLM\test_results_20260923_151614\logs\case01_list_directory.txt
+[FAIL] 用例3: 写入文件 (122.8s)
+       exists=False content_ok=False
+       log: D:\ycy\LLM\LLM\test_results_20260923_151614\logs\case03_write_file.txt
+[PASS] 用例8: 创建目录 (13.45s)
+       目录存在=True
+       log: D:\ycy\LLM\LLM\test_results_20260923_151614\logs\case08_create_directory.txt
+[FAIL] 用例10: 编辑文件 (131.3s)
+       内容含 production=False
+       log: D:\ycy\LLM\LLM\test_results_20260923_151614\logs\case10_edit_file.txt
+[PASS] 用例11: 复合指令：列出目录 + 读取文件 + 计数 (53.46s)
+       list=True read=True count=True
+       log: D:\ycy\LLM\LLM\test_results_20260923_151614\logs\case11_composite_list_read_count.txt

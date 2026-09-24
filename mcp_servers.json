@@ -1,0 +1,16 @@
+{
+  "servers": {
+    "filesystem": {
+      "transport": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "D:/ycy/LLM/LLM/data"
+      ],
+      "connect_timeout": 10,
+      "call_timeout": 30,
+      "retries": 2
+    }
+  }
+}

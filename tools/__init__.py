@@ -30,6 +30,9 @@ class ToolMetadata:
     examples: List[str] = field(default_factory=list)
     category: str = "general"
     danger_level: str = "safe"
+    input_schema: Optional[Dict[str, Any]] = None
+    origin: str = "builtin"
+    idempotent: bool = False
 
 
 class ToolRegistry:
@@ -62,14 +65,14 @@ class ToolRegistry:
                             "description": f"参数 {param_name}"
                         }
 
-            self._tools[tool_name] = func
-            self._metadata[tool_name] = ToolMetadata(
+            self.register_callable(
+                func,
                 name=tool_name,
                 description=tool_description,
                 parameters=tool_params,
-                examples=examples or [],
+                examples=examples,
                 category=category,
-                danger_level=danger_level
+                danger_level=danger_level,
             )
 
             @wraps(func)
@@ -83,9 +86,44 @@ class ToolRegistry:
 
         return decorator
 
+    def register_callable(
+        self,
+        func: Callable,
+        name: str,
+        description: str = "",
+        parameters: Dict = None,
+        examples: List[str] = None,
+        category: str = "general",
+        danger_level: str = "safe",
+        input_schema: Dict[str, Any] = None,
+        origin: str = "builtin",
+        idempotent: bool = False,
+    ) -> Callable:
+        """Register a runtime callable, including async MCP handlers."""
+        self._tools[name] = func
+        self._metadata[name] = ToolMetadata(
+            name=name,
+            description=description or getattr(func, "__doc__", "") or "",
+            parameters=dict(parameters or {}),
+            examples=examples or [],
+            category=category,
+            danger_level=danger_level,
+            input_schema=input_schema,
+            origin=origin,
+            idempotent=idempotent,
+        )
+        return func
+
     def get_tool(self, name: str) -> Optional[Callable]:
         """获取工具函数"""
         return self._tools.get(name)
+
+    def unregister(self, name: str) -> bool:
+        """Remove a runtime tool and its metadata."""
+        existed = name in self._tools or name in self._metadata
+        self._tools.pop(name, None)
+        self._metadata.pop(name, None)
+        return existed
 
     def get_all_tools(self) -> Dict[str, Callable]:
         """获取所有工具"""
@@ -114,7 +152,8 @@ class ToolRegistry:
                 "description": meta.description,
                 "parameters": meta.parameters,
                 "category": meta.category,
-                "danger_level": meta.danger_level
+                "danger_level": meta.danger_level,
+                "origin": meta.origin,
             })
         return descriptions
 

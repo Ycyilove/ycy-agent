@@ -4,17 +4,27 @@
 """
 
 from . import get_registry
-from .sandbox import run_python_code
-from .data_tools import read_csv, analyze_csv, read_excel, export_to_csv
-from .file_tools import list_files, rename_file, convert_file_format, get_file_info
-from .time_tools import (
+from .tools_def.sandbox import run_python_code
+from .tools_def.data import read_csv, analyze_csv, read_excel, export_to_csv
+from .tools_def.file import (
+    list_files,
+    rename_file,
+    convert_file_format,
+    get_file_info,
+    read_text_file,
+    write_file,
+    edit_file,
+    create_directory,
+    move_file,
+)
+from .tools_def.time import (
     calculate_time_difference,
     add_time,
     get_current_time,
     format_timestamp,
     calculate_age
 )
-from .network_tools import (
+from .tools_def.network import (
     http_get,
     http_post,
     http_put,
@@ -23,6 +33,17 @@ from .network_tools import (
     parse_html,
     fetch_json
 )
+from .tools_def.mysql import (
+    mysql_connect,
+    mysql_query,
+    mysql_execute,
+    mysql_show_tables,
+    mysql_describe_table,
+    mysql_show_databases,
+    mysql_count
+)
+from .tools_def import knowledge as knowledge_tools  # noqa: F401
+from . import mcp_discovery  # noqa: F401
 
 
 def load_all_tools():
@@ -54,5 +75,12 @@ __all__ = [
     'check_url_status',
     'parse_html',
     'fetch_json',
-    'load_all_tools'
+    'mysql_connect',
+    'mysql_query',
+    'mysql_execute',
+    'mysql_show_tables',
+    'mysql_describe_table',
+    'mysql_show_databases',
+    'mysql_count',
+    'load_all_tools',
 ]

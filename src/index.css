@@ -2,33 +2,41 @@
 @tailwind components;
 @tailwind utilities;
 
+/* 全局基础样式。设计令牌由 src/styles/tokens.css 提供，
+   该文件已在 App.jsx 顶部导入，这里不再重复导入以避免
+   PostCSS 对 @import 顺序的限制。 */
+
 :root {
-  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
-  line-height: 1.5;
-  font-weight: 400;
   color-scheme: dark;
-  color: rgba(255, 255, 255, 0.87);
-  background-color: #0f0f23;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
+html,
+body,
+#root {
+  height: 100%;
+}
+
 body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
+  background-color: var(--bg);
+  color: var(--text);
 }
 
 #root {
-  width: 100%;
-  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
 }
 
-/* 自定义滚动条 */
+/* 自定义滚动条（作用于任何带 .scrollbar-thin 的容器） */
 .scrollbar-thin::-webkit-scrollbar {
   width: 6px;
+  height: 6px;
 }
 
 .scrollbar-thin::-webkit-scrollbar-track {
@@ -36,12 +44,31 @@ body {
 }
 
 .scrollbar-thin::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.15);
+  background: rgba(255, 255, 255, 0.12);
   border-radius: 3px;
 }
 
 .scrollbar-thin::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.25);
+  background: rgba(255, 255, 255, 0.2);
+}
+
+/* 全局滚动条（作用于 body 与普通容器） */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border-hover);
 }
 
 /* 消息淡入动画 */
@@ -62,15 +89,16 @@ body {
 
 /* 脉冲动画 */
 @keyframes pulse-glow {
-  0%, 100% {
-    box-shadow: 0 0 5px rgba(139, 92, 246, 0.5);
+  0%,
+  100% {
+    box-shadow: 0 0 5px rgba(234, 179, 8, 0.4);
   }
   50% {
-    box-shadow: 0 0 20px rgba(139, 92, 246, 0.8);
+    box-shadow: 0 0 18px rgba(234, 179, 8, 0.7);
   }
 }
 
-/* 渐变背景动画 */
+/* 渐变背景动画（保留备用，当前界面不再使用） */
 @keyframes gradient-shift {
   0% {
     background-position: 0% 50%;
@@ -83,12 +111,14 @@ body {
   }
 }
 
-/* 打字机光标效果 */
+/* 打字机光标效果（保留备用） */
 @keyframes cursor-blink {
-  0%, 50% {
+  0%,
+  50% {
     opacity: 1;
   }
-  51%, 100% {
+  51%,
+  100% {
     opacity: 0;
   }
 }

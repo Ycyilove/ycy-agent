@@ -1,0 +1,82 @@
+﻿{
+    "timestamp":  "2026-09-23T15:22:54.9271164+08:00",
+    "base_url":  "http://localhost:8000",
+    "data_dir":  "D:/ycy/LLM/LLM/data",
+    "total":  9,
+    "passed":  6,
+    "failed":  3,
+    "results":  [
+                    {
+                        "name":  "0.1 服务健康检查",
+                        "passed":  true,
+                        "detail":  "ok",
+                        "duration_sec":  0,
+                        "log_file":  "",
+                        "timestamp":  "2026-09-23T15:16:14.7771861+08:00"
+                    },
+                    {
+                        "name":  "0.2 模块预加载",
+                        "passed":  false,
+                        "detail":  "未就绪",
+                        "duration_sec":  0,
+                        "log_file":  "",
+                        "timestamp":  "2026-09-23T15:16:14.7843945+08:00"
+                    },
+                    {
+                        "name":  "0.3 MCP 状态",
+                        "passed":  true,
+                        "detail":  "14 tools",
+                        "duration_sec":  0,
+                        "log_file":  "",
+                        "timestamp":  "2026-09-23T15:16:14.8102463+08:00"
+                    },
+                    {
+                        "name":  "0.4 RAG 状态",
+                        "passed":  true,
+                        "detail":  "files=1 chunks=1059",
+                        "duration_sec":  0,
+                        "log_file":  "",
+                        "timestamp":  "2026-09-23T15:16:14.8891978+08:00"
+                    },
+                    {
+                        "name":  "用例1: 列出目录",
+                        "passed":  true,
+                        "detail":  "调用工具：mcp__filesystem__list_directory",
+                        "duration_sec":  78.94,
+                        "log_file":  "D:\\ycy\\LLM\\LLM\\test_results_20260923_151614\\logs\\case01_list_directory.txt",
+                        "timestamp":  "2026-09-23T15:17:33.8314805+08:00"
+                    },
+                    {
+                        "name":  "用例3: 写入文件",
+                        "passed":  false,
+                        "detail":  "exists=False content_ok=False",
+                        "duration_sec":  122.8,
+                        "log_file":  "D:\\ycy\\LLM\\LLM\\test_results_20260923_151614\\logs\\case03_write_file.txt",
+                        "timestamp":  "2026-09-23T15:19:36.6392458+08:00"
+                    },
+                    {
+                        "name":  "用例8: 创建目录",
+                        "passed":  true,
+                        "detail":  "目录存在=True",
+                        "duration_sec":  13.45,
+                        "log_file":  "D:\\ycy\\LLM\\LLM\\test_results_20260923_151614\\logs\\case08_create_directory.txt",
+                        "timestamp":  "2026-09-23T15:19:50.1078676+08:00"
+                    },
+                    {
+                        "name":  "用例10: 编辑文件",
+                        "passed":  false,
+                        "detail":  "内容含 production=False",
+                        "duration_sec":  131.3,
+                        "log_file":  "D:\\ycy\\LLM\\LLM\\test_results_20260923_151614\\logs\\case10_edit_file.txt",
+                        "timestamp":  "2026-09-23T15:22:01.4209648+08:00"
+                    },
+                    {
+                        "name":  "用例11: 复合指令：列出目录 + 读取文件 + 计数",
+                        "passed":  true,
+                        "detail":  "list=True read=True count=True",
+                        "duration_sec":  53.46,
+                        "log_file":  "D:\\ycy\\LLM\\LLM\\test_results_20260923_151614\\logs\\case11_composite_list_read_count.txt",
+                        "timestamp":  "2026-09-23T15:22:54.8830805+08:00"
+                    }
+                ]
+}
