@@ -12,10 +12,17 @@ from __future__ import annotations
 import json
 import logging
 import re
+from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, FrozenSet, List, Optional
 
 from . import registry, get_registry
+
+# ── per-task 允许工具集（async-safe） ──
+# 用 frozenset 保证不可变，避免被下游意外修改
+_allowed_tools_var: ContextVar[Optional[FrozenSet[str]]] = ContextVar(
+    "tool_agent_allowed_tools", default=None
+)
 
 # 兼容 re-export
 from .guidance import extract_guidance
@@ -367,7 +374,7 @@ class ToolAgent:
         self.llm_intent_recognizer = LLMIntentRecognizer()
         self.tool_descriptions = self.registry.get_tool_descriptions()
         self._mcp_client_manager = None
-        self._allowed_tools: Optional[set] = None
+        # _allowed_tools 不再是实例属性，改为 contextvars（见 _allowed_tools 属性）
         
     def set_mcp_client_manager(self, manager) -> None:
         self._mcp_client_manager = manager
@@ -376,13 +383,28 @@ class ToolAgent:
             type(manager).__name__,
         )
 
-    # [新增] 设置本次会话允许使用的工具集合
+    # ── per-task 允许工具集（contextvars） ──
+
+    @property
+    def _allowed_tools(self) -> Optional[FrozenSet[str]]:
+        """当前任务的允许工具集。未设置返回 None（表示全部允许）。"""
+        return _allowed_tools_var.get()
+
     def set_available_tools(self, tool_names: List[str]) -> None:
+        """设置当前 asyncio 上下文允许的工具集。
+
+        因为用 contextvars，只影响当前任务及其派生的子任务，
+        不会污染其他并发任务。
+        """
         if not tool_names:
-            self._allowed_tools = None
+            _allowed_tools_var.set(None)
         else:
-            self._allowed_tools = set(tool_names)
+            _allowed_tools_var.set(frozenset(tool_names))
         logger.info(f"[Skills] Allowed tools set to: {len(tool_names)} tools")
+
+    def clear_available_tools(self) -> None:
+        """显式清除当前上下文的允许工具集。"""
+        _allowed_tools_var.set(None)
 
     @staticmethod
     def _is_mcp_tool_name(tool_name: str) -> bool:
@@ -482,8 +504,21 @@ class ToolAgent:
             try:
                 result = await mcp_client.call_tool(tool_name, params)
                 if isinstance(result, dict):
-                    success = result.get("success", True)
-                    error_message = None if success else result.get("error")
+                    # MCP 的 success 是传输层标记，不代表业务成功。
+                    # 优先看 structuredContent 里的业务错误。
+                    sc = result.get("structuredContent")
+                    if isinstance(sc, dict) and sc.get("error"):
+                        success = False
+                        error_message = str(sc.get("error"))
+                    elif "success" in result:
+                        success = bool(result["success"])
+                        error_message = None if success else result.get("error")
+                    elif result.get("error"):
+                        success = False
+                        error_message = str(result["error"])
+                    else:
+                        success = True
+                        error_message = None
                 else:
                     success = True
                     error_message = None
@@ -527,8 +562,16 @@ class ToolAgent:
                 result = await result
             execution_time = time.time() - start_time
             if isinstance(result, dict):
-                success = result.get("success", True)
-                error_message = None if success else result.get("error")
+                if "success" in result:
+                    success = bool(result["success"])
+                    error_message = None if success else result.get("error")
+                elif result.get("error"):
+                    # 有 error 字段但没 success → 视为失败
+                    success = False
+                    error_message = str(result["error"])
+                else:
+                    success = True
+                    error_message = None
             else:
                 success = True
                 error_message = None
@@ -561,6 +604,43 @@ class ToolAgent:
                 parameters=params,
             )
 
+    @staticmethod
+    def _extract_resource_declarations(result: "ToolCallResult") -> List[Dict[str, Any]]:
+        """从工具返回值里提取资源声明（协议：resources 字段）。
+
+        返回的声明交给 task_service 去做实际的 save_bytes / save_file。
+        只负责"读声明"，不落盘。
+        """
+        if not result or not getattr(result, "success", False):
+            return []
+        payload = result.result
+        if not isinstance(payload, dict):
+            return []
+
+        declared = payload.get("resources")
+        if not isinstance(declared, list):
+            return []
+
+        out: List[Dict[str, Any]] = []
+        for item in declared:
+            if not isinstance(item, dict):
+                continue
+            kind = item.get("kind")
+            if not kind:
+                continue
+            out.append({
+                "kind": kind,
+                "filename": item.get("filename") or f"resource.{kind}",
+                "mime": item.get("mime") or item.get("mime_type") or "",
+                "content": item.get("content"),      # bytes 或 base64 字符串
+                "path": item.get("path") or item.get("file_path"),
+                "columns": item.get("columns"),
+                "rows": item.get("rows"),
+                "page_no": item.get("page_no"),
+                "extra": item.get("extra"),
+            })
+        return out
+        
     def format_tool_result(self, result: ToolCallResult) -> str:
         """格式化工具结果。
 
@@ -627,6 +707,7 @@ class ToolAgent:
             output += f"⏱️ 耗时: {result.execution_time:.3f}s\n\n"
 
             if isinstance(result.result, dict):
+                # ── 1. 连接类返回（discovery 工具特有） ──
                 if "tools" in result.result and isinstance(result.result["tools"], list):
                     tools_list = result.result["tools"]
                     if tools_list:
@@ -634,35 +715,113 @@ class ToolAgent:
                         for t in tools_list:
                             output += f"  - {t}\n"
                         output += "\n"
-                if "message" in result.result:
-                    output += f"📝 结果: {result.result['message']}\n"
-                if "output" in result.result:
-                    output += f"📤 输出:\n{result.result['output']}\n"
-                if "data" in result.result:
-                    output += (
-                        f"📦 数据: "
-                        f"{json.dumps(result.result['data'], ensure_ascii=False)[:500]}...\n"
-                    )
-                if guest_tools:
-                    output += f"\n✅ 无需认证的工具：{', '.join(guest_tools)}\n"
 
+                # ── 2. structuredContent（MCP 2024-11 规范，优先级最高） ──
                 structured = result.result.get("structuredContent")
                 if structured is not None:
                     try:
-                        structured_json = json.dumps(structured, ensure_ascii=False, indent=2)
-                        output += f"\n📊 结构化数据:\n{structured_json[:2000]}\n"
+                        output += "📊 结构化数据:\n"
+                        output += json.dumps(
+                            structured, ensure_ascii=False, indent=2
+                        )[:3000]
+                        output += "\n"
                     except Exception:
-                        pass
+                        logger.exception("序列化 structuredContent 失败")
+
+                # ── 3. content 数组：MCP 标准返回 ──
+                content_blocks = result.result.get("content")
+                if isinstance(content_blocks, list) and content_blocks:
+                    for block in content_blocks:
+                        if not isinstance(block, dict):
+                            continue
+                        btype = block.get("type")
+
+                        if btype == "text":
+                            text = block.get("text") or ""
+                            if not text:
+                                continue
+                            # 剥 HTML 注释
+                            import re
+                            text_clean = re.sub(
+                                r"<!--.*?-->", "", text, flags=re.DOTALL
+                            ).strip()
+                            if not text_clean:
+                                text_clean = text.strip()
+
+                            # 尝试解析为 JSON
+                            parsed = None
+                            if text_clean.startswith(("{", "[")):
+                                try:
+                                    parsed = json.loads(text_clean)
+                                except (json.JSONDecodeError, ValueError):
+                                    parsed = None
+
+                            if parsed is not None:
+                                output += "📊 MCP 数据:\n"
+                                try:
+                                    output += json.dumps(
+                                        parsed, ensure_ascii=False, indent=2
+                                    )[:3000]
+                                except Exception:
+                                    output += str(parsed)[:3000]
+                                output += "\n"
+                            else:
+                                # 非 JSON（纯文本、Markdown）
+                                output += f"📄 MCP 返回:\n{text_clean[:2000]}\n"
+
+                        elif btype == "image":
+                            output += "🖼️ [MCP 返回图片，base64 已省略]\n"
+
+                        elif btype == "resource":
+                            res = block.get("resource") or {}
+                            uri = res.get("uri") or ""
+                            output += f"📎 [资源: {uri}]\n"
+
+                # ── 4. 无 content 数组时，退到通用字段 ──
+                if not isinstance(content_blocks, list) or not content_blocks:
+                    if "message" in result.result:
+                        output += f"📝 结果: {result.result['message']}\n"
+                    if "output" in result.result:
+                        output += f"📤 输出:\n{result.result['output']}\n"
+                    if "data" in result.result:
+                        try:
+                            output += "📦 数据:\n"
+                            output += json.dumps(
+                                result.result["data"], ensure_ascii=False, indent=2
+                            )[:2000]
+                            output += "\n"
+                        except Exception:
+                            output += f"📦 数据: {str(result.result['data'])[:2000]}\n"
+
+                    # 兜底：如果上面都没命中，把整个 result 输出
+                    handled_keys = {"content", "structuredContent",
+                                    "tools", "message", "output", "data",
+                                    "isError", "resultType", "success", "_meta"}
+                    leftover = {
+                        k: v for k, v in result.result.items()
+                        if k not in handled_keys
+                    }
+                    if leftover:
+                        try:
+                            output += "📦 其他数据:\n"
+                            output += json.dumps(
+                                leftover, ensure_ascii=False, indent=2
+                            )[:2000]
+                            output += "\n"
+                        except Exception:
+                            pass
+
+                if guest_tools:
+                    output += f"\n✅ 无需认证的工具：{', '.join(guest_tools)}\n"
             else:
                 output += f"📤 结果: {result.result}\n"
 
             return output
 
-        # 失败分支：用失败分类
+        # ── 失败分支：原文在前，hint 只做补充 ──
         error_message = result.error or "(未知错误)"
         failure_type = classify_failure(error_message)
 
-        # 从可用工具里取候选（如果 registry 有）
         available: List[str] = []
         try:
             available = list(self.registry.get_all_metadata().keys())
@@ -676,17 +835,21 @@ class ToolAgent:
             available_tools=available,
         )
 
+        # 1. MCP guidance（MCP 服务器明确给的指令，优先级最高）
         output = directive_block
-        output += recovery_hint
-        output += f"❌ 工具 [{result.tool_name}] 执行失败\n💥 错误: {error_message}\n"
 
+        # 2. 失败原文 —— 核心信息放这里，不遮不掩
+        output += f"❌ 工具 [{result.tool_name}] 执行失败\n"
+        output += f"💥 错误: {error_message}\n"
+
+        # 3. 详细返回（MCP content 原文）
         if isinstance(result.result, dict):
             content_blocks = result.result.get("content") or []
             for block in content_blocks:
                 if isinstance(block, dict) and block.get("type") == "text":
                     text = block.get("text") or ""
-                    if text and text != error_message and len(text) < 800:
-                        output += f"\n📄 详细错误:\n{text}\n"
+                    if text and text != error_message and len(text) < 1500:
+                        output += f"\n📄 详细返回:\n{text}\n"
                         break
             structured = result.result.get("structuredContent")
             if isinstance(structured, dict):
@@ -697,6 +860,10 @@ class ToolAgent:
                     )
                 except Exception:
                     pass
+
+        # 4. hint 放最后，只作为"额外信息"，不抢占注意力
+        if recovery_hint:
+            output += f"\n{recovery_hint}"
 
         return output
 

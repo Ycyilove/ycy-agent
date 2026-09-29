@@ -1,6 +1,6 @@
 import { useReducer, useRef, useCallback, useEffect, useContext } from 'react';
 import { AppContext } from './AppContext';
-import { listAgentTasks } from '../../services/api';
+import { listAgentTasks, listFileLogs } from '../../services/api';
 
 const EMPTY_WORKSPACE = { allowed: [], denied: [] };
 
@@ -204,6 +204,40 @@ function reducer(state, action) {
               session.activeTaskId ||
               taskIds[taskIds.length - 1] ||
               null,
+          },
+        },
+      };
+    }
+
+    case 'HYDRATE_FILE_LOG': {
+      // 合并策略：保留本地已有的，追加后端拉回的，按 time 去重倒序
+      const incoming = action.logs || [];
+      const existingIds = new Set(state.fileLog.map((e) => e.id));
+      const merged = [
+        ...state.fileLog,
+        ...incoming.filter((e) => !existingIds.has(e.id)),
+      ];
+      merged.sort((a, b) => (b.time || 0) - (a.time || 0));
+      return {
+        ...state,
+        fileLog: merged.slice(0, 200),
+      };
+    }
+
+    case 'ADD_TASK_RESOURCE': {
+      const { taskId, resource } = action;
+      const task = state.tasks[taskId];
+      if (!task) return state;
+      const existing = task.resources || [];
+      // 按 id 去重
+      if (existing.some((r) => r.id === resource.id)) return state;
+      return {
+        ...state,
+        tasks: {
+          ...state.tasks,
+          [taskId]: {
+            ...task,
+            resources: [...existing, resource],
           },
         },
       };

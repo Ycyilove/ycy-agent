@@ -1,108 +1,100 @@
 """Tool failure classification + recovery hints.
 
-策略 C：把失败分类，每类给出不同的恢复提示。
+dsh 风格：**默认信任 LLM 能读原文**，只在极少数情况补充
+LLM 从原文拿不到的信息。
+
+只保留一类 hint：
+    - TOOL_NOT_FOUND：LLM 不知道"当前有哪些相似工具"——原文里没有
+
+其他所有错误一律返回空 hint：
+    - 参数名错：`execute_tool_async` 拼的原文已含
+               "工具接受的关键字 + 你传入的"
+    - 参数值错：服务器原文里已含修正建议
+    - 权限/超时/限流/404：LLM 自己读原文能判断
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 
 def classify_failure(error_message: str) -> str:
-    """根据错误文本分类。"""
+    """只分类「LLM 从原文拿不到信息」的情况。
+
+    其余一律 UNCLASSIFIED → 上层不输出 hint。
+    """
     err = (error_message or "").lower()
 
     if any(kw in err for kw in (
-        "tool not found", "unknown tool", "does not exist",
-        "no such tool", "tool_not_found",
+        "tool not found", "unknown tool", "no such tool",
+        "tool_not_found",
     )):
         return "TOOL_NOT_FOUND"
 
-    if any(kw in err for kw in (
-        "missing required argument", "unexpected keyword argument",
-        "missing required '", "unexpected '",
-        "missing required \"", "unexpected \"",
-    )):
-        return "PARAM_NAME_ERROR"
-
-    if any(kw in err for kw in (
-        "invalid value", "couldn't find", "could not find",
-        "out of range", "not supported", "valid values",
-        "should be", "use format", "try the nearest",
-    )):
-        return "PARAM_VALUE_ERROR"
-
-    if any(kw in err for kw in (
-        "permission denied", "forbidden", "unauthorized",
-        "access denied",
-    )):
-        return "PERMISSION_ERROR"
-
-    if any(kw in err for kw in ("rate limit", "too many requests")):
-        return "RATE_LIMIT"
-
-    if any(kw in err for kw in ("timeout", "timed out")):
-        return "TIMEOUT"
-
-    if any(kw in err for kw in (
-        "no agents found", "no results found", "not found",
-        "该能力不存在", "未找到匹配",
-    )):
-        return "BUSINESS_TERMINAL"
-
-    return "RECOVERABLE_GENERIC"
-
-
-def _extract_param_names(error_message: str) -> Dict[str, List[str]]:
-    """从参数错误里提取 missing / unexpected 参数名。"""
-    import re
-    msg = error_message or ""
-
-    missing = re.findall(
-        r"([A-Za-z_][A-Za-z0-9_]*)\s+Missing required argument", msg,
-    )
-    unexpected = re.findall(
-        r"([A-Za-z_][A-Za-z0-9_]*)\s+Unexpected keyword argument", msg,
-    )
-    missing += re.findall(
-        r"missing required ['\"]([A-Za-z_][A-Za-z0-9_]*)['\"]", msg,
-    )
-    unexpected += re.findall(
-        r"unexpected ['\"]([A-Za-z_][A-Za-z0-9_]*)['\"]", msg,
-    )
-    return {
-        "missing": sorted(set(missing)),
-        "unexpected": sorted(set(unexpected)),
-    }
+    # 其他所有情况：不分类。让 LLM 读原文。
+    return "UNCLASSIFIED"
 
 
 def _find_similar_tools(
     failed_tool: str,
     available_tools: Optional[List[str]],
 ) -> List[str]:
-    """根据失败工具的功能，在可用工具里找同类。"""
+    """找同类工具。
+
+    优先同 server（如 mcp__filesystem__write_file → 其他 mcp__filesystem__*），
+    再退到全局关键词匹配。
+    """
     if not available_tools:
         return []
 
     basename = failed_tool.rsplit("__", 1)[-1].lower()
 
-    if "write" in basename or "edit" in basename:
-        kws = ("write", "edit", "create")
-    elif "read" in basename or "get" in basename:
-        kws = ("read", "get")
-    elif "move" in basename or "rename" in basename:
+    # 同 server 前缀
+    server_prefix = ""
+    if failed_tool.startswith("mcp__"):
+        parts = failed_tool.split("__", 2)
+        if len(parts) == 3:
+            server_prefix = f"mcp__{parts[1]}__"
+
+    # 功能关键词分组
+    if any(k in basename for k in ("write", "edit", "create", "save")):
+        kws = ("write", "edit", "create", "save")
+    elif any(k in basename for k in ("read", "get", "cat", "open")):
+        kws = ("read", "get", "cat", "open")
+    elif any(k in basename for k in ("move", "rename")):
         kws = ("move", "rename")
-    elif "search" in basename or "find" in basename:
-        kws = ("search", "find")
-    elif "dir" in basename or "list" in basename:
-        kws = ("list", "dir")
+    elif any(k in basename for k in ("search", "find", "grep", "query")):
+        kws = ("search", "find", "grep", "query")
+    elif any(k in basename for k in ("list", "dir", "tree")):
+        kws = ("list", "dir", "tree")
+    elif any(k in basename for k in ("delete", "remove")):
+        kws = ("delete", "remove")
     else:
+        # 无关键词：只返回同 server 的其他工具
+        if server_prefix:
+            return [
+                name for name in available_tools
+                if name.startswith(server_prefix) and name != failed_tool
+            ][:5]
         return []
 
+    # 同 server 优先
+    same_server = [
+        name for name in available_tools
+        if server_prefix
+        and name.startswith(server_prefix)
+        and name != failed_tool
+        and any(kw in name.lower() for kw in kws)
+    ]
+    if same_server:
+        return same_server[:5]
+
+    # 退到全局匹配
     return [
         name for name in available_tools
-        if any(kw in name.lower() for kw in kws)
-    ]
+        if name != failed_tool
+        and any(kw in name.lower() for kw in kws)
+    ][:5]
 
 
 def get_failure_recovery_hint(
@@ -111,87 +103,17 @@ def get_failure_recovery_hint(
     failed_tool_name: str,
     available_tools: Optional[List[str]] = None,
 ) -> str:
-    """返回格式化的恢复提示块，用于置顶到工具返回结果。"""
+    """返回补充信息块——**只补 LLM 从原文拿不到的信息**。
+
+    其他情况返回空字符串，让 LLM 读原文。
+    """
     if failure_type == "TOOL_NOT_FOUND":
         similar = _find_similar_tools(failed_tool_name, available_tools)
-        lines = [
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-            "🔧 工具名不存在（**不是服务器问题**）",
-            f"   你调用了 `{failed_tool_name}`，但该工具未注册。",
-        ]
-        if similar:
-            lines.append("   **可用相似工具**：")
-            for name in similar[:5]:
-                lines.append(f"     - {name}")
-            lines.append("   **下一步：用上述工具重试，不要用同一个错误名。**")
-        else:
-            lines.append("   **下一步：查看可用工具列表，找功能相同的工具。**")
-        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        return "\n".join(lines) + "\n\n"
-
-    if failure_type == "PARAM_NAME_ERROR":
-        params = _extract_param_names(error_message)
-        lines = [
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-            "🔧 参数名错误（**不是服务器能力问题**）",
-        ]
-        if params["missing"]:
-            lines.append(f"   你必须传以下参数（当前没传）：{params['missing']}")
-        if params["unexpected"]:
-            lines.append(f"   以下参数你多传了（必须删掉）：{params['unexpected']}")
-        lines.append("   **不要换服务器！** 修正参数名后重试**同一个工具**。")
-        lines.append("   **下一步立即用正确的参数名重试**。")
-        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        return "\n".join(lines) + "\n\n"
-
-    if failure_type == "PARAM_VALUE_ERROR":
-        lines = [
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-            "🔧 参数值错误（**服务器给了修正建议**）",
-            "   **不要换服务器！也不要重新搜索！**",
-            "   服务器的建议（你必须遵循）：",
-        ]
-        suggestion = (error_message or "")[:400]
-        for line in suggestion.splitlines():
-            lines.append(f"     {line}")
-        lines.append("   **下一步：按上述建议修改参数值，重试同一个工具。**")
-        lines.append(
-            "   **如果传的是中文地名，先翻译成英文城市级名**"
-            "（例如 \"广州天河区\" → \"Guangzhou\"），"
-            "必要时加国家后缀（如 \"Guangzhou, China\"）。"
-        )
-        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        return "\n".join(lines) + "\n\n"
-
-    if failure_type == "BUSINESS_TERMINAL":
-        return (
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "⛔ 业务终态错误，**立即返回 done=true 并告知用户**。\n"
-            "   不要尝试其他工具或重试。\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        )
-
-    if failure_type == "PERMISSION_ERROR":
-        return (
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "🔒 权限错误。**不要重试同一个工具**。\n"
-            "   尝试换一个工具，或返回 done=true 告知用户需要授权。\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        )
-
-    if failure_type == "TIMEOUT":
-        return (
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "⏱️ 超时。**不要重试同一个工具**。\n"
-            "   尝试换工具，或返回 done=true 告知用户。\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        )
-
-    if failure_type == "RATE_LIMIT":
-        return (
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "🚦 频率限制。**稍后重试或换工具**。\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        )
+        if not similar:
+            return ""
+        lines = ["当前可用的相似工具："]
+        for name in similar[:5]:
+            lines.append(f"  - {name}")
+        return "\n".join(lines) + "\n"
 
     return ""

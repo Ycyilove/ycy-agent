@@ -20,7 +20,7 @@ MODESCOPE_API_KEY = os.getenv(
 MODESCOPE_BASE_URL = 'https://api-inference.modelscope.cn/v1'
 SILICONFLOW_API_KEY = os.getenv(
     'SILICONFLOW_API_KEY',
-    'sk-fkzisgswcbaplwndxwlrjnqayfjcpueizuhnwxcizfdgxglu',
+    'sk-gsyxarvnkavbcihjvicddegjcbfvtrzfvcjkeslwyzguvueg',
 )
 SILICONFLOW_BASE_URL = 'https://api.siliconflow.cn/v1'
 DEFAULT_MODEL = 'Qwen/Qwen3-8B'
@@ -42,7 +42,7 @@ LOCAL_MODEL_CONFIG = LocalModelConfig(
 
 # ── Langfuse 可观测性 ──
 # 开关：LANGFUSE_ENABLED=true 且 PUBLIC/SECRET KEY 非空时才启用
-LANGFUSE_ENABLED = os.getenv('LANGFUSE_ENABLED', 'true').lower() in ('1', 'true', 'yes')
+LANGFUSE_ENABLED = os.getenv('LANGFUSE_ENABLED', 'false').lower() in ('1', 'true', 'yes')
 LANGFUSE_PUBLIC_KEY = os.getenv('LANGFUSE_PUBLIC_KEY', 'pk-lf-b6ce2022-518a-4d12-a9d0-49db68702d34')
 LANGFUSE_SECRET_KEY = os.getenv('LANGFUSE_SECRET_KEY', 'sk-lf-d8d61132-ab0d-4a01-9441-e3eaa5946fff')
 LANGFUSE_HOST = os.getenv('LANGFUSE_HOST', 'https://cloud.langfuse.com')

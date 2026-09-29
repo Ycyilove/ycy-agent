@@ -112,6 +112,20 @@ class SessionMemory:
                 """)
 
                 cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS file_logs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        session_id TEXT NOT NULL,
+                        log_id TEXT NOT NULL UNIQUE,
+                        action TEXT NOT NULL,
+                        path TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        time INTEGER NOT NULL,
+                        created_at TEXT NOT NULL,
+                        FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+                    )
+                """)
+
+                cursor.execute("""
                     CREATE INDEX IF NOT EXISTS idx_messages_session
                     ON messages(session_id, timestamp)
                 """)
@@ -129,6 +143,11 @@ class SessionMemory:
                 cursor.execute("""
                     CREATE INDEX IF NOT EXISTS idx_steps_task
                     ON task_steps(task_id, order_index)
+                """)
+
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_file_logs_session
+                    ON file_logs(session_id, time DESC)
                 """)
 
                 conn.commit()
@@ -274,16 +293,27 @@ class SessionMemory:
             ]
 
     def get_conversation_context(self, session_id, max_messages=20):
+        """返回最近 N 条消息，每条带 timestamp。
+
+        注意：timestamp 是 ISO 字符串，调用方负责格式化。
+        """
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                """SELECT role, content FROM messages
+                """SELECT role, content, timestamp FROM messages
                    WHERE session_id = ?
                    ORDER BY timestamp DESC LIMIT ?""",
                 (session_id, max_messages)
             )
             rows = cursor.fetchall()
-            messages = [{"role": row["role"], "content": row["content"]} for row in reversed(rows)]
+            messages = [
+                {
+                    "role": row["role"],
+                    "content": row["content"],
+                    "timestamp": row["timestamp"],
+                }
+                for row in reversed(rows)
+            ]
             return messages
 
     def search_messages(self, session_id, keyword, limit=10):
@@ -476,69 +506,142 @@ class SessionMemory:
                 return cursor.rowcount > 0
 
     def upsert_step(self, task_id: str, step: Dict[str, Any]) -> bool:
-        """插入或更新步骤。已存在则合并字段。"""
+        """插入或更新步骤。已存在则合并字段。
+
+        用 SQLite 的 INSERT ... ON CONFLICT 避免 SELECT-then-INSERT 竞态。
+        """
         now = datetime.now().isoformat()
         step_id = step.get("id")
         if not step_id:
             return False
+
         with self._lock:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT step_id FROM task_steps WHERE step_id = ?",
-                    (step_id,)
-                )
-                exists = cursor.fetchone() is not None
 
-                if exists:
-                    fields = []
-                    values = []
-                    for key in ("kind", "label", "status", "path", "log"):
-                        if key in step:
-                            fields.append(f"{key} = ?")
-                            values.append(step[key])
-                    if "approval" in step:
-                        fields.append("approval = ?")
-                        values.append(
-                            json.dumps(step["approval"], ensure_ascii=False)
-                            if step["approval"] is not None else None
-                        )
-                    if not fields:
-                        return False
-                    fields.append("updated_at = ?")
-                    values.append(now)
-                    values.append(step_id)
-                    cursor.execute(
-                        f"UPDATE task_steps SET {', '.join(fields)} WHERE step_id = ?",
-                        values
+                # 分配 order_index：只在首次插入时生效；
+                # 已存在时，excluded.order_index 不会被 UPDATE SET 采用。
+                cursor.execute(
+                    "SELECT COALESCE(MAX(order_index), -1) + 1 "
+                    "FROM task_steps WHERE task_id = ?",
+                    (task_id,)
+                )
+                next_order = cursor.fetchone()[0]
+
+                approval_json = (
+                    json.dumps(step["approval"], ensure_ascii=False)
+                    if step.get("approval") is not None else None
+                )
+
+                cursor.execute(
+                    """
+                    INSERT INTO task_steps
+                        (step_id, task_id, kind, label, status, path, log,
+                         approval, order_index, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(step_id) DO UPDATE SET
+                        kind = excluded.kind,
+                        label = excluded.label,
+                        status = excluded.status,
+                        path = COALESCE(excluded.path, task_steps.path),
+                        log = COALESCE(excluded.log, task_steps.log),
+                        approval = COALESCE(excluded.approval, task_steps.approval),
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        step_id,
+                        task_id,
+                        step.get("kind", "think"),
+                        step.get("label", ""),
+                        step.get("status", "pending"),
+                        step.get("path"),
+                        step.get("log"),
+                        approval_json,
+                        next_order,
+                        now,
+                        now,
                     )
-                else:
-                    cursor.execute(
-                        "SELECT COALESCE(MAX(order_index), -1) + 1 FROM task_steps WHERE task_id = ?",
-                        (task_id,)
-                    )
-                    order_index = cursor.fetchone()[0]
-                    cursor.execute(
-                        """INSERT INTO task_steps
-                           (step_id, task_id, kind, label, status, path, log, approval, order_index, created_at, updated_at)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (
-                            step_id,
-                            task_id,
-                            step.get("kind", "think"),
-                            step.get("label", ""),
-                            step.get("status", "pending"),
-                            step.get("path"),
-                            step.get("log"),
-                            json.dumps(step["approval"], ensure_ascii=False)
-                            if step.get("approval") is not None else None,
-                            order_index,
-                            now,
-                            now,
-                        )
-                    )
+                )
                 conn.commit()
                 return True
+
+    # ────────── 文件操作日志 ──────────
+
+    def add_file_log(self, session_id: str, entry: Dict[str, Any]) -> bool:
+        """追加一条文件操作记录。
+
+        entry 结构（跟 SSE file_log 事件一致）：
+            {id, action, path, time, status}
+        """
+        if not session_id or not entry:
+            return False
+        log_id = entry.get("id")
+        if not log_id:
+            return False
+
+        now = datetime.now().isoformat()
+        with self._lock:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                # 用 INSERT OR IGNORE：log_id 重复时静默跳过
+                cursor.execute(
+                    """INSERT OR IGNORE INTO file_logs
+                    (session_id, log_id, action, path, status, time, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        session_id,
+                        log_id,
+                        entry.get("action", ""),
+                        entry.get("path", ""),
+                        entry.get("status", ""),
+                        int(entry.get("time") or 0),
+                        now,
+                    )
+                )
+                conn.commit()
+
+                # 清理：每 session 只保留最近 500 条
+                cursor.execute(
+                    """DELETE FROM file_logs
+                    WHERE session_id = ?
+                        AND id NOT IN (
+                            SELECT id FROM file_logs
+                            WHERE session_id = ?
+                            ORDER BY time DESC
+                            LIMIT 500
+                        )""",
+                    (session_id, session_id)
+                )
+                conn.commit()
+                return cursor.rowcount >= 0
+
+    def list_file_logs(
+        self, session_id: str, limit: int = 200
+    ) -> List[Dict[str, Any]]:
+        """列出某会话的文件操作记录（按时间倒序）。"""
+        if not session_id:
+            return []
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """SELECT log_id, action, path, status, time
+                FROM file_logs
+                WHERE session_id = ?
+                ORDER BY time DESC
+                LIMIT ?""",
+                (session_id, limit)
+            )
+            rows = cursor.fetchall()
+            return [
+                {
+                    "id": row["log_id"],
+                    "action": row["action"],
+                    "path": row["path"],
+                    "status": row["status"],
+                    "time": row["time"],
+                }
+                for row in rows
+            ]
 
     # ────────── 内部工具 ──────────
 

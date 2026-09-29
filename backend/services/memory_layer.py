@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -29,10 +30,35 @@ from typing import Any, Dict, List, Optional
 
 from ..config import MEM0_ENABLED, MEM0_API_KEY, MEM0_CONFIG
 
+from .mem0_debug_log import (
+    begin_task,
+    end_task,
+    record_add,
+    record_recall,
+    record_skip,
+)
+
 logger = logging.getLogger(__name__)
 
 _memory: Optional[Any] = None
 _enabled: bool = False
+
+# ── 初始化完成事件 ──
+# 在 init_mem0() 里 set；wait_until_ready() 里 wait。
+# 懒创建，避免模块 import 时就要求 event loop。
+_ready_event: Optional[asyncio.Event] = None
+_init_lock: Optional[asyncio.Lock] = None
+
+
+def _get_ready_event() -> asyncio.Event:
+    """懒创建 ready event。
+
+    必须在有 running event loop 时调用（首次）。
+    """
+    global _ready_event
+    if _ready_event is None:
+        _ready_event = asyncio.Event()
+    return _ready_event
 
 
 # ─────────────────────────────────────────────────────────────
@@ -156,6 +182,7 @@ def _build_config() -> Dict[str, Any]:
             "provider": "huggingface",
             "config": {
                 "model": "sentence-transformers/all-MiniLM-L6-v2",
+                "embedding_dims": 384,          # ← 也加上
                 "model_kwargs": {
                     "device": "cpu",
                     "cache_folder": hf_cache,
@@ -167,18 +194,23 @@ def _build_config() -> Dict[str, Any]:
             "config": {
                 "collection_name": "agent_facts",
                 "path": qdrant_path,
+                "embedding_model_dims": 384,   # ← 关键
             },
         },
     }
 
 
 def init_mem0() -> bool:
-    """启动时调用。未启用 / 依赖缺失时静默返回 False。"""
+    """启动时调用。未启用 / 依赖缺失时静默返回 False。
+
+    无论成功失败，都会 set ready event，让 wait_until_ready() 不再阻塞。
+    """
     global _memory, _enabled
 
     if not MEM0_ENABLED:
         logger.info("[mem0] MEM0_ENABLED=false，结构化记忆关闭")
         _enabled = False
+        _get_ready_event().set()
         return False
 
     try:
@@ -186,6 +218,7 @@ def init_mem0() -> bool:
     except ImportError:
         logger.info("[mem0] 未安装 mem0ai，结构化记忆关闭")
         _enabled = False
+        _get_ready_event().set()
         return False
 
     try:
@@ -200,6 +233,29 @@ def init_mem0() -> bool:
         _memory = None
         _enabled = False
         return False
+    finally:
+        _get_ready_event().set()
+
+
+async def wait_until_ready(timeout: float = 30.0) -> bool:
+    """等 mem0 初始化完成。返回是否 enabled。
+
+    - 已 ready → 立即返回
+    - 未 ready → 最多等 timeout 秒
+    - 超时 → 返回 False，不抛异常
+    """
+    ev = _get_ready_event()
+    if ev.is_set():
+        return _enabled
+    try:
+        await asyncio.wait_for(ev.wait(), timeout=timeout)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "[mem0] wait_until_ready 超时 (%.1fs)，本任务将无 mem0",
+            timeout,
+        )
+        return False
+    return _enabled
 
 
 # ─────────────────────────────────────────────────────────────
@@ -207,17 +263,50 @@ def init_mem0() -> bool:
 # ─────────────────────────────────────────────────────────────
 
 def _add_fact(session_id: str, fact: str, fact_type: str) -> None:
-    if not _enabled or _memory is None or not session_id or not fact:
+    if not _enabled or _memory is None:
+        logger.info(
+            "[mem0] _add_fact 跳过：enabled=%r memory=%r",
+            _enabled, _memory is not None,
+        )
+        return
+    if not session_id or not fact:
+        logger.warning(
+            "[mem0] _add_fact 跳过：session_id=%r fact=%r",
+            session_id, fact,
+        )
+        record_skip(
+            reason="empty_session_or_fact",
+            fact=fact, fact_type=fact_type, session_id=session_id,
+        )
         return
     try:
+        logger.info(
+            "[mem0] _add_fact 写入: session=%s type=%s fact=%r",
+            session_id, fact_type, fact,
+        )
         _memory.add(
             [{"role": "user", "content": fact}],
             user_id=session_id,
-            infer=False,   # 关键：跳过 LLM 提取
+            infer=False,
             metadata={"fact_type": fact_type},
         )
-    except Exception:
-        logger.exception("[mem0] add 失败: type=%s fact=%r", fact_type, fact[:120])
+        record_add(
+            session_id=session_id,
+            fact=fact,
+            fact_type=fact_type,
+            success=True,
+        )
+    except Exception as exc:
+        logger.exception(
+            "[mem0] add 失败: type=%s fact=%r", fact_type, fact[:120]
+        )
+        record_add(
+            session_id=session_id,
+            fact=fact,
+            fact_type=fact_type,
+            success=False,
+            error=str(exc),
+        )
 
 
 def remember_tool_success(
@@ -231,18 +320,37 @@ def remember_tool_success(
     只在写类工具成功后写入 file_modified；读类工具只在参数里出现
     明确路径时写 file_path。避免每次调用都触发存储。
     """
-    if not _enabled or not session_id:
+    # ── 调试：把每次调用都打出来 ──
+    logger.info(
+        "[mem0] remember_tool_success 入口: enabled=%r session_id=%r "
+        "tool=%s params_keys=%r",
+        _enabled, session_id, tool_name,
+        list(params.keys()) if isinstance(params, dict) else None,
+    )
+
+    if not _enabled:
+        logger.info("[mem0] 跳过：_enabled=False")
+        record_skip(reason="mem0_disabled", tool_name=tool_name, params=params)
+        return
+    if not session_id:
+        logger.warning(
+            "[mem0] 跳过：session_id 为空 (tool=%s)", tool_name,
+        )
+        record_skip(reason="no_session", tool_name=tool_name, params=params)
         return
 
     params_paths = _extract_paths_from_params(tool_name, params)
     result_paths = _extract_paths_from_result(result)
 
+    logger.info(
+        "[mem0] 抽取结果: is_write=%r params_paths=%r result_paths=%r",
+        _is_write_tool(tool_name), params_paths, result_paths,
+    )
+
     if _is_write_tool(tool_name):
-        # 写类：参数 + 返回值都算 file_modified
         for p in _dedup(params_paths + result_paths):
             _add_fact(session_id, p, "file_modified")
     else:
-        # 读类：只记参数里明确给出的路径
         for p in _dedup(params_paths):
             _add_fact(session_id, p, "file_path")
 
@@ -294,7 +402,13 @@ def recall_file_paths(session_id: str, limit: int = 5) -> List[str]:
     texts: List[str] = []
     try:
         if hasattr(_memory, "get_all"):
-            hits = _memory.get_all(user_id=session_id, limit=limit * 3)
+            try:
+                hits = _memory.get_all(
+                    filters={"user_id": session_id},
+                    limit=limit * 3,
+                )
+            except TypeError:
+                hits = _memory.get_all(user_id=session_id, limit=limit * 3)
             texts = _iter_results(hits)
         else:
             hits = _memory.search(
@@ -303,8 +417,10 @@ def recall_file_paths(session_id: str, limit: int = 5) -> List[str]:
             texts = _iter_results(hits)
     except Exception:
         logger.exception("[mem0] recall 失败")
+        record_recall(session_id=session_id, limit=limit, results=[])
         return []
 
+    # 去重 + 截断
     out: List[str] = []
     seen = set()
     for t in texts:
@@ -314,4 +430,6 @@ def recall_file_paths(session_id: str, limit: int = 5) -> List[str]:
         out.append(t)
         if len(out) >= limit:
             break
+
+    record_recall(session_id=session_id, limit=limit, results=out)
     return out

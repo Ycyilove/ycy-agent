@@ -109,6 +109,8 @@ from .routes.rag import create_rag_router
 from .routes.sessions import create_sessions_router
 from .routes.models import create_models_router
 from .routes.health import create_health_router
+from .routes.trash import create_trash_router
+from .routes.resource import create_resource_router
 
 
 logging.basicConfig(
@@ -149,11 +151,25 @@ async def app_lifespan(_app: FastAPI):
     except Exception:
         logger.exception("Langfuse 初始化失败")
 
-    # ── Mem0 初始化（未启用时静默 no-op） ──
+    # ── Mem0 初始化（后台异步，不阻塞启动） ──
+    # Mem0 加载 embedding 模型需要 30-60 秒，放后台避免阻塞服务启动。
+    # 加载完成前，memory_layer 的所有操作是 no-op。
+    async def _init_mem0_background():
+        try:
+            logger.info("[boot] initializing mem0 in background...")
+            await asyncio.to_thread(init_mem0)
+            logger.info("[boot] mem0 initialized")
+        except Exception:
+            logger.exception("Mem0 初始化失败")
+
+    asyncio.create_task(_init_mem0_background())
+
+    # ── 清理过期的 agent 资源 ──
     try:
-        init_mem0()
+        from .services.resource_store import cleanup_expired
+        await asyncio.to_thread(cleanup_expired)
     except Exception:
-        logger.exception("Mem0 初始化失败")
+        logger.exception("清理 agent 资源失败")
 
     try:
         configs = load_mcp_config()
@@ -390,6 +406,10 @@ knowledge_tools.set_rag_provider(get_local_rag_service)
 # ─────────────────────────────────────────────────────────────
 
 app.include_router(create_health_router(get_all_module_status))
+
+app.include_router(create_trash_router())
+
+app.include_router(create_resource_router())
 
 app.include_router(create_tools_router(get_tool_agent))
 

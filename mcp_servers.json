@@ -6,7 +6,8 @@
       "args": [
         "-y",
         "@modelcontextprotocol/server-filesystem",
-        "D:/ycy/LLM/LLM/data"
+        "D:/ycy/LLM/LLM/data",
+        "D:/ycy/LLM/LLM"
       ],
       "connect_timeout": 10,
       "call_timeout": 30,

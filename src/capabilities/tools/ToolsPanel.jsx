@@ -7,12 +7,49 @@ import { parseToolName } from '../../shared/capabilityUtils';
 
 const AUTO_DISCOVER_KEY = 'dsh.autoDiscoverMcpTools';
 
+// 把用户输入归一化成后端 ServerConfigBody 结构
+function normalizeConfig(name, cfg) {
+  if (typeof cfg === 'string') {
+    return { name, transport: 'http', url: cfg };
+  }
+
+  if (cfg.command) {
+    return {
+      name,
+      transport: cfg.transport || 'stdio',
+      command: cfg.command,
+      args: cfg.args || [],
+      env_from: cfg.env_from || {},
+      connect_timeout: cfg.connect_timeout ?? 10,
+      call_timeout: cfg.call_timeout ?? 30,
+      retries: cfg.retries ?? 2,
+      enabled: cfg.enabled ?? true,
+    };
+  }
+
+  if (cfg.url) {
+    return {
+      name,
+      transport: cfg.transport || 'http',
+      url: cfg.url,
+      header_env: cfg.header_env || {},
+      connect_timeout: cfg.connect_timeout ?? 10,
+      call_timeout: cfg.call_timeout ?? 30,
+      retries: cfg.retries ?? 2,
+      enabled: cfg.enabled ?? true,
+    };
+  }
+
+  throw new Error(`配置 "${name}" 既没有 command 也没有 url`);
+}
+
 export default function ToolsPanel({ isOpen, onClose }) {
   const { state: toolsState, refresh: refreshTools } = useTools();
   const {
     state: mcpState,
     reload: reloadMcp,
     addServer,
+    addServerConfig,
     removeServer,
   } = useMCP();
 
@@ -70,12 +107,48 @@ export default function ToolsPanel({ isOpen, onClose }) {
   }, [mcpState.servers]);
 
   const handleImport = async () => {
-    const url = importUrl.trim();
-    if (!url) return;
+    const raw = importUrl.trim();
+    if (!raw) return;
     setImporting(true);
     setImportError('');
+
     try {
-      await addServer(url);
+      if (raw.startsWith('{')) {
+        // ── JSON 形态 ──
+        let parsed;
+        try {
+          parsed = JSON.parse(raw);
+        } catch (e) {
+          throw new Error('JSON 格式错误：' + e.message);
+        }
+
+        if (parsed && typeof parsed === 'object' && parsed.servers) {
+          // 批量：{"servers": {"name": {...}}}
+          const entries = Object.entries(parsed.servers);
+          if (entries.length === 0) throw new Error('servers 为空');
+
+          const failures = [];
+          for (const [name, cfg] of entries) {
+            try {
+              await addServerConfig(normalizeConfig(name, cfg));
+            } catch (e) {
+              failures.push(`${name}: ${e.message}`);
+            }
+          }
+          if (failures.length) {
+            throw new Error('部分导入失败：\n' + failures.join('\n'));
+          }
+        } else {
+          // 单个配置
+          const name = parsed.name || parsed.registry_name;
+          if (!name) throw new Error('JSON 配置缺少 name 字段');
+          await addServerConfig(normalizeConfig(name, parsed));
+        }
+      } else {
+        // ── URL 形态 ──
+        await addServer(raw);
+      }
+
       setImportUrl('');
       await Promise.all([reloadMcp(), refreshTools()]);
     } catch (err) {
@@ -166,7 +239,7 @@ export default function ToolsPanel({ isOpen, onClose }) {
             )}
           </div>
 
-          {/* 自动搜索 MCP —— 强调开关 */}
+          {/* 自动搜索 MCP 开关 */}
           <label
             className={`flex cursor-pointer items-center gap-3 rounded-md border px-3 py-2.5 transition-colors ${
               autoDiscover
@@ -204,14 +277,29 @@ export default function ToolsPanel({ isOpen, onClose }) {
           </label>
 
           {/* 导入 MCP */}
-          <div className="flex items-center gap-2">
-            <input
-              type="text"
+          <div className="flex items-start gap-2">
+            <textarea
               value={importUrl}
               onChange={(e) => setImportUrl(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleImport()}
-              placeholder="粘贴 MCP 地址（http:// 或 https://）"
-              className="h-8 flex-1 rounded-md border border-[var(--border)] bg-[var(--surface-2)] px-3 text-xs text-[var(--text)] placeholder-[var(--dim)] transition-colors focus:border-[var(--accent)]/60 focus:outline-none"
+              onKeyDown={(e) => {
+                if (
+                  e.key === 'Enter' &&
+                  !e.shiftKey &&
+                  !e.nativeEvent.isComposing
+                ) {
+                  e.preventDefault();
+                  handleImport();
+                }
+              }}
+              rows={2}
+              spellCheck={false}
+              placeholder={
+                '粘贴 MCP 地址，或 JSON 配置（Shift+Enter 换行）：\n' +
+                '• URL：https://mcp.example.com/mcp\n' +
+                '• stdio：{"name":"fs","command":"npx","args":["-y","@mcp/server-filesystem","D:/data"]}\n' +
+                '• 批量：{"servers":{...}}'
+              }
+              className="min-h-[52px] flex-1 resize-y rounded-md border border-[var(--border)] bg-[var(--surface-2)] px-3 py-1.5 font-mono text-[11px] leading-snug text-[var(--text)] placeholder-[var(--dim)] transition-colors focus:border-[var(--accent)]/60 focus:outline-none"
             />
             <button
               type="button"
@@ -224,7 +312,7 @@ export default function ToolsPanel({ isOpen, onClose }) {
           </div>
 
           {importError && (
-            <div className="rounded-md border border-[var(--danger)]/30 bg-[var(--danger)]/10 px-2 py-1 text-[11px] text-[var(--danger)]">
+            <div className="whitespace-pre-wrap break-all rounded-md border border-[var(--danger)]/30 bg-[var(--danger)]/10 px-2 py-1 text-[11px] text-[var(--danger)]">
               {importError}
             </div>
           )}

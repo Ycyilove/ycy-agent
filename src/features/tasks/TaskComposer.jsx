@@ -123,6 +123,22 @@ export default function TaskComposer() {
         dispatch({ type: 'ADD_FILE_LOG', entry: event.entry });
         return;
       }
+      
+      if (event.type === 'resource' && event.resource) {
+        dispatch({
+          type: 'ADD_TASK_RESOURCE',
+          taskId,
+          resource: event.resource,
+        });
+        return;
+      }
+
+      if (event.type === 'trash' && event.item) {
+        dispatch({ type: 'ADD_TRASH', item: event.item });
+        // ── 通知 TrashPanel 刷新 ──
+        window.dispatchEvent(new Event('trash-updated'));
+        return;
+      }
 
       if (event.type === 'error') {
         dispatch({

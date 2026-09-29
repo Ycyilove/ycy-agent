@@ -18,7 +18,8 @@ import os
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
@@ -71,7 +72,27 @@ class PendingApproval:
     step_index: int = 1
     state_snapshot: Optional[dict] = None
 
+    # ── 内部：创建时间，用于 TTL 清理 ──
+    _created_at: float = field(default_factory=time.time)
 
+def _looks_base64(s: str) -> bool:
+    if not isinstance(s, str) or len(s) < 32:
+        return False
+    import re as _re
+    return bool(_re.match(r"^[A-Za-z0-9+/=\s]+$", s[:256]))
+
+
+def _dedup_resources(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    seen = set()
+    out = []
+    for r in items:
+        rid = r.get("id")
+        if not rid or rid in seen:
+            continue
+        seen.add(rid)
+        out.append(r)
+    return out
+    
 def sse_event(event_type: str, **payload: Any) -> str:
     """Encode one JSON event for the browser's EventSource parser."""
     return (
@@ -141,6 +162,36 @@ class AgentTaskService:
         self._orchestrator_provider = orchestrator_provider
         self._pending: Dict[str, PendingApproval] = {}
         self._lock = threading.RLock()
+        self._pending_ttl_seconds = 3600   # 1 小时未审批自动清理
+
+    # ────────── 待审批管理 ──────────
+
+    def _store_pending(self, pending: "PendingApproval") -> None:
+        with self._lock:
+            self._purge_expired_locked()
+            self._pending[pending.approval_id] = pending
+
+    def _take_pending(
+        self, approval_id: str, task_id: str
+    ) -> Optional["PendingApproval"]:
+        with self._lock:
+            self._purge_expired_locked()
+            pending = self._pending.pop(approval_id, None)
+        if pending is None or pending.task_id != task_id:
+            return None
+        return pending
+
+    def _purge_expired_locked(self) -> None:
+        """清理超过 TTL 的 pending。必须在锁内调用。"""
+        now = time.time()
+        expired = [
+            aid for aid, p in self._pending.items()
+            if now - getattr(p, "_created_at", now) > self._pending_ttl_seconds
+        ]
+        for aid in expired:
+            self._pending.pop(aid, None)
+        if expired:
+            logger.info("[dsh][pending] purged %d expired approvals", len(expired))
 
     # ────────── 持久化 ──────────
 
@@ -191,6 +242,28 @@ class AgentTaskService:
             memory.update_task(task_id, status=status)
         except Exception:
             logger.exception("持久化任务状态失败: %s", task_id)
+
+    def _persist_file_log(self, session_id: str, entry: Dict[str, Any]) -> None:
+        """持久化文件操作日志。read 操作不落盘。"""
+        if not session_id or not entry:
+            return
+        action = entry.get("action")
+        if action == "read":
+            return   # 读操作太频繁，不持久化
+        memory = self._session_provider()
+        if not hasattr(memory, "add_file_log"):
+            return
+        try:
+            memory.add_file_log(session_id, entry)
+        except Exception:
+            logger.exception("持久化 file_log 失败: %s", entry.get("id"))
+
+    def _emit_file_log(
+        self, session_id: str, entry: Dict[str, Any]
+    ) -> str:
+        """持久化 + 发 SSE。"""
+        self._persist_file_log(session_id, entry)
+        return sse_event("file_log", entry=entry)
 
     def _emit_step(self, task_id: str, step: Dict[str, Any]) -> str:
         self._persist_step(task_id, step)
@@ -339,26 +412,75 @@ class AgentTaskService:
                 return value
         return None
 
+    # 内置工具 → 动作映射
+    _FILE_ACTION_MAP: Dict[str, str] = {
+        # 读
+        "list_files": "read",
+        "read_csv": "read",
+        "read_excel": "read",
+        "get_file_info": "read",
+        "read_text_file": "read",
+        "read_file_range": "read",
+        "read_pdf_text": "read",
+        "read_pdf_metadata": "read",
+        "read_docx_text": "read",
+        "read_docx_tables": "read",
+        "search_content": "read",
+        "search_files": "read",
+        # 写
+        "write_file": "write",
+        "edit_file": "write",
+        "write_excel": "write",
+        "edit_excel": "write",
+        "add_excel_sheet": "write",
+        "write_docx": "write",
+        "edit_docx": "write",
+        "convert_file_format": "write",
+        "merge_pdfs": "write",
+        "split_pdf": "write",
+        "create_directory": "write",
+        # 移动
+        "rename_file": "move",
+        "move_file": "move",
+        # 删除（若将来新增）
+        "delete_file": "delete",
+        "remove_file": "delete",
+    }
+
+    @staticmethod
+    def _infer_mcp_action(tool_name: str) -> Optional[str]:
+        """从 MCP 工具名推断动作。"""
+        if not tool_name.startswith("mcp__"):
+            return None
+        base = tool_name.rsplit("__", 1)[-1].lower()
+        if any(k in base for k in ("write", "edit", "create", "append",
+                                   "patch", "save", "update")):
+            return "write"
+        if any(k in base for k in ("move", "rename")):
+            return "move"
+        if any(k in base for k in ("delete", "remove", "unlink")):
+            return "delete"
+        if any(k in base for k in ("read", "list", "get", "search",
+                                   "find", "stat", "info")):
+            return "read"
+        return None
+
     @staticmethod
     def _file_log_entry(
         tool_call: ToolCallRequest, result: ToolCallResult
     ) -> Optional[Dict[str, Any]]:
-        action_map = {
-            "list_files": "read",
-            "read_csv": "read",
-            "read_excel": "read",
-            "get_file_info": "read",
-            "rename_file": "move",
-            "convert_file_format": "write",
-        }
-        action = action_map.get(tool_call.tool_name)
+        action = AgentTaskService._FILE_ACTION_MAP.get(tool_call.tool_name)
+        if not action:
+            action = AgentTaskService._infer_mcp_action(tool_call.tool_name)
         if not action:
             return None
+
         path = AgentTaskService._tool_path(tool_call)
         if isinstance(result.result, dict):
             path = result.result.get("new_path") or path
         if not path:
             return None
+
         return {
             "id": f"log-{uuid.uuid4().hex}",
             "action": action,
@@ -395,39 +517,246 @@ class AgentTaskService:
             })
         return resources
 
+    @staticmethod
+    def _strip_bytes(obj: Any, _depth: int = 0) -> Any:
+        """递归把 bytes 替换成占位字符串。
+
+        避免 json.dumps / prompt 里出现原始二进制。
+        - dict / list / tuple 递归处理
+        - bytes 替换成 "<binary N bytes>"
+        - 深度超限返回类型名，防止循环引用
+        """
+        if _depth > 10:
+            return str(type(obj).__name__)
+        if isinstance(obj, bytes):
+            return f"<binary {len(obj)} bytes>"
+        if isinstance(obj, dict):
+            return {
+                k: AgentTaskService._strip_bytes(v, _depth + 1)
+                for k, v in obj.items()
+            }
+        if isinstance(obj, list):
+            return [
+                AgentTaskService._strip_bytes(v, _depth + 1)
+                for v in obj
+            ]
+        if isinstance(obj, tuple):
+            return tuple(
+                AgentTaskService._strip_bytes(v, _depth + 1)
+                for v in obj
+            )
+        return obj
+
     def _extract_resources_from_tool_result(
-        self, result: ToolCallResult
+        self,
+        result: ToolCallResult,
+        *,
+        task_id: str = "",
+        session_id: str = "",
     ) -> List[Dict[str, Any]]:
+        """从工具返回里提取可展示资源。
+
+        优先级：
+            1. 显式声明（result.result["resources"]）→ 走契约
+            2. 隐式提取（MCP content / new_path / columns+rows）→ 走 fallback
+
+        所有资源统一走 resource_store，返回统一模型 dict。
+        """
         if not result or not getattr(result, "success", False):
             return []
+
+        from .resource_store import (
+            save_bytes, save_base64, save_file, save_table, save_text,
+        )
+
+        resources: List[Dict[str, Any]] = []
         payload = result.result
         if not isinstance(payload, dict):
             return []
 
-        resources: List[Dict[str, Any]] = []
+        tool_name = result.tool_name
 
+        # ── 1. 显式声明（新契约） ──
+        declared = payload.get("resources")
+        if isinstance(declared, list) and declared:
+            for item in declared:
+                if not isinstance(item, dict):
+                    continue
+                kind = item.get("kind")
+                filename = item.get("filename") or f"{tool_name}_{kind}"
+                mime = item.get("mime") or item.get("mime_type") or ""
+
+                # 表格
+                if kind == "table":
+                    cols = item.get("columns")
+                    rows = item.get("rows")
+                    if isinstance(cols, list) and isinstance(rows, list):
+                        res = save_table(
+                            cols, rows,
+                            filename=filename,
+                            source="tool",
+                            source_tool=tool_name,
+                            task_id=task_id,
+                            session_id=session_id,
+                        )
+                        resources.append(res.to_dict())
+                    continue
+
+                # 文件路径
+                path = item.get("path") or item.get("file_path")
+                if isinstance(path, str) and path:
+                    res = save_file(
+                        path,
+                        filename=filename,
+                        mime=mime,
+                        source="tool",
+                        source_tool=tool_name,
+                        task_id=task_id,
+                        session_id=session_id,
+                    )
+                    if res is not None:
+                        resources.append(res.to_dict())
+                    continue
+
+                # bytes / base64 / 文本
+                content = item.get("content")
+                if isinstance(content, bytes):
+                    res = save_bytes(
+                        content,
+                        filename=filename,
+                        mime=mime,
+                        source="tool",
+                        source_tool=tool_name,
+                        task_id=task_id,
+                        session_id=session_id,
+                    )
+                    if res is not None:
+                        resources.append(res.to_dict())
+                elif isinstance(content, str):
+                    if content.startswith("data:") or _looks_base64(content):
+                        res = save_base64(
+                            content,
+                            filename=filename,
+                            mime=mime,
+                            source="tool",
+                            source_tool=tool_name,
+                            task_id=task_id,
+                            session_id=session_id,
+                        )
+                    else:
+                        res = save_text(
+                            content,
+                            filename=filename,
+                            source="tool",
+                            source_tool=tool_name,
+                            task_id=task_id,
+                            session_id=session_id,
+                        )
+                    if res is not None:
+                        resources.append(res.to_dict())
+
+            if resources:
+                return _dedup_resources(resources)
+
+        # ── 2. 隐式提取（fallback） ──
+
+        # 2a. 旧 resources 字段（已带 url）
         listed = payload.get("resources")
         if isinstance(listed, list):
             for item in listed:
                 if isinstance(item, dict) and item.get("url"):
                     resources.append(item)
 
-        single = payload.get("resource")
-        if isinstance(single, dict) and single.get("url"):
-            resources.append(single)
+        # 2b. MCP content 数组
+        content_blocks = payload.get("content")
+        if isinstance(content_blocks, list):
+            for idx, block in enumerate(content_blocks):
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type")
 
+                if btype == "image":
+                    data = block.get("data") or ""
+                    mime = block.get("mimeType") or "image/png"
+                    if not data:
+                        continue
+                    ext = mimetypes.guess_extension(mime) or ".png"
+                    res = save_base64(
+                        data,
+                        filename=f"{tool_name}_{idx}{ext}",
+                        mime=mime,
+                        source="tool",
+                        source_tool=tool_name,
+                        task_id=task_id,
+                        session_id=session_id,
+                    )
+                    if res is not None:
+                        resources.append(res.to_dict())
+
+                elif btype == "resource":
+                    res_block = block.get("resource") or {}
+                    uri = res_block.get("uri") or f"{tool_name}_{idx}"
+                    filename = uri.rsplit("/", 1)[-1] or f"resource_{idx}"
+                    mime = res_block.get("mimeType") or ""
+
+                    blob = res_block.get("blob")
+                    if blob:
+                        res = save_base64(
+                            blob,
+                            filename=filename,
+                            mime=mime,
+                            source="tool",
+                            source_tool=tool_name,
+                            task_id=task_id,
+                            session_id=session_id,
+                        )
+                        if res is not None:
+                            resources.append(res.to_dict())
+                        continue
+
+                    text = res_block.get("text")
+                    if text and isinstance(text, str):
+                        res = save_text(
+                            text,
+                            filename=filename if "." in filename else f"{filename}.txt",
+                            source="tool",
+                            source_tool=tool_name,
+                            task_id=task_id,
+                            session_id=session_id,
+                        )
+                        if res is not None:
+                            resources.append(res.to_dict())
+
+        # 2c. 本地文件路径
+        for key in ("new_path", "output_path"):
+            path = payload.get(key)
+            if not isinstance(path, str) or not path:
+                continue
+            res = save_file(
+                path,
+                source="tool",
+                source_tool=tool_name,
+                task_id=task_id,
+                session_id=session_id,
+            )
+            if res is not None:
+                resources.append(res.to_dict())
+
+        # 2d. 表格（内置工具返回 columns+rows）
         columns = payload.get("columns")
         rows = payload.get("rows")
         if isinstance(columns, list) and isinstance(rows, list) and columns:
-            resources.append({
-                "id": f"table-{uuid.uuid4().hex[:8]}",
-                "kind": "table",
-                "filename": payload.get("filename") or result.tool_name,
-                "columns": columns,
-                "rows": rows,
-            })
+            res = save_table(
+                columns, rows,
+                filename=payload.get("filename") or tool_name,
+                source="tool",
+                source_tool=tool_name,
+                task_id=task_id,
+                session_id=session_id,
+            )
+            resources.append(res.to_dict())
 
-        return resources
+        return _dedup_resources(resources)
 
     # ────────── 流式回答 ──────────
 
@@ -634,7 +963,28 @@ class AgentTaskService:
 
         file_log = self._file_log_entry(tool_call, result)
         if file_log:
-            yield sse_event("file_log", entry=file_log)
+            yield self._emit_file_log(session_id, file_log)
+
+        # ── 提取二进制资源 ──
+        try:
+            found = self._extract_resources_from_tool_result(
+                result,
+                task_id=task_id,
+                session_id=session_id,
+            )
+            if found:
+                yield self._emit_step(
+                    task_id,
+                    self._step(
+                        f"{task_id}:{turn_id}:resources:{uuid.uuid4().hex[:6]}",
+                        f"工具产生 {len(found)} 个资源",
+                        "done",
+                        "resource",
+                        resources=found,
+                    ),
+                )
+        except Exception:
+            logger.exception("提取工具资源失败")
 
         self._session_provider().add_message(session_id, "assistant", log)
         final_status = "done" if result.success else "failed"
@@ -704,8 +1054,7 @@ class AgentTaskService:
                 step_index=event.get("step", 1),
                 state_snapshot=event.get("state_snapshot"),
             )
-            with self._lock:
-                self._pending[approval_id] = pending
+            self._store_pending(pending)
 
             approval = {
                 "id": approval_id,
@@ -758,6 +1107,22 @@ class AgentTaskService:
                 else f"调用工具：{tool_call.tool_name}（失败）"
             )
 
+            # ── 1. 提取资源（必须用原始 bytes） ──
+            try:
+                found = self._extract_resources_from_tool_result(
+                    result,
+                    task_id=task_id,
+                    session_id=session_id,
+                )
+                if found:
+                    accumulated_resources.extend(found)
+            except Exception:
+                logger.exception("提取工具资源失败")
+
+            # ── 2. 剥离 bytes（防止污染 json） ──
+            if isinstance(getattr(result, "result", None), dict):
+                result.result = self._strip_bytes(result.result)
+
             log_parts: List[str] = []
             if event.get("log"):
                 log_parts.append(str(event["log"]))
@@ -767,7 +1132,8 @@ class AgentTaskService:
                 try:
                     if isinstance(result_payload, (dict, list, tuple)):
                         payload_text = json.dumps(
-                            result_payload, ensure_ascii=False, indent=2
+                            result_payload, ensure_ascii=False, indent=2,
+                            default=str,     # ← bytes 转成字符串
                         )
                     else:
                         payload_text = str(result_payload)
@@ -797,7 +1163,10 @@ class AgentTaskService:
             if result.result is not None:
                 try:
                     if isinstance(result.result, dict):
-                        payload = json.dumps(result.result, ensure_ascii=False)
+                        payload = json.dumps(
+                            result.result, ensure_ascii=False,
+                            default=str,     # ← bytes 转成字符串
+                        )
                     else:
                         payload = str(result.result)
                     tag = "成功" if result.success else "失败"
@@ -813,16 +1182,24 @@ class AgentTaskService:
                 except Exception:
                     logger.exception("累积工具结果失败")
 
-            try:
-                found = self._extract_resources_from_tool_result(result)
-                if found:
-                    accumulated_resources.extend(found)
-            except Exception:
-                logger.exception("提取工具资源失败")
-
             file_log = self._file_log_entry(tool_call, result)
             if file_log:
-                yield sse_event("file_log", entry=file_log)
+                yield self._emit_file_log(session_id, file_log)
+                # 删除动作且成功 → 额外发 trash 事件
+                if file_log["action"] == "delete" and file_log["status"] == "success":
+                    trash_id = None
+                    trash_path = None
+                    if isinstance(result.result, dict):
+                        trash_id = result.result.get("trash_id")
+                        trash_path = result.result.get("new_path")
+                    yield sse_event("trash", item={
+                        "id": trash_id or file_log["id"],
+                        "original_path": file_log["path"],
+                        "original_name": os.path.basename(file_log["path"]),
+                        "trash_path": trash_path or "",
+                        "deleted_at": datetime.now().isoformat(),
+                        "size": 0,
+                    })
 
         elif event_type == "done":
             yield self._emit_step(
@@ -874,27 +1251,36 @@ class AgentTaskService:
         mode = mode if mode in MODES else "plan"
         session_id = self._ensure_session(session_id, message)
 
+        # ── 每个任务开头重置 per-task 状态 ──
+        # contextvars 在新 asyncio task 里是继承的副本，但显式清一次更保险，
+        # 避免把上一个任务的允许工具集带进来。
+        try:
+            self._agent_provider().clear_available_tools()
+        except Exception:
+            logger.exception("clear_available_tools failed")
+
         # ── 开启 turn：把本次提问的所有 LLM 调用归到同一目录 ──
         begin_turn(
             session_id=session_id,
             task_id=task_id,
             question=message,
         )
+
+        # ── 开启 mem0 记录（per-task） ──
+        try:
+            from .mem0_debug_log import begin_task as begin_mem0_task
+            begin_mem0_task(session_id=session_id, task_id=task_id)
+        except Exception:
+            logger.exception("begin_mem0_task failed")
+
         with set_turn_context(
             session_id=session_id,
             task_id=task_id,
             question=message,
         ):
           try:
-            # 打开自动发现时，重置本任务已试过的 MCP server 集合；
-            # 关闭时不做任何事（orchestrator 会因为 allowed_tool_names 里没有
-            # search_and_connect_mcp 而根本不会触发 discovery）。
-            if auto_discover_mcp:
-                try:
-                    from tools.mcp_discovery import reset_tried_servers
-                    reset_tried_servers()
-                except Exception:
-                    logger.exception("重置 MCP discovery 状态失败")
+            # 说明：tried_servers 的重置由 orchestrator.run() 内部完成，
+            # 这里是 contextvars 语义，per-task 隔离，不需要重复 reset。
                     
             memory = self._session_provider()
             prior_messages = (
@@ -1041,8 +1427,7 @@ class AgentTaskService:
                             turn_id=turn_id,
                             path=self._tool_path(tool_call),
                         )
-                        with self._lock:
-                            self._pending[approval_id] = pending
+                        self._store_pending(pending)
 
                         approval = {
                             "id": approval_id,
@@ -1130,6 +1515,11 @@ class AgentTaskService:
                 yield event
           finally:
             end_turn()
+            try:
+                from .mem0_debug_log import end_task as end_mem0_task
+                end_mem0_task()
+            except Exception:
+                logger.exception("end_mem0_task failed")
 
     async def stream_approval(
         self,
@@ -1143,8 +1533,8 @@ class AgentTaskService:
                 "pending_keys=%r",
                 task_id, approval_id, list(self._pending.keys()),
             )
-            pending = self._pending.pop(approval_id, None)
-        if pending is None or pending.task_id != task_id:
+        pending = self._take_pending(approval_id, task_id)
+        if pending is None:
             logger.info(
                 "[dsh][task_service] stream_approval: id 已失效，静默忽略"
             )
@@ -1225,10 +1615,26 @@ class AgentTaskService:
             ),
         )
 
-        # 组合 log（格式化结果 + 原始返回）
+        # ── 先提取资源（需要读原始 bytes） ──
+        try:
+            found = self._extract_resources_from_tool_result(
+                result,
+                task_id=task_id,
+                session_id=session_id,
+            )
+            if found:
+                accumulated_resources.extend(found)
+        except Exception:
+            logger.exception("提取工具资源失败")
+
+        # ── 再剥离 bytes（防止污染 context / json） ──
+        if isinstance(getattr(result, "result", None), dict):
+            result.result = self._strip_bytes(result.result)
+
         log_parts: List[str] = []
-        if log:
-            log_parts.append(str(log))
+        if event.get("log"):
+            log_parts.append(str(event["log"]))
+
         result_payload = getattr(result, "result", None)
         if result_payload is not None:
             try:
@@ -1261,7 +1667,43 @@ class AgentTaskService:
 
         file_log = self._file_log_entry(tool_call, result)
         if file_log:
-            yield sse_event("file_log", entry=file_log)
+            yield self._emit_file_log(session_id, file_log)
+            # 删除动作且成功 → 额外发 trash 事件
+            if file_log["action"] == "delete" and file_log["status"] == "success":
+                trash_id = None
+                trash_path = None
+                if isinstance(result.result, dict):
+                    trash_id = result.result.get("trash_id")
+                    trash_path = result.result.get("new_path")
+                yield sse_event("trash", item={
+                    "id": trash_id or file_log["id"],
+                    "original_path": file_log["path"],
+                    "original_name": os.path.basename(file_log["path"]),
+                    "trash_path": trash_path or "",
+                    "deleted_at": datetime.now().isoformat(),
+                    "size": 0,
+                })
+
+        # ── 提取二进制资源 ──
+        try:
+            found = self._extract_resources_from_tool_result(
+                result,
+                task_id=task_id,
+                session_id=pending.session_id,
+            )
+            if found:
+                yield self._emit_step(
+                    task_id,
+                    self._step(
+                        f"{task_id}:{step_id}:resources",
+                        f"工具产生 {len(found)} 个资源",
+                        "done",
+                        "resource",
+                        resources=found,
+                    ),
+                )
+        except Exception:
+            logger.exception("提取工具资源失败")
 
         # ── 无法恢复 orchestrator → 直接结束 ──
         if (

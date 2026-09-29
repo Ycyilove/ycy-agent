@@ -104,7 +104,10 @@ class OrchestratorState:
             session_id=snap.get("session_id"),
         )
         st.history = list(snap.get("history", []))
-        st.successful_calls = dict(snap.get("successful_calls", {}))
+        st.successful_calls = {
+            (k[0], k[1]) if isinstance(k, list) else k: v
+            for k, v in snap.get("successful_calls", {})
+        }
         st.failed_calls = dict(snap.get("failed_calls", {}))
         st.succeeded_tool_names = dict(snap.get("succeeded_tool_names", {}))
         st.last_successful_call_key = snap.get("last_successful_call_key")

@@ -1,0 +1,7 @@
+**Case 1（图片）**：提问「用 mcp__apocdata 查一下贵州茅台的实时行情，把图表给我看看」，验证 MCP 返回的 base64 图片被落盘并在前端渲染为 `<img>` 缩略图。
+
+**Case 2（PDF）**：提问「把 D:\ycy\LLM\LLM\data\a.pdf 和 D:\ycy\LLM\LLM\data\b.pdf 合并成 merged.pdf」，验证 `merge_pdfs` 返回的 `new_path` 被复制到资源目录并在前端用 `<embed>` 内嵌预览。
+
+**Case 3（Excel）**：提问「创建一个 Excel 文件 D:\ycy\LLM\LLM\data\people.xlsx，内容为 [{'name':'Alice','age':30},{'name':'Bob','age':25}]」，验证 `write_excel` 返回的 `file_path` 被复制并在前端显示为带文件名、MIME、大小的下载卡片。
+
+**Case 4（危险文件）**：提问「用 run_python_code 执行：open('D:/ycy/LLM/LLM/data/test.exe','wb').write(b'MZ')」，验证 `_is_allowed` 拒绝保存、磁盘无新目录、前端无卡片，主流程不中断。

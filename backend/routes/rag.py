@@ -80,6 +80,17 @@ def create_rag_router(
 
     @router.get("/api/rag/resource/{resource_id}")
     async def rag_resource(resource_id: str):
+        # 统一 alias：优先查统一资源服务，退到 RAG 原生存储
+        from ..services.resource_store import get as get_unified, get_path as get_unified_path
+        unified = get_unified(resource_id)
+        if unified is not None and unified.kind != "table":
+            path = get_unified_path(resource_id)
+            if path is not None:
+                return FileResponse(
+                    path, media_type=unified.mime, filename=unified.filename,
+                )
+
+        # 旧路径兜底
         resource_manager = local_rag_provider().resource_manager
         resource = resource_manager.path_for(resource_id)
         if resource is None:

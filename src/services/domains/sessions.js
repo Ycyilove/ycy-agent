@@ -34,3 +34,6 @@ export const searchSessionMessages = (sessionId, keyword, limit = 10) => {
   const params = new URLSearchParams({ session_id: sessionId, keyword, limit: String(limit) });
   return requestJson(`/api/session/search?${params}`);
 };
+export const listFileLogs = (sessionId, limit = 200) => requestJson(
+  `/api/session/${sessionId}/file-logs?limit=${limit}`
+);

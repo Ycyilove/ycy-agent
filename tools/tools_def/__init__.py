@@ -10,6 +10,7 @@
 
 __all__ = [
     "file",
+    "file_search"
     "sandbox",
     "data",
     "time",

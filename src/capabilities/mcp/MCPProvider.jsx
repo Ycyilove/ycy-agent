@@ -37,6 +37,21 @@ async function fetchMcpServers() {
   return Array.isArray(data) ? data : data.servers || [];
 }
 
+async function parseError(res, fallback) {
+  let msg = `${fallback}: ${res.status}`;
+  try {
+    const data = await res.json();
+    if (data?.detail) {
+      msg = typeof data.detail === 'string'
+        ? data.detail
+        : JSON.stringify(data.detail);
+    }
+  } catch {
+    /* ignore */
+  }
+  return new Error(msg);
+}
+
 export function MCPProvider({ children }) {
   const [state, dispatch] = useReducer(reducer, initialState);
 
@@ -51,7 +66,6 @@ export function MCPProvider({ children }) {
   }, []);
 
   const reload = useCallback(async () => {
-    // 让后端重读 mcp_servers.json，同步新增/删除/变更
     try {
       const res = await fetch(`${API_BASE}/api/mcp/reload`, { method: 'POST' });
       if (!res.ok) throw new Error(`reload failed: ${res.status}`);
@@ -61,22 +75,25 @@ export function MCPProvider({ children }) {
     await refresh();
   }, [refresh]);
 
+  /** URL 导入（原有） */
   const addServer = useCallback(async (url) => {
     const res = await fetch(`${API_BASE}/api/mcp/servers`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ url }),
     });
-    if (!res.ok) {
-      let msg = `添加失败: ${res.status}`;
-      try {
-        const data = await res.json();
-        if (data?.detail) msg = data.detail;
-      } catch {
-        /* ignore */
-      }
-      throw new Error(msg);
-    }
+    if (!res.ok) throw await parseError(res, '添加失败');
+    return res.json();
+  }, []);
+
+  /** 通用配置导入（新增） */
+  const addServerConfig = useCallback(async (config) => {
+    const res = await fetch(`${API_BASE}/api/mcp/servers/config`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(config),
+    });
+    if (!res.ok) throw await parseError(res, '添加失败');
     return res.json();
   }, []);
 
@@ -85,16 +102,7 @@ export function MCPProvider({ children }) {
       `${API_BASE}/api/mcp/servers/${encodeURIComponent(name)}`,
       { method: 'DELETE' }
     );
-    if (!res.ok) {
-      let msg = `移除失败: ${res.status}`;
-      try {
-        const data = await res.json();
-        if (data?.detail) msg = data.detail;
-      } catch {
-        /* ignore */
-      }
-      throw new Error(msg);
-    }
+    if (!res.ok) throw await parseError(res, '移除失败');
     return res.json();
   }, []);
 
@@ -109,21 +117,11 @@ export function MCPProvider({ children }) {
         ),
       }
     );
-    if (!res.ok) {
-      let msg = `切换失败: ${res.status}`;
-      try {
-        const data = await res.json();
-        if (data?.detail) msg = data.detail;
-      } catch {
-        /* ignore */
-      }
-      throw new Error(msg);
-    }
+    if (!res.ok) throw await parseError(res, '切换失败');
     return res.json();
   }, []);
 
   useEffect(() => {
-    // 首次加载一次；不做定时轮询，避免每 30s 重复请求
     reload();
   }, [reload]);
 
@@ -135,6 +133,7 @@ export function MCPProvider({ children }) {
         refresh,
         reload,
         addServer,
+        addServerConfig,
         removeServer,
         toggleServer,
       }}

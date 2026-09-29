@@ -7,6 +7,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
 from backend.services.llm_debug_log import dump_llm_call
@@ -39,6 +40,79 @@ class OrchestratorStep:
     tool_name: Optional[str] = None
     parameters: Dict[str, Any] = field(default_factory=dict)
     done: bool = False
+
+
+# ─────────────────────────────────────────────────────────────
+# 结构化历史（跨 turn 上下文）
+# ─────────────────────────────────────────────────────────────
+
+def _format_relative_time(iso_ts: Optional[str], now_ts: float) -> str:
+    """把 ISO 时间戳转成「刚刚」/「3 分钟前」/「昨天」这类相对时间。
+
+    空输入 / 解析失败 → 返回空字符串。
+    """
+    if not iso_ts:
+        return ""
+    try:
+        dt = datetime.fromisoformat(iso_ts)
+        delta = now_ts - dt.timestamp()
+    except Exception:
+        return ""
+
+    if delta < 0:
+        return "刚刚"
+    if delta < 60:
+        return "刚刚"
+    if delta < 3600:
+        return f"{int(delta // 60)} 分钟前"
+    if delta < 86400:
+        return f"{int(delta // 3600)} 小时前"
+    if delta < 86400 * 7:
+        return f"{int(delta // 86400)} 天前"
+    return dt.strftime("%Y-%m-%d")
+
+
+def _build_structured_history(
+    messages: List[Dict[str, Any]],
+    max_items: int = 6,
+    now_ts: Optional[float] = None,
+) -> str:
+    """把原始消息列表压成结构化历史块。
+
+    设计意图：
+        - **用户消息**：保留内容（截断到 300 字符）——这是用户意图
+        - **assistant 消息**：只标记「已回复」，**不带原文**
+          —— 避免历史里的绝对化结论（如"无法渲染"）污染当前决策
+        - 每条消息带**相对时间**，让 LLM 区分"过去"和"现在"
+    """
+    if not messages:
+        return ""
+    import time as _time
+    now_ts = now_ts if now_ts is not None else _time.time()
+
+    recent = messages[-max_items:]
+    lines: List[str] = []
+    for m in recent:
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role", "user")
+        ts = m.get("timestamp") or ""
+        rel = _format_relative_time(ts, now_ts)
+
+        if role == "user":
+            content = (m.get("content") or "").strip()
+            if not content:
+                continue
+            if len(content) > 300:
+                content = content[:300] + "..."
+            prefix = f"[{rel}] " if rel else ""
+            lines.append(f"- {prefix}用户：{content}")
+        elif role == "assistant":
+            prefix = f"[{rel}] " if rel else ""
+            lines.append(f"- {prefix}Agent 已回复（内容省略）")
+        # 其他 role 忽略
+
+    return "\n".join(lines)
 
 
 class AgentOrchestrator:
@@ -180,11 +254,19 @@ class AgentOrchestrator:
         if not tools:
             return "(无可用工具)"
 
+        # discovery 类工具：完整保留描述，避免截断掉关键引导句
+        _FULL_DESC_TOOLS = frozenset({"search_and_connect_mcp"})
+
         lines = []
         for name, meta in tools.items():
-            desc = (getattr(meta, "description", "") or "").split("\n")[0].strip()
-            if len(desc) > 70:
-                desc = desc[:67] + "..."
+            desc_raw = (getattr(meta, "description", "") or "").strip()
+            if name in _FULL_DESC_TOOLS:
+                # 取前 3 行（保留 "Use this when..." 这类引导）
+                desc = "\n    ".join(desc_raw.split("\n")[:3]).strip()
+            else:
+                desc = desc_raw.split("\n")[0].strip()
+                if len(desc) > 70:
+                    desc = desc[:67] + "..."
 
             tags = getattr(meta, "intent_tags", None) or []
             tag_str = ""
@@ -194,7 +276,13 @@ class AgentOrchestrator:
             # 内置工具打 ⭐，让 LLM 倾向选内置
             marker = "" if name.startswith("mcp__") else "⭐ "
 
-            lines.append(f"- {marker}`{name}`{tag_str}\n    {desc}")
+            # MCP 工具：附上 server 名，让 LLM 知道来源
+            server_note = ""
+            if name.startswith("mcp__"):
+                parts = name.split("__", 2)
+                if len(parts) == 3:
+                    server_note = f"  (MCP server: {parts[1]})"
+            lines.append(f"- {marker}`{name}`{server_note}{tag_str}\n    {desc}")
 
         return "\n".join(lines)
 
@@ -519,22 +607,41 @@ class AgentOrchestrator:
     def _select_shortlist(
         self, goal: str, tools: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """优先用 embedding 筛，失败退到关键词。"""
+        """优先用 embedding 筛，失败退到关键词。
+
+        强制保留 discovery 工具，避免语义相似度低导致被筛掉。
+        """
         # 1. embedding
+        picked = None
         if self._shortlister_provider is not None:
             try:
                 sl = self._shortlister_provider()
                 if sl is not None:
                     picked = sl.shortlist(goal, tools)
-                    if picked is not None:
-                        return picked
             except Exception:
                 logger.exception(
                     "[dsh][orchestrator] shortlister raised, fallback to keyword"
                 )
 
-        # 2. 关键词
-        return self._shortlist_tools(goal, tools)
+        # 2. 关键词兜底
+        if picked is None:
+            picked = self._shortlist_tools(goal, tools)
+
+        # 3. 强制保留关键工具（discovery + fetch_url）
+        if picked is not None:
+            added = []
+            picked = dict(picked)
+            force_keep = self._MCP_DISCOVERY_TOOLS | {"fetch_url"}
+            for name in force_keep:
+                if name in tools and name not in picked:
+                    picked[name] = tools[name]
+                    added.append(name)
+            if added:
+                logger.info(
+                    "[dsh][orchestrator] force-kept tools: %s", added
+                )
+
+        return picked
 
     async def _decide(
         self,
@@ -546,23 +653,18 @@ class AgentOrchestrator:
         # 预筛：优先 embedding，退关键词
         shortlist = self._select_shortlist(goal, tools)
 
-        # 对话历史（最近 N 条）——让 LLM 知道用户前面说了什么
+        # 对话历史（结构化）——只保留用户意图，不保留 assistant 结论
         conversation_block = ""
         if prior_messages:
-            recent = prior_messages[-6:]
-            lines = []
-            for m in recent:
-                role = m.get("role", "user")
-                content = (m.get("content") or "").strip()
-                if not content:
-                    continue
-                # 截断单条消息，避免 prompt 爆
-                if len(content) > 400:
-                    content = content[:400] + "..."
-                lines.append(f"- {role}: {content}")
-            if lines:
+            structured = _build_structured_history(prior_messages, max_items=6)
+            if structured:
                 conversation_block = (
-                    "## 对话历史（最近几条）\n" + "\n".join(lines) + "\n\n"
+                    "## 对话历史（结构化）\n"
+                    + structured
+                    + "\n\n**注意**："
+                    "`Agent 已回复（内容省略）` 只表示上一轮已响应，"
+                    "**不代表当前状态**。历史结论可能已过时——"
+                    "重新审视当前工具目录再决策。\n\n"
                 )
 
         # 如果之前读过文件，把它放进 prompt 的 history 部分
@@ -904,9 +1006,12 @@ class AgentOrchestrator:
             f"## 输出要求\n"
             f"只输出该工具的 JSON 参数对象，不要任何解释，"
             f"不要包裹在 markdown 代码块里。\n"
-            f"确保 JSON 合法、字段名与参数表完全一致。\n"
-            f"**`old_text` 的值必须严格来自上面的文件内容**，不要编造。\n\n"
-            f"示例格式：{{\"file_path\": \"D:/a.txt\", \"content\": \"hello\"}}\n\n"
+            f"确保 JSON 合法、字段名与**参数表完全一致**——"
+            f"**只输出参数表里列出的字段**，不要凭经验添加其他字段。\n\n"
+            f"示例（字段名仅供参考格式，**必须用参数表里的真实字段**）：\n"
+            f"```\n"
+            f"{{\"<参数名1>\": <值1>, \"<参数名2>\": <值2>}}\n"
+            f"```\n\n"
             f"只输出 JSON："
         )
 
@@ -1006,6 +1111,23 @@ class AgentOrchestrator:
         prior_messages: Optional[List[Dict[str, str]]] = None,
         session_id: Optional[str] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
+        # ── 调试：确认 session_id 是否传进来 ──
+        logger.info(
+            "[dsh][orchestrator] run() session_id=%r, "
+            "resume_state=%r, goal=%r",
+            session_id,
+            resume_state is not None,
+            goal[:100],
+        )
+        
+        # ── 等 mem0 ready，避免冷启动首轮写入丢失 ──
+        try:
+            from backend.services.memory_layer import wait_until_ready
+            ready = await wait_until_ready(timeout=30.0)
+            logger.info("[dsh][orchestrator] mem0 ready=%r", ready)
+        except Exception:
+            logger.exception("wait_until_ready 失败，继续执行")
+            
         # 每个任务开始重置"已试过的 MCP 服务器"
         try:
             from tools.mcp_discovery import reset_tried_servers
@@ -1014,7 +1136,22 @@ class AgentOrchestrator:
             logger.exception("failed to reset tried MCP servers")
 
         agent = self._agent_provider()
-        tools = agent.list_all_tools(allowed_danger_levels=allowed_danger_levels)
+
+        def _refresh_tools() -> Dict[str, Any]:
+            """重新从 registry 拉取工具列表。
+
+            MCP discovery 会在任务执行中途动态注册工具，
+            因此必须每步刷新，而不是只在开头取一次。
+            """
+            t = agent.list_all_tools(allowed_danger_levels=allowed_danger_levels)
+            if not allow_mcp_discovery:
+                t = {
+                    name: meta for name, meta in t.items()
+                    if name not in self._MCP_DISCOVERY_TOOLS
+                }
+            return t
+
+        tools = _refresh_tools()
         logger.info(
             "[dsh][orchestrator] allowed_dangers=%r, filtered tools count=%d, "
             "has write_file=%r",
@@ -1022,17 +1159,6 @@ class AgentOrchestrator:
             len(tools),
             "write_file" in tools,
         )
-
-        # 关闭自动发现时，隐藏所有 MCP discovery 工具
-        if not allow_mcp_discovery:
-            tools = {
-                name: meta for name, meta in tools.items()
-                if name not in self._MCP_DISCOVERY_TOOLS
-            }
-            logger.info(
-                "[dsh][orchestrator] MCP discovery disabled; hid tools=%r",
-                sorted(self._MCP_DISCOVERY_TOOLS),
-            )
 
         if not tools:
             yield {"type": "error", "message": "当前模式下没有可用的工具"}
@@ -1055,6 +1181,11 @@ class AgentOrchestrator:
             start_step = 1
 
         for step_index in range(start_step, self._max_steps + 1):
+            # ── 每步刷新工具列表 ──
+            # 上一步的 search_and_connect_mcp 可能刚注册了新 MCP 工具，
+            # 不刷新会导致 LLM 选了新工具却被判定为"不存在"。
+            tools = _refresh_tools()
+
             decision = self._try_fast_path(goal, state, tools)
             if decision is None:
                 decision = await self._decide(
