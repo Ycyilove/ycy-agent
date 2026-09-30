@@ -87,13 +87,12 @@ class ToolShortlister:
             if key == self._cache_key:
                 return True
 
+            from tools.semantics import get_intent_tags
             texts = []
             names = []
             for name, meta in tools.items():
                 desc = getattr(meta, "description", "") or ""
-                tags = " ".join(
-                    str(t) for t in (getattr(meta, "intent_tags", None) or [])
-                )
+                tags = " ".join(str(t) for t in get_intent_tags(name))
                 texts.append(f"{name} {desc} {tags}".strip())
                 names.append(name)
 

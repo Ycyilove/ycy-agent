@@ -110,9 +110,11 @@ def _read_lines(path: Path) -> Optional[List[str]]:
 @tool(
     name="search_content",
     description=(
-        "在目录下递归搜索文件内容，支持正则表达式。"
+        "在**本地文件系统**中递归搜索文件内容，支持正则表达式。"
         "返回匹配的文件、行号和该行内容。"
         "适用于「哪个文件定义了 xxx」「哪里用了 yyy」这类问题。"
+        "⚠️ **只搜文件系统，搜不到知识库（RAG）。**"
+        "如果要查用户导入的 PDF/DOCX/TXT 文档，请用 `search_knowledge`。"
     ),
     parameters={
         "pattern": {"type": "str", "description": "正则表达式或普通字符串"},

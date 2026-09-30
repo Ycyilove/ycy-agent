@@ -268,7 +268,7 @@ class AgentOrchestrator:
                 if len(desc) > 70:
                     desc = desc[:67] + "..."
 
-            tags = getattr(meta, "intent_tags", None) or []
+            tags = get_intent_tags(name)
             tag_str = ""
             if tags:
                 tag_str = f"  [tags: {','.join(str(t) for t in tags[:4])}]"
@@ -627,11 +627,18 @@ class AgentOrchestrator:
         if picked is None:
             picked = self._shortlist_tools(goal, tools)
 
-        # 3. 强制保留关键工具（discovery + fetch_url）
+        # 3. 强制保留关键工具（discovery + fetch_url + 知识库工具）
+        # 知识库工具必须保留：embedding shortlist 对"人名 + 获奖"这类
+        # 查询的语义相似度低，容易把 search_knowledge 筛掉。
         if picked is not None:
             added = []
             picked = dict(picked)
-            force_keep = self._MCP_DISCOVERY_TOOLS | {"fetch_url"}
+            force_keep = self._MCP_DISCOVERY_TOOLS | {
+                "fetch_url",
+                "search_knowledge",
+                "knowledge_stats",
+                "list_knowledge_sources",
+            }
             for name in force_keep:
                 if name in tools and name not in picked:
                     picked[name] = tools[name]

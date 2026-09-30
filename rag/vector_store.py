@@ -23,14 +23,24 @@ import numpy as np
 class FAISSVectorStore:
     """FAISS向量存储"""
 
-    def __init__(self, embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2", index_path: str = "./vector_store"):
+    def __init__(
+        self,
+        embedding_model: str = None,
+        index_path: str = "./vector_store",
+    ):
         """
         初始化FAISS向量存储
 
         Args:
-            embedding_model: 嵌入模型名称
+            embedding_model: 嵌入模型名称。None 时从 config 读取。
             index_path: 索引文件保存路径
         """
+        if embedding_model is None:
+            try:
+                from backend.config import RAG_EMBEDDING_MODEL
+                embedding_model = RAG_EMBEDDING_MODEL
+            except ImportError:
+                embedding_model = "BAAI/bge-small-zh-v1.5"
         self.embedding_model = embedding_model
         self.index_path = index_path
         self.index_file = os.path.join(index_path, "faiss.index")
@@ -145,32 +155,40 @@ class FAISSVectorStore:
         added_chunks = 0
         new_file_index = {}
 
-        for idx, (text, filename) in enumerate(zip(texts, filenames)):
+        # ── 按文件名分组：同一文件的多个 chunk 一次性写入 ──
+        # 原实现按 chunk 迭代，但 file_hash 在第 1 个 chunk 后就已存在，
+        # 导致后续 chunk 全部被 continue 跳过，只写入 1 个 chunk。
+        grouped: Dict[str, List[tuple]] = {}
+        for i, (text, filename) in enumerate(zip(texts, filenames)):
+            meta = metadata[i] if metadata and i < len(metadata) else {}
+            grouped.setdefault(filename, []).append((text, meta))
+
+        for filename, items in grouped.items():
             file_hash = self._get_file_hash(filename)
 
             if file_hash in self.file_index:
                 continue
 
-            text_list = [text] if isinstance(text, str) else text
-            filename_list = [filename] if isinstance(filename, str) else filename
+            chunk_texts = [t for t, _ in items]
+            if not chunk_texts:
+                continue
 
-            embeddings = self._generate_embeddings(text_list)
+            embeddings = self._generate_embeddings(chunk_texts)
             self.index.add(embeddings)
 
-            meta = metadata[idx] if metadata and idx < len(metadata) else {}
-            for i, (t, fn) in enumerate(zip(text_list, filename_list)):
+            for t, meta in items:
                 self.metadata.append({
                     'text': t,
-                    'filename': fn,
+                    'filename': filename,
                     **meta
                 })
 
             new_file_index[file_hash] = {
                 'filename': filename,
-                'chunk_count': len(text_list),
+                'chunk_count': len(chunk_texts),
                 'added': True
             }
-            added_chunks += len(text_list)
+            added_chunks += len(chunk_texts)
 
         self.file_index.update(new_file_index)
         self._save_index()

@@ -28,6 +28,19 @@ ORCHESTRATOR_PROMPT = """你是一个多步工具编排助手。
     "tool_name": "工具名（done=false 时必填）"
 }
 
+## 信息查询优先级（重要）
+
+当用户询问**具体信息**（文档内容、事实性问题）时，
+严格按以下顺序尝试：
+
+1. **知识库优先**：用 `search_knowledge` 检索。
+   - 知识库（RAG）收录了用户导入的文档，**这是首选信息源**。
+   - 不确定知识库有没有内容时，可以先用 `knowledge_stats`
+     或 `list_knowledge_sources` 查看。
+2. **本地文件系统**：用 `read_text_file` / `search_content` / `list_files`。
+   - ⚠️ `search_content` 只搜**文件系统**，**搜不到知识库内容**。
+3. **外部 MCP 服务**：只有前两者都无结果时，才用 `search_and_connect_mcp`。
+
 ## 决策框架
 
 **核心问题：用户目标需要什么数据/操作？它能不能用现有工具解决？**

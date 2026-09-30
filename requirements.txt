@@ -40,6 +40,9 @@ openai>=1.0.0
 # 中文 NLP 处理
 jieba>=0.42.1
 
+# BM25 混合检索
+rank-bm25>=0.2.2
+
 # MySQL 数据库
 pymysql>=1.1.0
 

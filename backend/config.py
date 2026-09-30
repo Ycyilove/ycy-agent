@@ -13,6 +13,29 @@ os.environ.setdefault('HF_ENDPOINT', 'https://hf-mirror.com')
 os.environ.setdefault('TRANSFORMERS_OFFLINE', '0')
 os.environ.setdefault('HF_HUB_CACHE', os.path.join(PROJECT_ROOT, 'models'))
 
+# ─────────────────────────────────────────────────────────────
+# RAG / 检索 embedding 配置
+# ─────────────────────────────────────────────────────────────
+
+# RAG 知识库的 embedding 模型（中文优化）
+# 换模型后必须清空 vector_store/ 重建索引（维度可能变化）
+RAG_EMBEDDING_MODEL = os.getenv(
+    'RAG_EMBEDDING_MODEL',
+    'BAAI/bge-small-zh-v1.5',
+)
+
+# 工具筛选器的 embedding 模型（保持英文模型，工具名/描述主要是英文）
+SHORTLIST_EMBEDDING_MODEL = os.getenv(
+    'SHORTLIST_EMBEDDING_MODEL',
+    'sentence-transformers/all-MiniLM-L6-v2',
+)
+
+# 检索混合策略
+RAG_TOP_K_DEFAULT = int(os.getenv('RAG_TOP_K_DEFAULT', '15'))
+RAG_BM25_ENABLED = os.getenv('RAG_BM25_ENABLED', 'true').lower() in ('1', 'true', 'yes')
+RAG_QUERY_REWRITE_ENABLED = os.getenv('RAG_QUERY_REWRITE_ENABLED', 'true').lower() in ('1', 'true', 'yes')
+RAG_RRF_K = int(os.getenv('RAG_RRF_K', '60'))
+
 MODESCOPE_API_KEY = os.getenv(
     'MODESCOPE_API_KEY',
     'ms-e0031b6d-4579-45d0-8e43-cd411cb9de1e',
