@@ -17,7 +17,7 @@ MODESCOPE_API_KEY = os.getenv(
 MODESCOPE_BASE_URL = 'https://api-inference.modelscope.cn/v1'
 SILICONFLOW_API_KEY = os.getenv(
     'SILICONFLOW_API_KEY',
-    'sk-fkzisgswcbaplwndxwlrjnqayfjcpueizuhnwxcizfdgxglu',
+    'sk-gsyxarvnkavbcihjvicddegjcbfvtrzfvcjkeslwyzguvueg',
 )
 SILICONFLOW_BASE_URL = 'https://api.siliconflow.cn/v1'
 DEFAULT_MODEL = 'Qwen/Qwen3-8B'

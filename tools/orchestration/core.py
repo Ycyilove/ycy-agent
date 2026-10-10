@@ -190,8 +190,8 @@ class AgentOrchestrator:
             ("list", "dir", "tree", "walk"),
         ),
         (
-            ("搜索", "查找", "search", "find", "grep"),
-            ("search", "find", "list", "grep"),
+            ("搜索", "查找", "最新", "新闻", "消息", "search", "find", "latest", "news"),
+            ("search", "tavily", "brave", "web", "fetch", "http"),
         ),
         (
             ("重命名", "改名", "rename", "move", "移动"),
