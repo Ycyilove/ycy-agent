@@ -191,19 +191,31 @@ def get_knowledge_resource(resource_id: str) -> Dict[str, Any]:
     danger_level="safe",
 )
 def search_knowledge(query: str, top_k: int = 15) -> Dict[str, Any]:
-    """Semantic search with linked resources."""
     try:
         rag = _get_rag()
-        results = rag.search(query, top_k, rewrite=True)
+        results = rag.search(query, top_k)
         resources = rag.resource_manager.collect_refs(results)
-        chunks = [
-            {
-                "text": item.get("text", ""),
+
+        chunks = []
+        for item in results:
+            chunk_text = item.get("text", "")
+            chunk_resources = item.get("resources", []) or []
+            # 给每个资源打上 chunk 关联
+            enriched_resources = []
+            for r in chunk_resources:
+                if not isinstance(r, dict):
+                    continue
+                enriched_resources.append({
+                    **r,
+                    "chunk_preview": chunk_text[:120],
+                    "chunk_filename": item.get("filename", ""),
+                })
+            chunks.append({
+                "text": chunk_text,
                 "filename": item.get("filename", ""),
-                "resources": item.get("resources", []),
-            }
-            for item in results
-        ]
+                "resources": enriched_resources,
+            })
+
         return {
             "success": True,
             "query": query,

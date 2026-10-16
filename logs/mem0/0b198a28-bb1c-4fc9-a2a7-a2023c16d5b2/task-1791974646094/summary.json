@@ -1,0 +1,14 @@
+{
+  "session_id": "0b198a28-bb1c-4fc9-a2a7-a2023c16d5b2",
+  "task_id": "task-1791974646094",
+  "generated_at": "2026-10-15T17:43:55.933277",
+  "stats": {
+    "add_ok": 0,
+    "add_fail": 0,
+    "recall_ok": 2,
+    "recall_fail": 0,
+    "recall_empty": 0,
+    "skip": 0
+  },
+  "facts": {}
+}

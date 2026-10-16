@@ -244,11 +244,21 @@ function ResourceBlock({ resources }) {
                 loading="lazy"
                 className="max-h-40 w-full bg-[var(--bg)] object-contain"
               />
-              <div className="flex items-center gap-1.5 px-2 py-1.5">
-                <ResourceIcon kind="image" className="h-3 w-3 text-[var(--dim)]" />
-                <span className="truncate text-[11px] text-[var(--muted)] group-hover:text-[var(--text)]">
-                  {r.filename}
-                </span>
+              <div className="px-2 py-1.5">
+                <div className="flex items-center gap-1.5">
+                  <ResourceIcon kind="image" className="h-3 w-3 text-[var(--dim)]" />
+                  <span className="truncate text-[11px] text-[var(--muted)] group-hover:text-[var(--text)]">
+                    {r.filename}
+                  </span>
+                </div>
+                {r.chunk_preview && (
+                  <div
+                    className="mt-1 line-clamp-2 text-[10px] leading-snug text-[var(--dim)]"
+                    title={r.chunk_preview}
+                  >
+                    来自：{r.chunk_preview}
+                  </div>
+                )}
               </div>
             </a>
           ))}

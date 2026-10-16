@@ -44,6 +44,20 @@ class BM25Store:
             self._bm25 = None
             self._docs = []
 
+    def is_built(self) -> bool:
+        """索引是否已构建。"""
+        with self._lock:
+            return self._bm25 is not None and bool(self._docs)
+
+    def build(self, metadata: List[Dict]) -> None:
+        """公开的构建入口。入库后调用，避免每次查询重建。"""
+        with self._lock:
+            if self._bm25 is not None and bool(self._docs):
+                return  # 已构建，跳过
+            if not metadata:
+                return
+            self._build(metadata)
+
     def _build(self, metadata: List[Dict]) -> None:
         """从 metadata 构建 BM25 索引。"""
         from rank_bm25 import BM25Okapi
@@ -115,27 +129,25 @@ class BM25Store:
                 })
             return results
 
+def rrf_fuse(*result_lists, k=60, limit=10, weights=None):
+    if weights is None:
+        weights = [1.0] * len(result_lists)
+    if len(weights) != len(result_lists):
+        raise ValueError("weights 数量必须与 result_lists 一致")
 
-def rrf_fuse(
-    *result_lists: List[Dict],
-    k: int = 60,
-    limit: int = 10,
-) -> List[Dict]:
-    """RRF（Reciprocal Rank Fusion）融合多路检索结果。
-
-    score(d) = sum over each list of 1 / (k + rank(d))
-
-    用 (filename, text) 作为去重 key。
-    """
-    scores: Dict[Tuple[str, str], float] = {}
-    items: Dict[Tuple[str, str], Dict] = {}
-
-    for results in result_lists:
+    scores = {}
+    items = {}
+    for results, weight in zip(result_lists, weights):
         for rank, item in enumerate(results):
             key = (item.get("filename", ""), item.get("text", "")[:200])
-            scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank + 1)
+            scores[key] = scores.get(key, 0.0) + weight / (k + rank + 1)
             if key not in items:
                 items[key] = item
 
     fused = sorted(scores.items(), key=lambda x: -x[1])[:limit]
-    return [items[key] for key, _ in fused]
+    out = []
+    for key, rrf_score in fused:
+        item = dict(items[key])
+        item["rrf_score"] = rrf_score
+        out.append(item)
+    return out

@@ -582,6 +582,28 @@ class AgentTaskService:
             for item in declared:
                 if not isinstance(item, dict):
                     continue
+                    
+                # ── 新增：已带 id + url 的资源（如 search_knowledge 返回的）直接透传 ──
+                if item.get("id") and item.get("url"):
+                    resources.append({
+                        "id": item["id"],
+                        "kind": item.get("kind") or "file",
+                        "filename": item.get("filename") or f"{tool_name}_{item['id'][:8]}",
+                        "mime": item.get("mime") or item.get("mime_type") or "",
+                        "url": item["url"],
+                        "source": item.get("source") or "rag",
+                        "source_tool": tool_name,
+                        "page_no": item.get("page_no"),
+                        "size": item.get("size", 0),
+                        # 保留 chunk 关联（如果有）
+                        **(
+                            {"chunk_preview": item["chunk_preview"],
+                            "chunk_filename": item["chunk_filename"]}
+                            if item.get("chunk_preview") else {}
+                        ),
+                    })
+                    continue
+
                 kind = item.get("kind")
                 filename = item.get("filename") or f"{tool_name}_{kind}"
                 mime = item.get("mime") or item.get("mime_type") or ""
@@ -878,9 +900,25 @@ class AgentTaskService:
         if rag_resources:
             try:
                 rag = self._rag_provider()
-                answer_text = rag.resource_manager.resolve_asset_tags(
-                    answer_text, rag_resources
-                )
+                # 统一格式：resource_store / search_knowledge 的资源 → resolve_asset_tags 期望的格式
+                normalized = []
+                for r in rag_resources:
+                    rid = r.get("id")
+                    url = r.get("url") or ""
+                    if not rid or not url:
+                        continue
+                    normalized.append({
+                        "id": rid,
+                        "url": url,
+                        "filename": r.get("filename") or "",
+                        "kind": r.get("kind") or "image",
+                        "markdown": r.get("markdown")
+                            or f"![{r.get('filename', '')}]({url})",
+                    })
+                if normalized:
+                    answer_text = rag.resource_manager.resolve_asset_tags(
+                        answer_text, normalized
+                    )
             except Exception as error:
                 logger.warning("解析 asset 标签失败: %s", error)
 
@@ -1498,7 +1536,11 @@ class AgentTaskService:
                 )
 
             rag_context: Optional[str] = None
-            rag_resources: Optional[List[Dict[str, Any]]] = None
+            rag_resources: Optional[List[Dict[str, Any]]] = [
+                r for r in accumulated_resources
+                if r.get("source_tool") == "search_knowledge"
+                or r.get("source") == "rag"
+            ]
 
             async for event in self._stream_answer(
                 task_id,

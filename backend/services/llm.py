@@ -1,5 +1,4 @@
-"""Model and legacy text-RAG integrations.
-
+"""
 惰性加载设计：
     - 顶层不 import anthropic / langchain_openai / langchain_huggingface /
       langchain_community / langchain_core / langchain_text_splitters
@@ -58,8 +57,9 @@ class ModelScopeLLM:
         try:
             from .lazy_loader import ensure_module_loaded_sync
             ensure_module_loaded_sync("langchain_openai")
-        except (ImportError, RuntimeError):
-            # 如果 lazy_loader 不可用，直接 import（降级）
+        except Exception:
+            # lazy_loader 未注册/不可用时，降级为直接 import
+            # 注：实际抛的是 KeyError，不是 RuntimeError
             pass
         from langchain_openai import ChatOpenAI
         self.llm = ChatOpenAI(
@@ -158,7 +158,7 @@ class MultimodalClient:
         try:
             from .lazy_loader import ensure_module_loaded_sync
             ensure_module_loaded_sync("anthropic")
-        except (ImportError, RuntimeError):
+        except Exception:
             pass
         import anthropic
         self.client = anthropic.Anthropic(
@@ -194,71 +194,3 @@ class MultimodalClient:
             max_tokens=max_tokens,
         )
         return response.content[0].text
-
-
-class RAGService:
-    """Legacy in-memory Chroma RAG API kept for compatibility endpoints.
-
-    关键设计：
-        - __init__ 不加载任何 langchain 组件
-        - 加载发生在 _ensure_components 里（thread pool 中）
-    """
-
-    def __init__(self, embedding_model: str = 'sentence-transformers/all-MiniLM-L6-v2'):
-        self.embedding_model = embedding_model
-        self.embeddings = None
-        self.vector_store = None
-        self.text_splitter = None
-
-    def _ensure_components(self):
-        """确保所有组件已初始化。必须在线程池里调用。"""
-        if self.embeddings is not None:
-            return
-        try:
-            from .lazy_loader import ensure_module_loaded_sync
-            ensure_module_loaded_sync("langchain_huggingface")
-            ensure_module_loaded_sync("langchain_text_splitters")
-        except (ImportError, RuntimeError):
-            pass
-        from langchain_huggingface import HuggingFaceEmbeddings
-        from langchain_text_splitters import RecursiveCharacterTextSplitter
-
-        self.embeddings = HuggingFaceEmbeddings(
-            model_name=self.embedding_model,
-            model_kwargs={'device': 'cpu'},
-        )
-        self.text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-
-    def add_texts(self, texts: List[str]):
-        self._ensure_components()
-        if not self.vector_store:
-            try:
-                from .lazy_loader import ensure_module_loaded_sync
-                ensure_module_loaded_sync("langchain_community")
-            except (ImportError, RuntimeError):
-                pass
-            from langchain_community.vectorstores import Chroma
-            self.vector_store = Chroma.from_texts(texts=texts, embedding=self.embeddings)
-        else:
-            self.vector_store.add_texts(texts)
-        return f'已添加 {len(texts)} 条文本'
-
-    def retrieve(self, query: str, top_k: int = 3) -> List[str]:
-        self._ensure_components()
-        if not self.vector_store:
-            return ['知识库未初始化，请先加载文档']
-        return [doc.page_content for doc in self.vector_store.similarity_search(query, k=top_k)]
-
-    def rag_answer(self, query: str, llm: 'ModelScopeLLM' = None) -> str:
-        self._ensure_components()
-        llm = llm or ModelScopeLLM()
-        context = '\n\n'.join(self.retrieve(query, top_k=3))
-        prompt = f'''基于以下参考信息回答用户问题。如果参考信息不足以回答，请说明无法回答。
-
-参考信息:
-{context}
-
-用户问题: {query}
-
-回答:'''
-        return llm.generate([{'role': 'user', 'content': prompt}])

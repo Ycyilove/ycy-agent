@@ -14,8 +14,11 @@ from rag import (
     BM25Store,
     rrf_fuse,
 )
+from rag.text_utils import clean_cn_spaces, clean_heading
 
 from .llm import ModelScopeLLM
+
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -47,48 +50,149 @@ class LocalRAGService:
         )
 
     def add_file(self, file_content: bytes, filename: str) -> Dict:
+        """解析文件 → Docling 层级解析 → HybridChunker 切块 → 索引。"""
+        import tempfile
+        import os as _os
+
         document_id = uuid.uuid4().hex
         resources_ingested = False
+        tmp_path = None
+
         try:
             if self.vector_store.file_exists(filename):
                 return {'status': 'warning', 'message': f'文件 {filename} 已存在，跳过添加'}
 
-            text = DocumentParserFactory.parse_file(file_content, filename)
-            if not text or not text.strip():
-                return {'status': 'error', 'message': '文件内容为空'}
+            # ── 1. 写入临时文件（Docling 需要磁盘路径）──
+            ext = _os.path.splitext(filename)[1] or ".pdf"
+            fd, tmp_path = tempfile.mkstemp(suffix=ext, prefix="rag_")
+            with _os.fdopen(fd, "wb") as f:
+                f.write(file_content)
 
-            chunks = self.chunker.chunk_text(text)
-            if not chunks:
-                return {'status': 'error', 'message': '文本分块失败'}
+            # ── 2. Docling 解析 + 切块 ──
+            from rag import DoclingParser
+            parser = DoclingParser()
+            docling_chunks = parser.parse_to_chunks(tmp_path)
+            if not docling_chunks:
+                return {'status': 'error', 'message': 'Docling 解析后无 chunk'}
 
+            # ── 2.5 Contextual Retrieval：为每个 chunk 生成情境化摘要 ──
+            contextual_texts = None
+            try:
+                from backend.config import (
+                    RAG_CONTEXTUAL_ENABLED,
+                    RAG_CONTEXTUAL_CONCURRENCY,
+                    RAG_CONTEXTUAL_TIMEOUT,
+                    RAG_CONTEXTUAL_MIN_CHARS,
+                )
+                if RAG_CONTEXTUAL_ENABLED:
+                    from rag.contextualizer import ChunkContextualizer
+
+                    ctx_inputs = []
+                    for dc in docling_chunks:
+                        h_list = list(getattr(dc.meta, "headings", None) or [])
+                        h_list = [clean_heading(h) for h in h_list]
+                        ctx_inputs.append({
+                            "text": clean_cn_spaces(dc.text or ""),
+                            "headings": h_list,
+                        })
+
+                    ctx = ChunkContextualizer(
+                        max_workers=RAG_CONTEXTUAL_CONCURRENCY,
+                        timeout=RAG_CONTEXTUAL_TIMEOUT,
+                        min_chunk_chars=RAG_CONTEXTUAL_MIN_CHARS,
+                    )
+                    ctx_results = ctx.contextualize_batch(ctx_inputs)
+                    contextual_texts = [
+                        r.get("enriched_text", "") for r in ctx_results
+                    ]
+                    n_ok = sum(1 for r in ctx_results if r.get("summary"))
+                    logger.info(
+                        "[dsh][rag] Contextual Retrieval: %d/%d chunk 生成摘要",
+                        n_ok, len(ctx_results),
+                    )
+            except Exception:
+                logger.exception(
+                    "[dsh][rag] Contextual Retrieval 失败，降级为原文本"
+                )
+                contextual_texts = None
+
+            # ── 3. 提取索引文本 + 元数据 ──
+            indexed_texts = []
+            metadata = []
+            for i, dc in enumerate(docling_chunks):
+                original = clean_cn_spaces(dc.text)
+
+                # Contextual Retrieval：优先用摘要+原文，否则用 heading+原文
+                if (
+                    contextual_texts is not None
+                    and i < len(contextual_texts)
+                    and contextual_texts[i]
+                ):
+                    enriched = contextual_texts[i]
+                else:
+                    enriched = parser.get_enriched_text(dc)
+
+                if not enriched or not enriched.strip():
+                    continue
+                enriched = clean_cn_spaces(enriched)
+
+                headings = list(getattr(dc.meta, "headings", None) or [])
+                headings = [clean_heading(h) for h in headings]
+                page_numbers = list(getattr(dc.meta, "page_numbers", None) or [])
+
+                indexed_texts.append(enriched)
+                metadata.append({
+                    'chunk_id': uuid.uuid4().hex,
+                    'document_id': document_id,
+                    'source_filename': filename,
+                    'headings': headings,
+                    'page_numbers': page_numbers,
+                    'original_text': original,
+                    'has_contextual': bool(
+                        contextual_texts is not None
+                        and i < len(contextual_texts)
+                        and contextual_texts[i]
+                    ),
+                })
+
+            if not indexed_texts:
+                return {'status': 'error', 'message': 'Docling 切块后内容为空'}
+
+            # ── 4. 提取资源（图片/附件）──
             resources = self.resource_manager.ingest(
                 content=file_content,
                 filename=filename,
                 document_id=document_id,
             )
             resources_ingested = True
-            resource_ids = [resource.id for resource in resources]
-            chunk_ids = [uuid.uuid4().hex for _ in chunks]
-            metadata = [
-                {
-                    'chunk_id': chunk_id,
-                    'document_id': document_id,
-                    'source_filename': filename,
-                    'resource_ids': resource_ids,
-                }
-                for chunk_id in chunk_ids
-            ]
+            resource_ids = [r.id for r in resources]
 
-            result = self.vector_store.add_documents(chunks, [filename] * len(chunks), metadata=metadata)
+            for m in metadata:
+                m['resource_ids'] = resource_ids
+
+            # ── 5. 写入向量库（用 enriched 文本）──
+            result = self.vector_store.add_documents(
+                indexed_texts,
+                [filename] * len(indexed_texts),
+                metadata=metadata,
+            )
             if result.get('status') != 'success':
                 self.resource_manager.delete_source(filename)
                 return result
 
+            # ── 6. 重建 BM25，关联资源 ──
+            # 先 reset（清掉旧索引），再 build（构建新索引）
             self.bm25_store.reset()
-
-            self.resource_manager.repository.link_chunks(chunk_ids, resource_ids)
-            result['resources'] = [self.resource_manager.to_ref(resource) for resource in resources]
+            self.bm25_store.build(self.vector_store.metadata)
+            self.resource_manager.repository.link_chunks(
+                [m['chunk_id'] for m in metadata],
+                resource_ids,
+            )
+            result['resources'] = [
+                self.resource_manager.to_ref(r) for r in resources
+            ]
             return result
+
         except ValueError as error:
             if resources_ingested:
                 self.resource_manager.delete_source(filename)
@@ -96,7 +200,14 @@ class LocalRAGService:
         except Exception as error:
             if resources_ingested:
                 self.resource_manager.delete_source(filename)
+            logger.exception("[dsh][rag] 处理文件时出错")
             return {'status': 'error', 'message': f'处理文件时出错: {error}'}
+        finally:
+            if tmp_path and _os.path.exists(tmp_path):
+                try:
+                    _os.unlink(tmp_path)
+                except OSError:
+                    pass
 
     def add_files(self, files: List[tuple]) -> Dict:
         results = []
@@ -122,43 +233,84 @@ class LocalRAGService:
     ) -> List[Dict]:
         """向量检索 + BM25 混合检索 + 可选 query 改写。
 
-        Args:
-            query: 用户查询
-            top_k: 返回数量
-            rewrite: 是否用 LLM 改写 query
-            use_bm25: 是否启用 BM25 混合检索
+        设计：
+            - 向量检索用原 query（语义匹配）
+            - BM25 用"实体 query"（精确匹配，避免高频意图词稀释实体）
+            - 融合时 BM25 权重 1.5
         """
-        # 1. query 改写
+        query = clean_cn_spaces(query)
+
+        # 1. query 改写（带超时降级）
         effective_query = query
         if rewrite:
             try:
-                from backend.config import RAG_QUERY_REWRITE_ENABLED
+                from backend.config import (
+                    RAG_QUERY_REWRITE_ENABLED,
+                    RAG_QUERY_REWRITE_TIMEOUT,
+                )
                 if RAG_QUERY_REWRITE_ENABLED:
                     from rag import get_query_rewriter
-                    effective_query = get_query_rewriter().rewrite(query)
+                    import concurrent.futures
+
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                        future = ex.submit(
+                            get_query_rewriter().rewrite, query
+                        )
+                        try:
+                            effective_query = future.result(
+                                timeout=RAG_QUERY_REWRITE_TIMEOUT
+                            )
+                        except concurrent.futures.TimeoutError:
+                            logger.warning(
+                                "[dsh][rag] query 改写超时(%ss)，用原 query",
+                                RAG_QUERY_REWRITE_TIMEOUT,
+                            )
+                            effective_query = query
             except Exception:
                 logger.exception("[dsh][rag] query 改写失败，用原 query")
 
-        # 2. 向量检索（多取一些，供融合）
         pool_size = max(top_k * 3, top_k + 10)
-        vector_results = self.vector_store.search(
-            effective_query, pool_size
-        )
 
-        # 3. BM25 检索（用原 query + 改写 query 各搜一次，取并集）
+        # 2. 向量检索：原 query 单路
+        vector_results = self.vector_store.search(query, pool_size)
+
+        # 3. BM25 检索：用实体 query（避免高频意图词稀释）
         bm25_results: List[Dict] = []
         if use_bm25:
             try:
                 from backend.config import RAG_BM25_ENABLED
                 if RAG_BM25_ENABLED:
+                    # 索引未构建时才惰性构建（避免每次查询都重建）
+                    if not self.bm25_store.is_built():
+                        logger.info("[dsh][rag] BM25 索引未构建，惰性构建")
+                        self.bm25_store.build(self.vector_store.metadata)
+
+                    from rag.query_rewriter import extract_entities
+
                     def _provider():
                         return self.vector_store.metadata
+
+                    # ── 原 query 的实体 ──
+                    entities = extract_entities(query)
+                    bm25_query = " ".join(entities) if entities else query
+                    if bm25_query != query:
+                        logger.info(
+                            "[dsh][rag] BM25 query 用实体: %r → %r",
+                            query, bm25_query,
+                        )
                     bm25_results = self.bm25_store.search(
-                        query, pool_size, _provider
+                        bm25_query, pool_size, _provider,
                     )
+
+                    # ── 改写 query 的实体（可选）──
                     if effective_query != query:
+                        eff_entities = extract_entities(effective_query)
+                        eff_bm25_query = (
+                            " ".join(eff_entities) if eff_entities
+                            else effective_query
+                        )
                         bm25_results += self.bm25_store.search(
-                            effective_query, pool_size, _provider
+                            eff_bm25_query, pool_size, _provider,
                         )
             except Exception:
                 logger.exception("[dsh][rag] BM25 检索失败，仅用向量结果")
@@ -171,11 +323,29 @@ class LocalRAGService:
                 bm25_results,
                 k=RAG_RRF_K,
                 limit=top_k,
+                weights=[1.0, 1.5],
             )
         else:
             fused = vector_results[:top_k]
 
-        return self.resource_manager.enrich_search_results(fused)
+        # ── 返回前：从 metadata 取 headings ──
+        enriched = []
+        for item in fused:
+            meta = item.get("metadata", {})
+            headings = meta.get("headings", [])
+            original = meta.get("original_text", item.get("text", ""))
+
+            if headings:
+                prefix = " > ".join(headings) + "\n"
+                item["text"] = prefix + original
+            else:
+                item["text"] = original
+
+            item["headings"] = headings
+            item["page_numbers"] = meta.get("page_numbers", [])
+            enriched.append(item)
+
+        return self.resource_manager.enrich_search_results(enriched)
 
     def _build_context(self, retrieved_docs: List[Dict]) -> str:
         context_parts = []
@@ -199,15 +369,16 @@ class LocalRAGService:
             if allow_asset_tags
             else '资源会由系统单独返回，请不要输出资源标记或文件路径。'
         )
-        return f'''基于以下参考信息回答用户问题。如果参考信息不足以回答，请基于你的知识回答，并说明情况。
+        return f'''基于以下参考信息回答用户问题。
 
 参考信息:
 {context}
 
 回答规则:
-1. 优先使用参考信息回答。
-2. {citation_rules}
-3. 不要输出服务器本地路径。
+1. 只使用参考信息回答，不要使用你的通用知识。
+2. 如果参考信息不足以回答，请明确说"知识库中没有找到相关信息"，不要编造。
+3. {citation_rules}
+4. 不要输出服务器本地路径。
 
 用户问题: {query}
 

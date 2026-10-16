@@ -10,6 +10,9 @@ from .vector_store import FAISSVectorStore
 from .retrieval import RetrievalService
 from .resources import ResourceKind, ResourceManager, ResourceRecord
 
+# ── 新增：Docling 适配 ──
+from .docling_parser import DoclingParser, parse_file_to_chunks
+
 __all__ = [
     'DocumentParser',
     'DocumentParserFactory',
@@ -23,4 +26,7 @@ __all__ = [
     'get_query_rewriter',
     'BM25Store',
     'rrf_fuse',
+    # Docling
+    'DoclingParser',
+    'parse_file_to_chunks',
 ]

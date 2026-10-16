@@ -34,7 +34,7 @@ SHORTLIST_EMBEDDING_MODEL = os.getenv(
 RAG_TOP_K_DEFAULT = int(os.getenv('RAG_TOP_K_DEFAULT', '15'))
 RAG_BM25_ENABLED = os.getenv('RAG_BM25_ENABLED', 'true').lower() in ('1', 'true', 'yes')
 RAG_QUERY_REWRITE_ENABLED = os.getenv('RAG_QUERY_REWRITE_ENABLED', 'true').lower() in ('1', 'true', 'yes')
-RAG_RRF_K = int(os.getenv('RAG_RRF_K', '60'))
+RAG_RRF_K = int(os.getenv('RAG_RRF_K', '20'))
 
 MODESCOPE_API_KEY = os.getenv(
     'MODESCOPE_API_KEY',
@@ -87,3 +87,24 @@ ALLOWED_CORS_ORIGINS = [
     'http://localhost:5174',
     'http://127.0.0.1:5174',
 ]
+
+# query 改写 LLM 调用的超时（秒），超时后降级为原 query
+RAG_QUERY_REWRITE_TIMEOUT = int(os.getenv("RAG_QUERY_REWRITE_TIMEOUT", "5"))
+
+# ─────────────────────────────────────────────────────────────
+# Contextual Retrieval（情境化摘要）
+# ─────────────────────────────────────────────────────────────
+
+# 开关：入库时为每个 chunk 生成情境化摘要，提升检索召回
+RAG_CONTEXTUAL_ENABLED = os.getenv(
+    'RAG_CONTEXTUAL_ENABLED', 'false'
+).lower() in ('1', 'true', 'yes')
+
+# 生成摘要的并发数（SiliconFlow 有速率限制，建议 5-10）
+RAG_CONTEXTUAL_CONCURRENCY = int(os.getenv('RAG_CONTEXTUAL_CONCURRENCY', '5'))
+
+# 单 chunk LLM 调用超时（秒）
+RAG_CONTEXTUAL_TIMEOUT = float(os.getenv('RAG_CONTEXTUAL_TIMEOUT', '30'))
+
+# 短于此字符数的 chunk 跳过摘要（本身已带上下文）
+RAG_CONTEXTUAL_MIN_CHARS = int(os.getenv('RAG_CONTEXTUAL_MIN_CHARS', '80'))

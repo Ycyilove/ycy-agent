@@ -460,6 +460,15 @@ class ResourceManager:
                 resources = self.repository.list_by_ids(
                     metadata.get("resource_ids", [])
                 )
+
+            # ── 新增：按页过滤 ──
+            chunk_pages = set(metadata.get("page_numbers") or [])
+            if chunk_pages:
+                resources = [
+                    r for r in resources
+                    if r.page_no is None or r.page_no in chunk_pages
+                ]
+
             enriched_item = dict(item)
             enriched_item["resources"] = [self.to_ref(resource) for resource in resources]
             enriched.append(enriched_item)

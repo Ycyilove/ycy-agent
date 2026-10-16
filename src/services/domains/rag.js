@@ -16,10 +16,6 @@ export const ragSearch = (query, topK = 3) => requestJson('/api/rag/search', {
   method: 'POST',
   body: formData({ query, top_k: topK }),
 });
-export const ragQuery = (query, topK = 3) => requestJson('/api/rag/query', {
-  method: 'POST',
-  body: formData({ query, top_k: topK }),
-});
 
 export const ragQueryStream = async (query, topK = 3) => {
   const response = await request('/api/rag/query/stream', {

@@ -5,19 +5,18 @@ FAISS向量存储模块
 import os
 
 # ── HuggingFace 离线配置 ──
-# 目的：避免 SentenceTransformer 加载时联网检查（国内网络下每次超时 20+ 秒）
-# 若需要首次下载模型，请临时注释掉 HF_HUB_OFFLINE
 os.environ.setdefault('HF_ENDPOINT', 'https://hf-mirror.com')
 os.environ.setdefault('HF_HOME', os.path.join(os.path.dirname(os.path.dirname(__file__)), 'models'))
 os.environ.setdefault('HUGGINGFACE_HUB_CACHE', os.environ['HF_HOME'])
-os.environ.setdefault('HF_HUB_OFFLINE', '1')          # ← 关键：默认离线
-os.environ.setdefault('TRANSFORMERS_OFFLINE', '1')     # ← 关键：默认离线
 
 import json
+import logging
 import pickle
 import hashlib
 from typing import List, Dict, Tuple, Optional
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 class FAISSVectorStore:
@@ -28,13 +27,6 @@ class FAISSVectorStore:
         embedding_model: str = None,
         index_path: str = "./vector_store",
     ):
-        """
-        初始化FAISS向量存储
-
-        Args:
-            embedding_model: 嵌入模型名称。None 时从 config 读取。
-            index_path: 索引文件保存路径
-        """
         if embedding_model is None:
             try:
                 from backend.config import RAG_EMBEDDING_MODEL
@@ -55,52 +47,67 @@ class FAISSVectorStore:
 
         self._load_index()
 
+    # ────────── 内部：加载 / 保存 / 嵌入 ──────────
+
     def _init_embeddings(self):
         """初始化嵌入模型。
 
         加载策略：
-            1. 先尝试 local_files_only=True（只在本地缓存里找，不走网络）
-            2. 如果本地没有缓存 → 降级为联网下载
-            3. 记录实际走了哪条路径，方便排查
-
-        为什么优先本地：
-            - HuggingFace 的 SentenceTransformer 默认会联网检查
-              config.json / processor_config.json 等是否有更新
-            - 这一步在国内网络下经常超时（20 秒以上）
-            - 模型已缓存时，这些检查完全没必要
+            1. 先临时设离线，尝试 local_files_only=True
+            2. 本地没有 → 临时恢复在线，联网下载
+            3. 加载完恢复原始环境变量（不影响 Docling 等其他组件）
         """
         from sentence_transformers import SentenceTransformer
 
-        # ── 优先：从本地缓存加载 ──
-        print(f"[模型加载] 尝试从本地缓存加载: {self.embedding_model}")
+        _offline_keys = ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")
+        _backup = {k: os.environ.get(k) for k in _offline_keys}
+
+        def _restore_env():
+            for k in _offline_keys:
+                if _backup[k] is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = _backup[k]
+
+        # ── 阶段 1：临时离线，尝试本地缓存 ──
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
         try:
-            self.embeddings = SentenceTransformer(
-                self.embedding_model,
-                local_files_only=True,
-            )
+            print(f"[模型加载] 尝试从本地缓存加载: {self.embedding_model}")
+            try:
+                self.embeddings = SentenceTransformer(
+                    self.embedding_model,
+                    local_files_only=True,
+                )
+                self.embedding_dimension = (
+                    self.embeddings.get_sentence_embedding_dimension()
+                )
+                print("[模型加载] ✅ 本地缓存加载成功！")
+                return
+            except Exception as local_error:
+                print(
+                    f"[模型加载] 本地缓存不可用（{type(local_error).__name__}），"
+                    f"将联网下载"
+                )
+
+            # ── 阶段 2：临时恢复在线，联网下载 ──
+            _restore_env()
+            print(f"[模型下载] 正在从镜像源下载嵌入模型: {self.embedding_model}")
+            print("[模型下载] 首次下载约 90MB，请耐心等待...")
+            self.embeddings = SentenceTransformer(self.embedding_model)
             self.embedding_dimension = (
                 self.embeddings.get_sentence_embedding_dimension()
             )
-            print("[模型加载] ✅ 本地缓存加载成功！")
-            return
-        except Exception as local_error:
-            print(
-                f"[模型加载] 本地缓存不可用（{type(local_error).__name__}），"
-                f"将联网下载"
-            )
-
-        # ── 降级：联网下载 ──
-        print(f"[模型下载] 正在从镜像源下载嵌入模型: {self.embedding_model}")
-        print("[模型下载] 首次下载约 90MB，请耐心等待...")
-        self.embeddings = SentenceTransformer(self.embedding_model)
-        self.embedding_dimension = (
-            self.embeddings.get_sentence_embedding_dimension()
-        )
-        print("[模型加载] ✅ 下载并加载成功！")
+            print("[模型加载] ✅ 下载并加载成功！")
+        finally:
+            # ── 恢复原始环境（不污染 Docling）──
+            _restore_env()
 
     def _load_index(self):
-        """加载已存在的索引"""
-        os.makedirs(self.index_path, exist_ok=True)
+        real_dir = os.path.dirname(self.index_path)
+        if real_dir:
+            os.makedirs(real_dir, exist_ok=True)
 
         if os.path.exists(self.index_file) and os.path.exists(self.metadata_file):
             try:
@@ -118,31 +125,37 @@ class FAISSVectorStore:
                 self.file_index = {}
 
     def _get_file_hash(self, filename: str) -> str:
-        """获取文件哈希值"""
         return hashlib.md5(filename.encode()).hexdigest()
 
     def _generate_embeddings(self, texts: List[str]) -> np.ndarray:
-        """生成文本嵌入"""
         if self.embeddings is None:
             self._init_embeddings()
         embeddings = self.embeddings.encode(texts, show_progress_bar=len(texts) > 10)
         return np.array(embeddings, dtype='float32')
 
-    def add_documents(self, texts: List[str], filenames: List[str], metadata: List[Dict] = None) -> Dict:
-        """
-        添加文档到向量库
+    # ────────── 新增：一致性自检 ──────────
 
-        Args:
-            texts: 文本列表
-            filenames: 对应的文件名列表
-            metadata: 额外的元数据
+    def verify_consistency(self) -> Dict:
+        """检查 index 和 metadata 是否一致。"""
+        index_count = self.index.ntotal if self.index is not None else 0
+        meta_count = len(self.metadata)
+        return {
+            "index_ntotal": index_count,
+            "metadata_len": meta_count,
+            "consistent": index_count == meta_count,
+            "file_index_len": len(self.file_index),
+        }
 
-        Returns:
-            添加结果
-        """
+    # ────────── 写入 ──────────
+
+    def add_documents(
+        self,
+        texts: List[str],
+        filenames: List[str],
+        metadata: List[Dict] = None,
+    ) -> Dict:
         if not texts or not filenames:
             return {"status": "error", "message": "文本和文件名不能为空"}
-
         if len(texts) != len(filenames):
             return {"status": "error", "message": "文本和文件名数量不匹配"}
 
@@ -155,9 +168,6 @@ class FAISSVectorStore:
         added_chunks = 0
         new_file_index = {}
 
-        # ── 按文件名分组：同一文件的多个 chunk 一次性写入 ──
-        # 原实现按 chunk 迭代，但 file_hash 在第 1 个 chunk 后就已存在，
-        # 导致后续 chunk 全部被 continue 跳过，只写入 1 个 chunk。
         grouped: Dict[str, List[tuple]] = {}
         for i, (text, filename) in enumerate(zip(texts, filenames)):
             meta = metadata[i] if metadata and i < len(metadata) else {}
@@ -165,7 +175,6 @@ class FAISSVectorStore:
 
         for filename, items in grouped.items():
             file_hash = self._get_file_hash(filename)
-
             if file_hash in self.file_index:
                 continue
 
@@ -173,22 +182,25 @@ class FAISSVectorStore:
             if not chunk_texts:
                 continue
 
-            embeddings = self._generate_embeddings(chunk_texts)
-            self.index.add(embeddings)
-
-            for t, meta in items:
-                self.metadata.append({
-                    'text': t,
+            try:
+                embeddings = self._generate_embeddings(chunk_texts)
+                self.index.add(embeddings)
+                for t, meta in items:
+                    self.metadata.append({
+                        'text': t,
+                        'filename': filename,
+                        **meta,
+                    })
+                new_file_index[file_hash] = {
                     'filename': filename,
-                    **meta
-                })
-
-            new_file_index[file_hash] = {
-                'filename': filename,
-                'chunk_count': len(chunk_texts),
-                'added': True
-            }
-            added_chunks += len(chunk_texts)
+                    'chunk_count': len(chunk_texts),
+                    'added': True,
+                }
+                added_chunks += len(chunk_texts)
+            except Exception:
+                logger.exception("添加文件 %s 失败，回滚索引", filename)
+                self._load_index()
+                raise
 
         self.file_index.update(new_file_index)
         self._save_index()
@@ -196,11 +208,10 @@ class FAISSVectorStore:
         return {
             "status": "success",
             "message": f"成功添加 {added_chunks} 个文本块",
-            "file_count": len(new_file_index)
+            "file_count": len(new_file_index),
         }
 
     def _save_index(self):
-        """保存索引到磁盘"""
         import faiss
         faiss.write_index(self.index, self.index_file)
         with open(self.metadata_file, 'wb') as f:
@@ -208,22 +219,16 @@ class FAISSVectorStore:
         with open(self.file_index_file, 'w', encoding='utf-8') as f:
             json.dump(self.file_index, f, ensure_ascii=False, indent=2)
 
+    # ────────── 检索 ──────────
+
     def search(self, query: str, top_k: int = 3) -> List[Dict]:
-        """
-        搜索相似文档
-
-        Args:
-            query: 查询文本
-            top_k: 返回结果数量
-
-        Returns:
-            相似文档列表
-        """
         if self.index is None or len(self.metadata) == 0:
             return []
 
         query_embedding = self._generate_embeddings([query])
-        distances, indices = self.index.search(query_embedding, min(top_k, len(self.metadata)))
+        distances, indices = self.index.search(
+            query_embedding, min(top_k, len(self.metadata))
+        )
 
         results = []
         for dist, idx in zip(distances[0], indices[0]):
@@ -232,66 +237,68 @@ class FAISSVectorStore:
                     'text': self.metadata[idx]['text'],
                     'filename': self.metadata[idx].get('filename', 'unknown'),
                     'score': float(dist),
-                    'metadata': {k: v for k, v in self.metadata[idx].items() if k != 'text'}
+                    'metadata': {
+                        k: v for k, v in self.metadata[idx].items() if k != 'text'
+                    },
                 })
-
         return results
 
+    # ────────── 删除 / 清空 ──────────
+
     def delete_file(self, filename: str) -> Dict:
-        """
-        删除指定文件的向量索引
+        """删除指定文件的向量索引。
 
-        Args:
-            filename: 要删除的文件名
-
-        Returns:
-            删除结果
+        修复：
+            1. 不再依赖 self.embedding_dimension（可能为 None）
+            2. 用 remaining_vectors.shape[1] 获取真实维度
+            3. reconstruct 失败时降级为清空索引，不抛 500
         """
         if not self.file_index:
             return {"status": "error", "message": "索引为空"}
 
         file_hash = self._get_file_hash(filename)
-
         if file_hash not in self.file_index:
             return {"status": "error", "message": f"文件 {filename} 不在知识库中"}
 
-        indices_to_remove = []
-        new_metadata = []
+        import faiss
 
-        for idx, meta in enumerate(self.metadata):
-            if meta.get('filename') == filename:
-                indices_to_remove.append(idx)
-            else:
-                new_metadata.append(meta)
+        indices_to_remove = [
+            i for i, meta in enumerate(self.metadata)
+            if meta.get('filename') == filename
+        ]
 
-        if indices_to_remove:
-            import faiss
-            all_indices = list(range(self.index.ntotal))
-            remaining_indices = [i for i in all_indices if i not in indices_to_remove]
+        remaining_metadata = [
+            meta for i, meta in enumerate(self.metadata)
+            if i not in indices_to_remove
+        ]
 
-            if remaining_indices:
-                # Read the vectors before replacing the index; reconstructing
-                # from the new empty index would lose every remaining vector.
+        try:
+            if self.index is not None and self.index.ntotal > 0:
                 vectors = self.index.reconstruct_n(0, self.index.ntotal)
-                remaining_vectors = vectors[remaining_indices]
-                self.index = faiss.IndexFlatL2(self.embedding_dimension)
-                self.index.add(remaining_vectors)
+                keep_indices = [
+                    i for i in range(self.index.ntotal)
+                    if i not in indices_to_remove
+                ]
+                if keep_indices:
+                    remaining_vectors = vectors[keep_indices]
+                    dim = remaining_vectors.shape[1]
+                    new_index = faiss.IndexFlatL2(dim)
+                    new_index.add(remaining_vectors)
+                    self.index = new_index
+                else:
+                    self.index = None
             else:
                 self.index = None
+        except Exception as e:
+            logger.warning("reconstruct 失败，降级为清空索引: %s", e)
+            self.index = None
 
-            self.metadata = new_metadata
-            del self.file_index[file_hash]
-            self._save_index()
-
+        self.metadata = remaining_metadata
+        del self.file_index[file_hash]
+        self._save_index()
         return {"status": "success", "message": f"已删除文件 {filename}"}
 
     def clear_all(self) -> Dict:
-        """
-        清空全部知识库
-
-        Returns:
-            清空结果
-        """
         if self.index:
             import faiss
             self.index.reset()
@@ -300,31 +307,23 @@ class FAISSVectorStore:
         self.metadata = []
         self.file_index = {}
 
-        if os.path.exists(self.index_file):
-            os.remove(self.index_file)
-        if os.path.exists(self.metadata_file):
-            os.remove(self.metadata_file)
-        if os.path.exists(self.file_index_file):
-            os.remove(self.file_index_file)
+        for path in (self.index_file, self.metadata_file, self.file_index_file):
+            if os.path.exists(path):
+                os.remove(path)
 
         return {"status": "success", "message": "已清空全部知识库"}
 
-    def get_stats(self) -> Dict:
-        """
-        获取知识库统计信息
+    # ────────── 统计 / 查询 ──────────
 
-        Returns:
-            统计信息
-        """
+    def get_stats(self) -> Dict:
         return {
             "total_chunks": len(self.metadata),
             "total_files": len(self.file_index),
             "files": list(self.file_index.values()),
             "embedding_model": self.embedding_model,
-            "index_path": self.index_path
+            "index_path": self.index_path,
         }
 
     def file_exists(self, filename: str) -> bool:
-        """检查文件是否已在知识库中"""
         file_hash = self._get_file_hash(filename)
         return file_hash in self.file_index

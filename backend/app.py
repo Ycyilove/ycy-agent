@@ -63,17 +63,6 @@ register_lazy_module(
     loader=lambda: __import__("langchain_text_splitters"),
     description="RAG 文本分块",
 )
-register_lazy_module(
-    name="langchain_huggingface",
-    loader=lambda: __import__("langchain_huggingface"),
-    description="HuggingFace 嵌入模型封装",
-)
-register_lazy_module(
-    name="langchain_community",
-    loader=lambda: __import__("langchain_community"),
-    description="LangChain 社区组件（legacy RAG）",
-)
-
 
 # ── 业务模块 import ──
 
@@ -94,7 +83,6 @@ from .services.local_model import (
 from .services.llm import (
     ModelScopeLLM as LLMService,
     MultimodalClient as MultimodalService,
-    RAGService as LegacyRAGService,
 )
 from .services.local_rag import LocalRAGService as PersistentRAGService
 
@@ -104,10 +92,8 @@ from .services.local_rag import LocalRAGService as PersistentRAGService
 from .routes.agent import create_agent_router
 from .routes.mcp import create_mcp_router
 from .routes.tools import create_tools_router
-from .routes.chat import create_chat_router
 from .routes.rag import create_rag_router
 from .routes.sessions import create_sessions_router
-from .routes.models import create_models_router
 from .routes.health import create_health_router
 from .routes.trash import create_trash_router
 from .routes.resource import create_resource_router
@@ -133,7 +119,6 @@ tool_shortlister = None
 local_rag_service = None
 llm_instance = None
 multimodal_client = None
-rag_service = None
 
 
 # ─────────────────────────────────────────────────────────────
@@ -350,50 +335,6 @@ def get_multimodal_client():
         multimodal_client = MultimodalService()
     return multimodal_client
 
-
-def get_rag_service():
-    """延迟获取 legacy RAG 服务，避免启动时下载模型。"""
-    global rag_service
-    if rag_service is None:
-        rag_service = LegacyRAGService()
-    return rag_service
-
-
-# ─────────────────────────────────────────────────────────────
-# 模型切换辅助（models 路由用）
-# ─────────────────────────────────────────────────────────────
-
-def _model_info() -> dict:
-    return {
-        "model_source": MODEL_SOURCE.value,
-        "model_name": DEFAULT_MODEL,
-        "display_name": (
-            DEFAULT_MODEL.split("/")[-1] if "/" in DEFAULT_MODEL else DEFAULT_MODEL
-        ),
-        "use_local": MODEL_SOURCE == ModelSource.LOCAL,
-    }
-
-
-def _switch_model_source(source: str) -> dict:
-    global MODEL_SOURCE
-    if source == "online":
-        MODEL_SOURCE = ModelSource.ONLINE
-        return {"status": "success", "message": "已切换到在线API模式"}
-    if source == "local":
-        MODEL_SOURCE = ModelSource.LOCAL
-        service = get_local_model_service(LOCAL_MODEL_CONFIG)
-        if service and service.is_loaded:
-            return {
-                "status": "success",
-                "message": "已切换到本地模型模式，模型加载成功",
-            }
-        return {
-            "status": "warning",
-            "message": "已切换到本地模型模式，但模型加载失败，请检查配置",
-        }
-    raise HTTPException(status_code=400, detail="无效的来源类型，可选: online, local")
-
-
 # ─────────────────────────────────────────────────────────────
 # knowledge_tools RAG provider
 # ─────────────────────────────────────────────────────────────
@@ -421,30 +362,13 @@ app.include_router(
 )
 
 app.include_router(
-    create_chat_router(
-        llm_provider=get_llm,
-        multimodal_provider=get_multimodal_client,
-        local_rag_provider=get_local_rag_service,
-    )
-)
-
-app.include_router(
     create_rag_router(
-        legacy_rag_provider=get_rag_service,
         local_rag_provider=get_local_rag_service,
         llm_provider=get_llm,
     )
 )
 
 app.include_router(create_sessions_router(get_session_memory))
-
-app.include_router(
-    create_models_router(
-        model_info_provider=_model_info,
-        model_downloader=download_model_from_modelscope,
-        model_switcher=_switch_model_source,
-    )
-)
 
 app.include_router(create_agent_router(get_agent_task_service, get_session_memory))
 

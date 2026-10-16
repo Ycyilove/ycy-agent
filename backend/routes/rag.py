@@ -1,4 +1,4 @@
-"""RAG 路由：legacy + 本地持久化 RAG。"""
+"""RAG 路由：本地持久化 RAG。"""
 
 from typing import Any, Callable, List
 
@@ -13,31 +13,10 @@ _SSE_HEADERS = {
 
 
 def create_rag_router(
-    legacy_rag_provider: Callable[[], Any],
     local_rag_provider: Callable[[], Any],
     llm_provider: Callable[[], Any],
 ) -> APIRouter:
     router = APIRouter()
-
-    # ────────── Legacy RAG ──────────
-
-    @router.post("/api/rag/add")
-    def rag_add_texts(texts: List[str] = Form(...)):
-        try:
-            service = legacy_rag_provider()
-            result = service.add_texts(texts)
-            return {"status": "success", "message": result}
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
-
-    @router.post("/api/rag/query")
-    def rag_query(query: str = Form(...)):
-        try:
-            service = legacy_rag_provider()
-            result = service.rag_answer(query, llm_provider())
-            return {"status": "success", "result": result}
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
 
     # ────────── Local RAG ──────────
 
@@ -71,9 +50,13 @@ def create_rag_router(
             raise HTTPException(status_code=500, detail=str(e))
 
     @router.post("/api/rag/search")
-    async def rag_search(query: str = Form(...), top_k: int = Form(3)):
+    async def rag_search(
+        query: str = Form(...),
+        top_k: int = Form(3),
+        rewrite: bool = Form(False),   # ← 新增：默认关闭改写，测试/生产按需开启
+    ):
         try:
-            results = local_rag_provider().search(query, top_k)
+            results = local_rag_provider().search(query, top_k, rewrite=rewrite)
             return {"status": "success", "results": results}
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))

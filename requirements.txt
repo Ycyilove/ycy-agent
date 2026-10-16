@@ -60,3 +60,5 @@ mem0ai>=0.1.0
 qdrant-client>=1.7.0
 
 python-dotenv>=1.0.0
+
+docling-core>=2.0.0
