@@ -4,6 +4,8 @@ RAG知识库模块
 """
 from .document_parser import DocumentParser, DocumentParserFactory
 from .text_chunker import TextChunker
+from .query_rewriter import QueryRewriter, get_query_rewriter
+from .bm25_store import BM25Store, rrf_fuse
 from .vector_store import FAISSVectorStore
 from .retrieval import RetrievalService
 from .resources import ResourceKind, ResourceManager, ResourceRecord
@@ -17,4 +19,8 @@ __all__ = [
     'ResourceKind',
     'ResourceManager',
     'ResourceRecord',
+    'QueryRewriter',
+    'get_query_rewriter',
+    'BM25Store',
+    'rrf_fuse',
 ]

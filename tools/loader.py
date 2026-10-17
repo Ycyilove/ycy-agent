@@ -16,7 +16,15 @@ from .tools_def.file import (
     edit_file,
     create_directory,
     move_file,
+    delete_file,
+    restore_file,
 )
+from .tools_def.file_search import (
+    search_content,
+    search_files,
+    read_file_range,
+)
+from .tools_def import documents  # noqa: F401  （PDF/XLSX/DOCX）
 from .tools_def.time import (
     calculate_time_difference,
     add_time,
@@ -33,6 +41,7 @@ from .tools_def.network import (
     parse_html,
     fetch_json
 )
+from .tools_def.fetch import fetch_url
 from .tools_def.mysql import (
     mysql_connect,
     mysql_query,
@@ -63,6 +72,10 @@ __all__ = [
     'rename_file',
     'convert_file_format',
     'get_file_info',
+    'create_directory',
+    'move_file',
+    'delete_file',
+    'restore_file',
     'calculate_time_difference',
     'add_time',
     'get_current_time',
@@ -75,6 +88,7 @@ __all__ = [
     'check_url_status',
     'parse_html',
     'fetch_json',
+    'fetch_url',
     'mysql_connect',
     'mysql_query',
     'mysql_execute',

@@ -5,12 +5,17 @@ manager 是从 app 注入的 MCPManagerProxy：
     - 同步方法和属性直接转发给真 manager
 """
 
+import asyncio
+import os
+import shutil
+import subprocess
+
 import logging
-from typing import Any, Callable
+from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Body, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from mcp_client.config import MCPServerConfig
 from mcp_client.dynamic_store import (
@@ -22,10 +27,39 @@ from mcp_client.dynamic_store import (
 logger = logging.getLogger(__name__)
 
 
+# ─────────────────────────────────────────────────────────────
+# 请求体
+# ─────────────────────────────────────────────────────────────
+
 class AddServerPayload(BaseModel):
+    """URL 导入（原有接口保留）。"""
     url: str
     name: str | None = None
 
+
+class ServerConfigBody(BaseModel):
+    """通用配置导入。
+
+    支持 stdio / sse / http 三种 transport。
+    - stdio: 需要 command，args 可选
+    - sse/http: 需要 url
+    """
+    name: str
+    transport: str = "stdio"
+    command: Optional[str] = None
+    args: Optional[List[str]] = None
+    url: Optional[str] = None
+    env_from: Optional[Dict[str, str]] = None
+    header_env: Optional[Dict[str, str]] = None
+    connect_timeout: float = 10.0
+    call_timeout: float = 30.0
+    retries: int = 2
+    enabled: bool = True
+
+
+# ─────────────────────────────────────────────────────────────
+# 辅助
+# ─────────────────────────────────────────────────────────────
 
 def _infer_transport(url: str) -> str:
     parsed = urlparse(url)
@@ -50,6 +84,22 @@ def _infer_name(url: str, explicit: str | None) -> str:
     return safe[:64] or "mcp"
 
 
+def _config_to_mapping(config: MCPServerConfig) -> dict:
+    """把 MCPServerConfig 序列化回 dict，供 save_server 用。"""
+    return {
+        "transport": config.transport,
+        "command": config.command,
+        "args": list(config.args),
+        "url": config.url,
+        "env_from": dict(config.env_from),
+        "header_env": dict(config.header_env),
+        "connect_timeout": config.connect_timeout,
+        "call_timeout": config.call_timeout,
+        "retries": config.retries,
+        "enabled": config.enabled,
+    }
+
+
 def _unregister_tools(manager: Any, agent: Any, name: str) -> None:
     """反注册某个 server 在 ToolAgent 里注册过的所有工具。"""
     for tool_name in list(manager.server_tool_names.get(name, set())):
@@ -59,6 +109,113 @@ def _unregister_tools(manager: Any, agent: Any, name: str) -> None:
             logger.warning("反注册工具失败: %s", tool_name)
     manager.server_tool_names.pop(name, None)
 
+def _resolve_command(command: str) -> Optional[str]:
+    """跨平台解析命令路径。
+
+    Windows 上 npx / uvx 等是 .cmd 文件，shutil.which 默认只找 .exe，
+    需要显式加上 PATHEXT 里的后缀再试。
+    """
+    # 先按原样找
+    resolved = shutil.which(command)
+    if resolved:
+        return resolved
+
+    # Windows：按 PATHEXT 逐个后缀试
+    if os.name == "nt":
+        pathext = os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+        for ext in pathext.split(";"):
+            ext = ext.strip()
+            if not ext:
+                continue
+            resolved = shutil.which(command + ext)
+            if resolved:
+                return resolved
+    return None
+
+
+async def _precheck_stdio(command: str, args: list) -> Optional[str]:
+    """stdio 命令预检。返回 None 表示通过，否则返回错误原因。"""
+    resolved = _resolve_command(command)
+    if resolved is None:
+        return f"命令不存在: {command}（检查 PATH，或改用完整路径）"
+
+    # 2. 尝试跑一次 --help（不阻塞太久）
+    #    有些 MCP server 不认 --help，会在几秒内退出——这不算错误
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            resolved, *args, "--help",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=8.0
+            )
+        except asyncio.TimeoutError:
+            # 超时说明命令在跑（可能在等 stdin），视为通过
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            return None
+
+        # 退出码 0 或 1 都算"命令能启动"
+        # 关键看 stderr 里有没有 "No module named" / "not found" 之类
+        err_text = (stderr or b"").decode("utf-8", errors="replace")
+
+        # Python 模块不存在
+        if "No module named" in err_text:
+            # 提取模块名
+            import re
+            m = re.search(r"No module named ['\"]([^'\"]+)['\"]", err_text)
+            mod = m.group(1) if m else "?"
+            return (
+                f"Python 模块不存在: {mod}\n"
+                f"  提示：pip install {mod.split('.')[0]}"
+            )
+
+        # npm 包不存在
+        if "404" in err_text and "npm" in err_text.lower():
+            return f"npm 包不存在（404）\n  stderr: {err_text[:200]}"
+
+        # 其他明确的错误
+        if proc.returncode not in (0, 1) and err_text.strip():
+            return f"命令启动失败（exit={proc.returncode}）\n  stderr: {err_text[:300]}"
+
+        return None
+
+    except FileNotFoundError:
+        return f"命令不存在: {command}"
+    except Exception as exc:
+        # 预检本身出错 → 不阻断，让真正的连接去暴露问题
+        logger.warning("[dsh][mcp] precheck raised: %s", exc)
+        return None
+
+async def _connect_and_discover(
+    manager: Any,
+    agent: Any,
+    name: str,
+) -> None:
+    """连接并发现工具。失败时清理已注册的配置和连接。"""
+    try:
+        await manager.connect(name)
+        await manager.discover(
+            name,
+            agent.register_dynamic_tool,
+            agent.unregister_dynamic_tool,
+        )
+    except Exception:
+        try:
+            await manager.disconnect(name)
+        except Exception:
+            logger.exception("清理连接失败: %s", name)
+        manager.unregister_config(name)
+        raise
+
+
+# ─────────────────────────────────────────────────────────────
+# 路由工厂
+# ─────────────────────────────────────────────────────────────
 
 def create_mcp_router(
     mcp_manager_provider: Callable[[], Any],
@@ -72,6 +229,8 @@ def create_mcp_router(
         if manager is None:
             return {"status": "disabled", "servers": []}
         return {"status": "success", "servers": manager.status()}
+
+    # ── URL 导入（原有） ──
 
     @router.post("/api/mcp/servers")
     async def add_mcp_server(payload: AddServerPayload):
@@ -106,26 +265,135 @@ def create_mcp_router(
         agent = agent_provider()
 
         try:
-            await manager.connect(name)
-            await manager.discover(
-                name,
-                agent.register_dynamic_tool,
-                agent.unregister_dynamic_tool,
-            )
+            await _connect_and_discover(manager, agent, name)
         except Exception as exc:
-            try:
-                await manager.disconnect(name)
-            except Exception:
-                logger.exception("清理连接失败: %s", name)
-            manager.unregister_config(name)
             raise HTTPException(status_code=502, detail=f"连接失败: {exc}") from exc
 
         try:
-            save_server(name, {"transport": transport, "url": url, "enabled": True})
+            save_server(name, _config_to_mapping(config))
         except Exception:
             logger.exception("持久化 MCP 配置失败: %s", name)
 
-        return {"status": "success", "name": name}
+        return {"status": "success", "name": name, "saved": True}
+
+    # ── 通用配置导入（新增） ──
+
+    @router.post("/api/mcp/servers/config")
+    async def add_mcp_server_config(body: ServerConfigBody):
+        """从完整配置添加 MCP server。
+
+        支持三种 transport：
+        - stdio: 必须提供 command
+        - sse / http: 必须提供 url
+
+        连接失败时保留配置（saved=true），前端可以稍后重试。
+        """
+        manager = mcp_manager_provider()
+        if manager is None:
+            raise HTTPException(status_code=503, detail="MCP 管理器未初始化")
+
+        name = body.name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="name 不能为空")
+
+        if manager.has_server(name):
+            raise HTTPException(status_code=409, detail=f"MCP 已存在: {name}")
+
+        transport = (body.transport or "stdio").strip().lower()
+        if transport not in ("stdio", "sse", "http"):
+            raise HTTPException(
+                status_code=400, detail=f"不支持的 transport: {transport}"
+            )
+
+        if transport == "stdio":
+            if not body.command:
+                raise HTTPException(status_code=400, detail="stdio 必须提供 command")
+            args = body.args or []
+            url = None
+        else:
+            if not body.url:
+                raise HTTPException(
+                    status_code=400, detail=f"{transport} 必须提供 url"
+                )
+            args = []
+            url = body.url.strip()
+
+        try:
+            config = MCPServerConfig.from_mapping(
+                name,
+                {
+                    "transport": transport,
+                    "command": body.command,
+                    "args": args,
+                    "url": url,
+                    "env_from": body.env_from or {},
+                    "header_env": body.header_env or {},
+                    "connect_timeout": body.connect_timeout,
+                    "call_timeout": body.call_timeout,
+                    "retries": body.retries,
+                    "enabled": body.enabled,
+                },
+            )
+        except Exception as exc:
+            logger.exception("构造 MCPServerConfig 失败")
+            raise HTTPException(
+                status_code=400, detail=f"配置校验失败: {exc}"
+            ) from exc
+
+        # ── stdio 预检：确认命令能启动 ──
+        if transport == "stdio":
+            err = await _precheck_stdio(config.command, list(config.args))
+            if err:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"命令预检失败：\n{err}",
+                )
+
+        # 先写盘（即使连接失败，配置也保留）
+        try:
+            save_server(name, _config_to_mapping(config))
+        except Exception as exc:
+            logger.exception("save_server failed")
+            raise HTTPException(
+                status_code=500, detail=f"保存配置失败: {exc}"
+            ) from exc
+
+        # 注册 + 连接
+        manager.register_config(config)
+        agent = agent_provider()
+
+        if not config.enabled:
+            manager.statuses.setdefault(name, {}).update(
+                {"status": "disabled", "enabled": False}
+            )
+            return {
+                "status": "success",
+                "name": name,
+                "saved": True,
+                "connected": False,
+                "message": "已保存配置（disabled 状态，未连接）",
+            }
+
+        try:
+            await _connect_and_discover(manager, agent, name)
+        except Exception as exc:
+            logger.exception("连接 MCP 失败: %s", name)
+            return {
+                "status": "partial",
+                "name": name,
+                "saved": True,
+                "connected": False,
+                "message": f"已保存配置，但连接失败: {exc}",
+            }
+
+        return {
+            "status": "success",
+            "name": name,
+            "saved": True,
+            "connected": True,
+        }
+
+    # ── 删除 ──
 
     @router.delete("/api/mcp/servers/{name}")
     async def remove_mcp_server(name: str):
@@ -136,20 +404,15 @@ def create_mcp_router(
             raise HTTPException(status_code=404, detail=f"MCP 不存在: {name}")
 
         agent = agent_provider()
-
-        # 1. 反注册工具（提问不再用到它）
         _unregister_tools(manager, agent, name)
 
-        # 2. 真正断开连接（走 worker task，安全）
         try:
             await manager.disconnect(name)
         except Exception:
             logger.exception("断开 MCP 失败: %s", name)
 
-        # 3. 注销内存配置
         manager.unregister_config(name)
 
-        # 4. 从 mcp_servers.json 删除
         try:
             delete_server(name)
         except Exception:
@@ -157,13 +420,10 @@ def create_mcp_router(
 
         return {"status": "success", "removed": True}
 
+    # ── 启用/禁用 ──
+
     @router.post("/api/mcp/servers/{name}/toggle")
     async def toggle_mcp_server(name: str, payload: dict = Body(default={})):
-        """启用/禁用 MCP。
-
-        禁用：反注册工具 + 断开连接 + 写入 enabled=false。configs 保留。
-        启用：连接 + discover + 写入 enabled=true。
-        """
         manager = mcp_manager_provider()
         if manager is None:
             raise HTTPException(status_code=503, detail="MCP 管理器未初始化")
@@ -195,17 +455,8 @@ def create_mcp_router(
 
         manager.statuses[name].update({"status": "configured", "enabled": True})
         try:
-            await manager.connect(name)
-            await manager.discover(
-                name,
-                agent.register_dynamic_tool,
-                agent.unregister_dynamic_tool,
-            )
+            await _connect_and_discover(manager, agent, name)
         except Exception as exc:
-            try:
-                await manager.disconnect(name)
-            except Exception:
-                pass
             manager.statuses[name].update(
                 {"status": "error", "error": str(exc), "enabled": True}
             )
@@ -217,15 +468,10 @@ def create_mcp_router(
             logger.exception("写入 enabled=true 失败: %s", name)
         return {"status": "success", "name": name, "enabled": True}
 
+    # ── 重载 ──
+
     @router.post("/api/mcp/reload")
     async def reload_mcp_configs():
-        """同步 mcp_servers.json 与内存 manager.configs。
-
-        - 文件新增的：注册 + 连接
-        - 文件删除的：反注册工具 + 断开 + 注销
-        - 配置变化的：断开 + 重新注册 + 重连
-        - 被禁用的（enabled=false）：跳过连接
-        """
         manager = mcp_manager_provider()
         if manager is None:
             logger.warning("[dsh][mcp] reload skipped: manager not initialized")
@@ -253,7 +499,6 @@ def create_mcp_router(
 
         agent = agent_provider()
 
-        # 移除 + 变更：反注册 + 断开 + 注销
         for name in removed | changed:
             _unregister_tools(manager, agent, name)
             try:
@@ -262,7 +507,6 @@ def create_mcp_router(
                 logger.exception("断开 MCP 失败: %s", name)
             manager.unregister_config(name)
 
-        # 新增 + 变更：注册 + 尝试连接
         for name in added | changed:
             config = new_map[name]
             manager.register_config(config)
@@ -291,6 +535,8 @@ def create_mcp_router(
             "removed": sorted(removed),
             "changed": sorted(changed),
         }
+
+    # ── 刷新单个 server ──
 
     @router.post("/api/mcp/{server_name}/refresh")
     async def refresh_mcp_server(server_name: str):

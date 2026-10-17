@@ -1,0 +1,72 @@
+{
+  "session_id": "7fa2f39e-7762-485a-a86a-a4c4d6cf277c",
+  "task_id": "task-1790734012391",
+  "started_at": "2026-09-30T11:34:14.118747",
+  "finished_at": "2026-09-30T11:38:51.258135",
+  "total_events": 5,
+  "stats": {
+    "add_ok": 0,
+    "add_fail": 0,
+    "recall_ok": 5,
+    "recall_fail": 0,
+    "recall_empty": 0,
+    "skip": 0
+  },
+  "events": [
+    {
+      "timestamp": "2026-09-30T11:34:19.612121",
+      "index": 1,
+      "event": "recall",
+      "session_id": "7fa2f39e-7762-485a-a86a-a4c4d6cf277c",
+      "limit": 5,
+      "hit_count": 1,
+      "results": [
+        "."
+      ]
+    },
+    {
+      "timestamp": "2026-09-30T11:35:22.720355",
+      "index": 2,
+      "event": "recall",
+      "session_id": "7fa2f39e-7762-485a-a86a-a4c4d6cf277c",
+      "limit": 5,
+      "hit_count": 1,
+      "results": [
+        "."
+      ]
+    },
+    {
+      "timestamp": "2026-09-30T11:35:56.778661",
+      "index": 3,
+      "event": "recall",
+      "session_id": "7fa2f39e-7762-485a-a86a-a4c4d6cf277c",
+      "limit": 5,
+      "hit_count": 1,
+      "results": [
+        "."
+      ]
+    },
+    {
+      "timestamp": "2026-09-30T11:36:59.098337",
+      "index": 4,
+      "event": "recall",
+      "session_id": "7fa2f39e-7762-485a-a86a-a4c4d6cf277c",
+      "limit": 5,
+      "hit_count": 1,
+      "results": [
+        "."
+      ]
+    },
+    {
+      "timestamp": "2026-09-30T11:38:03.531224",
+      "index": 5,
+      "event": "recall",
+      "session_id": "7fa2f39e-7762-485a-a86a-a4c4d6cf277c",
+      "limit": 5,
+      "hit_count": 1,
+      "results": [
+        "."
+      ]
+    }
+  ]
+}

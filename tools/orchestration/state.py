@@ -21,6 +21,7 @@ def params_key(params: Any) -> str:
 class OrchestratorState:
     """多步编排的会话状态，跨步骤传递。"""
     goal: str = ""
+    session_id: Optional[str] = None   # ← Mem0 结构化记忆的隔离键
     history: List[str] = field(default_factory=list)
 
     successful_calls: Dict[Tuple[str, str], int] = field(default_factory=dict)
@@ -32,6 +33,16 @@ class OrchestratorState:
     mandatory_next_tool: Optional[str] = None
 
     total_attempts: int = 0
+
+    # 最近一次成功读取的文件内容，供 _fill_params 使用
+    last_read_content: Optional[str] = None
+    last_read_path: Optional[str] = None
+
+    # 按时间顺序记录成功调用的工具名，供完成度校验使用
+    successful_tool_sequence: List[str] = field(default_factory=list)
+
+    # 最近一次结果评估是否通过（供 _validate_done 使用）
+    last_assessment_passed: bool = True
 
     def add_history(self, entry: str) -> None:
         self.history.append(entry)
@@ -50,6 +61,7 @@ class OrchestratorState:
         if tool_name not in self.succeeded_tool_names:
             self.succeeded_tool_names[tool_name] = step_index
         self.last_successful_call_key = key
+        self.successful_tool_sequence.append(tool_name)
 
     def mark_failure(self, tool_name: str, params: Any, error: str) -> None:
         key = (tool_name, params_key(params))
@@ -75,3 +87,44 @@ class OrchestratorState:
         for key, err in list(self.failed_calls.items())[-max_items:]:
             items.append(f"  ❌ {key[0]}({key[1][:60]}) → {err[:80]}")
         return "\n".join(items) if items else "  (无)"
+
+    # ── 快照 / 恢复（用于审批后的 orchestrator 续跑） ──
+
+    def snapshot(self) -> dict:
+        return {
+            "goal": self.goal,
+            "session_id": self.session_id,
+            "history": list(self.history),
+            "successful_calls": dict(self.successful_calls),
+            "failed_calls": dict(self.failed_calls),
+            "succeeded_tool_names": dict(self.succeeded_tool_names),
+            "last_successful_call_key": self.last_successful_call_key,
+            "total_attempts": self.total_attempts,
+            "last_read_content": self.last_read_content,
+            "last_read_path": self.last_read_path,
+            "successful_tool_sequence": list(self.successful_tool_sequence),
+            "last_assessment_passed": self.last_assessment_passed,
+        }
+
+    @classmethod
+    def from_snapshot(cls, snap: dict) -> "OrchestratorState":
+        st = cls(
+            goal=snap.get("goal", ""),
+            session_id=snap.get("session_id"),
+        )
+        st.history = list(snap.get("history", []))
+        st.successful_calls = {
+            (k[0], k[1]) if isinstance(k, list) else k: v
+            for k, v in snap.get("successful_calls", {})
+        }
+        st.failed_calls = dict(snap.get("failed_calls", {}))
+        st.succeeded_tool_names = dict(snap.get("succeeded_tool_names", {}))
+        st.last_successful_call_key = snap.get("last_successful_call_key")
+        st.total_attempts = snap.get("total_attempts", 0)
+        st.last_read_content = snap.get("last_read_content")
+        st.last_read_path = snap.get("last_read_path")
+        st.successful_tool_sequence = list(
+            snap.get("successful_tool_sequence", [])
+        )
+        st.last_assessment_passed = snap.get("last_assessment_passed", True)
+        return st

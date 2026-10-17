@@ -152,4 +152,17 @@ def create_sessions_router(
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
+    # ────────── 文件操作日志 ──────────
+
+    @router.get("/api/session/{session_id}/file-logs")
+    async def list_file_logs(
+        session_id: str,
+        limit: int = Query(200, ge=1, le=500),
+    ):
+        try:
+            logs = session_provider().list_file_logs(session_id, limit=limit)
+            return {"status": "success", "logs": logs}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
     return router

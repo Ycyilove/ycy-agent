@@ -14,6 +14,7 @@ from ..config import (
     DEFAULT_MODEL,
     LOCAL_MODEL_CONFIG,
     MODESCOPE_API_KEY,
+    MODESCOPE_BASE_URL,
     SILICONFLOW_API_KEY,
     SILICONFLOW_BASE_URL,
     MODEL_SOURCE,
@@ -77,7 +78,10 @@ class ModelScopeLLM:
             return self.local_service.generate(processed_messages)
 
         self._ensure_llm()
-        return self.llm.invoke(self._convert_to_langchain(processed_messages)).content
+        return self.llm.invoke(
+            self._convert_to_langchain(processed_messages),
+            config=self._langchain_config(),
+        ).content
 
     def stream_generate(self, messages: List[Dict[str, str]], mode: str = 'quick'):
         processed_messages = self._add_mode_prompt(messages, mode)
@@ -91,7 +95,10 @@ class ModelScopeLLM:
 
         self._ensure_llm()   # 在 thread pool 里加载，安全
         try:
-            for chunk in self.llm.stream(self._convert_to_langchain(processed_messages)):
+            for chunk in self.llm.stream(
+                self._convert_to_langchain(processed_messages),
+                config=self._langchain_config(),
+            ):
                 if chunk.content:
                     yield f"data: {json.dumps({'text': chunk.content}, ensure_ascii=False)}\n\n"
         except Exception as error:
@@ -102,6 +109,21 @@ class ModelScopeLLM:
     def _add_mode_prompt(self, messages: List[Dict[str, str]], mode: str = 'quick'):
         system_prompt = self.QUICK_RESPONSE_PROMPT if mode == 'quick' else self.DEEP_THINKING_PROMPT
         return [{'role': 'system', 'content': system_prompt}, *messages]
+
+    @staticmethod
+    def _langchain_config():
+        """从 observability 拿 per-turn callback handler。
+
+        未启用 Langfuse 时返回 None，langchain 会忽略。
+        """
+        try:
+            from .observability import get_callback_handler
+        except ImportError:
+            return None
+        handler = get_callback_handler()
+        if handler is None:
+            return None
+        return {"callbacks": [handler]}
 
     @staticmethod
     def _convert_to_langchain(messages: List[Dict[str, str]]):

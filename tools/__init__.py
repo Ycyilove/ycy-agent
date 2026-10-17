@@ -33,6 +33,9 @@ class ToolMetadata:
     input_schema: Optional[Dict[str, Any]] = None
     origin: str = "builtin"
     idempotent: bool = False
+    # 资源声明：工具可能产出哪些资源 kind
+    # 空 = 未声明，走隐式提取；非空 = 显式契约
+    resource_kinds: List[str] = field(default_factory=list)
 
 
 class ToolRegistry:
@@ -50,7 +53,8 @@ class ToolRegistry:
         return cls._instance
 
     def register(self, name: str = None, description: str = "", parameters: Dict = None,
-                 examples: List[str] = None, category: str = "general", danger_level: str = "safe"):
+                 examples: List[str] = None, category: str = "general",
+                 danger_level: str = "safe", resource_kinds: List[str] = None):
         """工具注册装饰器"""
         def decorator(func: Callable):
             tool_name = name or func.__name__
@@ -73,6 +77,7 @@ class ToolRegistry:
                 examples=examples,
                 category=category,
                 danger_level=danger_level,
+                resource_kinds=resource_kinds,
             )
 
             @wraps(func)
@@ -98,6 +103,7 @@ class ToolRegistry:
         input_schema: Dict[str, Any] = None,
         origin: str = "builtin",
         idempotent: bool = False,
+        resource_kinds: List[str] = None,
     ) -> Callable:
         """Register a runtime callable, including async MCP handlers."""
         self._tools[name] = func
@@ -111,6 +117,7 @@ class ToolRegistry:
             input_schema=input_schema,
             origin=origin,
             idempotent=idempotent,
+            resource_kinds=list(resource_kinds or []),
         )
         return func
 
@@ -186,15 +193,21 @@ registry = ToolRegistry()
 
 
 def tool(name: str = None, description: str = "", parameters: Dict = None,
-         examples: List[str] = None, category: str = "general", danger_level: str = "safe"):
-    """工具注册装饰器（简写）"""
+         examples: List[str] = None, category: str = "general",
+         danger_level: str = "safe", resource_kinds: List[str] = None):
+    """工具注册装饰器（简写）
+
+    resource_kinds 可选声明该工具会产出哪些资源（image/pdf/excel/...），
+    用于让上层预知资源类型。不声明则走隐式提取。
+    """
     return registry.register(
         name=name,
         description=description,
         parameters=parameters,
         examples=examples,
         category=category,
-        danger_level=danger_level
+        danger_level=danger_level,
+        resource_kinds=resource_kinds,
     )
 
 

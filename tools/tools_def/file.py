@@ -5,6 +5,9 @@
 import os
 import shutil
 import hashlib
+import json
+import uuid
+import threading
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from datetime import datetime
@@ -30,7 +33,185 @@ PROTECTED_PATTERNS = [
     r'^/system',
 ]
 
+# ─────────────────────────────────────────────────────────────
+# 回收站（trash）
+# ─────────────────────────────────────────────────────────────
 
+_TRASH_DIR = os.path.abspath(
+    os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+        "data", ".trash",
+    )
+)
+_TRASH_INDEX = os.path.join(_TRASH_DIR, "_index.json")
+_trash_lock = threading.Lock()
+
+
+def _ensure_trash_dir() -> None:
+    os.makedirs(_TRASH_DIR, exist_ok=True)
+
+
+def _load_trash_index() -> Dict[str, Any]:
+    if not os.path.exists(_TRASH_INDEX):
+        return {}
+    try:
+        with open(_TRASH_INDEX, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_trash_index(index: Dict[str, Any]) -> None:
+    _ensure_trash_dir()
+    tmp = _TRASH_INDEX + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(index, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, _TRASH_INDEX)
+
+
+def move_to_trash(file_path: str) -> Dict[str, Any]:
+    """把文件移到回收站。返回 {success, trash_id, ...}。"""
+    if not os.path.exists(file_path):
+        return {"success": False, "error": f"文件不存在: {file_path}"}
+    if not is_safe_path(os.path.abspath(file_path)):
+        return {"success": False, "error": "路径受保护"}
+
+    try:
+        _ensure_trash_dir()
+        original_path = os.path.abspath(file_path)
+        original_name = os.path.basename(original_path)
+        trash_id = uuid.uuid4().hex[:8]
+        trash_name = f"{trash_id}_{original_name}"
+        trash_path = os.path.join(_TRASH_DIR, trash_name)
+
+        size = os.path.getsize(original_path)
+        shutil.move(original_path, trash_path)
+
+        entry = {
+            "id": trash_id,
+            "original_path": original_path,
+            "original_name": original_name,
+            "trash_path": trash_path,
+            "deleted_at": datetime.now().isoformat(),
+            "size": size,
+        }
+        with _trash_lock:
+            index = _load_trash_index()
+            index[trash_id] = entry
+            _save_trash_index(index)
+
+        return {"success": True, "entry": entry}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def list_trash() -> List[Dict[str, Any]]:
+    """列出回收站内容（按删除时间倒序）。"""
+    with _trash_lock:
+        index = _load_trash_index()
+    items = [v for v in index.values() if os.path.exists(v.get("trash_path", ""))]
+    items.sort(key=lambda x: x.get("deleted_at", ""), reverse=True)
+    return items
+
+
+def restore_from_trash(trash_id: str) -> Dict[str, Any]:
+    """从回收站恢复文件。"""
+    with _trash_lock:
+        index = _load_trash_index()
+        entry = index.get(trash_id)
+        if not entry:
+            return {"success": False, "error": f"回收站中不存在: {trash_id}"}
+
+        trash_path = entry.get("trash_path")
+        original_path = entry.get("original_path")
+
+        if not os.path.exists(trash_path):
+            index.pop(trash_id, None)
+            _save_trash_index(index)
+            return {"success": False, "error": "回收站中的文件已丢失"}
+
+        # ── 原路径被占用 → 自动加时间戳后缀 ──
+        final_path = original_path
+        path_adjusted = False
+        if os.path.exists(original_path):
+            base, ext = os.path.splitext(original_path)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            final_path = f"{base}.restored_{timestamp}{ext}"
+            path_adjusted = True
+            # 极端情况：加后缀还冲突 → 再加短 uuid
+            if os.path.exists(final_path):
+                final_path = (
+                    f"{base}.restored_{timestamp}_{uuid.uuid4().hex[:4]}{ext}"
+                )
+
+        try:
+            os.makedirs(os.path.dirname(final_path) or ".", exist_ok=True)
+            shutil.move(trash_path, final_path)
+            index.pop(trash_id, None)
+            _save_trash_index(index)
+
+            if path_adjusted:
+                return {
+                    "success": True,
+                    "restored_path": final_path,
+                    "original_path": original_path,
+                    "path_adjusted": True,
+                    "message": (
+                        f"原路径 {original_path} 已被占用，"
+                        f"文件已恢复到 {final_path}"
+                    ),
+                }
+            return {
+                "success": True,
+                "restored_path": final_path,
+                "message": f"已恢复到 {final_path}",
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+
+def purge_from_trash(trash_id: str) -> Dict[str, Any]:
+    """从回收站永久删除。"""
+    with _trash_lock:
+        index = _load_trash_index()
+        entry = index.get(trash_id)
+        if not entry:
+            return {"success": False, "error": f"回收站中不存在: {trash_id}"}
+
+        trash_path = entry.get("trash_path")
+        try:
+            if os.path.exists(trash_path):
+                if os.path.isdir(trash_path):
+                    shutil.rmtree(trash_path)
+                else:
+                    os.remove(trash_path)
+            index.pop(trash_id, None)
+            _save_trash_index(index)
+            return {"success": True, "message": "已永久删除", "path": entry.get("original_path", ""),}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+
+def purge_all_trash() -> Dict[str, Any]:
+    """清空回收站。"""
+    with _trash_lock:
+        index = _load_trash_index()
+        count = 0
+        for entry in index.values():
+            trash_path = entry.get("trash_path")
+            try:
+                if os.path.exists(trash_path):
+                    if os.path.isdir(trash_path):
+                        shutil.rmtree(trash_path)
+                    else:
+                        os.remove(trash_path)
+                    count += 1
+            except Exception:
+                pass
+        _save_trash_index({})
+        return {"success": True, "count": count}
+        
 def is_protected_path(path: str) -> bool:
     """检查是否为受保护路径"""
     path = os.path.abspath(path)
@@ -124,13 +305,19 @@ def list_files(directory: str, pattern: str = None, include_subdirs: bool = Fals
                 "modified": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
             })
 
+        abs_dir = os.path.abspath(directory)
         return {
             "success": True,
-            "directory": directory,
+            "directory": abs_dir,
             "files_count": len(files),
             "dirs_count": len(dirs),
             "files": sorted(files_info, key=lambda x: x['name']),
-            "directories": sorted(dirs_info, key=lambda x: x['name'])
+            "directories": sorted(dirs_info, key=lambda x: x['name']),
+            "message": (
+                f"已列出 {abs_dir}："
+                f"{len(files)} 个文件、{len(dirs)} 个子目录"
+                + (f"（过滤：{pattern}）" if pattern else "")
+            ),
         }
 
     except Exception as e:
@@ -337,6 +524,18 @@ def get_file_info(file_path: str, compute_hash: bool = False) -> Dict[str, Any]:
     except Exception as e:
         return {"success": False, "error": str(e)}
 
+# 禁止用 write_file 写的二进制扩展名 → 提示改用哪个工具
+_BINARY_WRITE_HINTS = {
+    ".xlsx": "write_excel",
+    ".xls":  "write_excel",
+    ".docx": "write_docx",
+    ".doc":  "write_docx",
+    ".pdf":  "merge_pdfs 或专用工具",
+    ".pptx": "（当前无写入工具）",
+    ".zip":  "（当前无写入工具）",
+}
+
+
 @tool(
     name="write_file",
     description="创建新文件或覆盖写入现有文件。用于创建文本/代码/配置文件。",
@@ -354,19 +553,40 @@ def get_file_info(file_path: str, compute_hash: bool = False) -> Dict[str, Any]:
 def write_file(file_path: str, content: str, encoding: str = "utf-8") -> Dict[str, Any]:
     """创建或覆盖文件。"""
     try:
+        # ── 二进制格式保护：拒绝写 .xlsx/.docx/.pdf 等 ──
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext in _BINARY_WRITE_HINTS:
+            hint = _BINARY_WRITE_HINTS[ext]
+            return {
+                "success": False,
+                "error": (
+                    f"❌ 不能用 write_file 写 {ext} 文件（二进制格式）。"
+                    f"请改用工具：{hint}"
+                ),
+                "hint_tool": hint,
+            }
+
         if not is_safe_path(os.path.abspath(file_path)):
             return {"success": False, "error": "操作被拒绝：路径受保护"}
         os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
         with open(file_path, "w", encoding=encoding) as f:
             f.write(content)
+        abs_path = os.path.abspath(file_path)
         return {
             "success": True,
-            "message": f"已写入 {len(content)} 字符到 {file_path}",
-            "file_path": file_path,
+            "message": (
+                f"已写入 {abs_path}"
+                f"（{len(content)} 字符，{len(content.encode(encoding))} 字节，"
+                f"{content.count(chr(10)) + (1 if content else 0)} 行）"
+            ),
+            "file_path": abs_path,
+            "size": len(content),
+            "bytes": len(content.encode(encoding)),
+            "line_count": content.count("\n") + (1 if content else 0),
+            "encoding": encoding,
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
-
 
 @tool(
     name="edit_file",
@@ -390,11 +610,43 @@ def edit_file(file_path: str, old_text: str, new_text: str) -> Dict[str, Any]:
         with open(file_path, "r", encoding="utf-8") as f:
             content = f.read()
         if old_text not in content:
-            return {"success": False, "error": f"文件中未找到 '{old_text}'"}
+            preview = old_text[:80] + ("..." if len(old_text) > 80 else "")
+            return {
+                "success": False,
+                "error": (
+                    f"文件中未找到要替换的内容。"
+                    f"你传入的 old_text（前 80 字符）：{preview!r}\n"
+                    f"提示：old_text 必须逐字匹配文件内容（含空格、缩进、换行）。"
+                ),
+                "file_path": os.path.abspath(file_path),
+                "old_text_preview": preview,
+            }
         new_content = content.replace(old_text, new_text, 1)
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(new_content)
-        return {"success": True, "message": f"已替换 {file_path}"}
+        abs_path = os.path.abspath(file_path)
+        delta_lines = (
+            new_content.count("\n") - content.count("\n")
+        )
+        return {
+            "success": True,
+            "message": (
+                f"已替换 {abs_path}"
+                f"（old_text {len(old_text)} 字符 → new_text {len(new_text)} 字符"
+                + (
+                    f"，行数 {delta_lines:+d}"
+                    if delta_lines != 0
+                    else ""
+                )
+                + "）"
+            ),
+            "file_path": abs_path,
+            "old_text_preview": old_text[:80],
+            "new_text_preview": new_text[:80],
+            "old_size": len(content),
+            "new_size": len(new_content),
+            "delta_lines": delta_lines,
+        }
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -412,10 +664,19 @@ def edit_file(file_path: str, old_text: str, new_text: str) -> Dict[str, Any]:
 def create_directory(directory: str) -> Dict[str, Any]:
     """创建目录。"""
     try:
-        if not is_safe_path(os.path.abspath(directory)):
+        abs_dir = os.path.abspath(directory)
+        if not is_safe_path(abs_dir):
             return {"success": False, "error": "操作被拒绝：路径受保护"}
-        os.makedirs(directory, exist_ok=True)
-        return {"success": True, "message": f"已创建目录 {directory}"}
+        already_existed = os.path.exists(abs_dir)
+        os.makedirs(abs_dir, exist_ok=True)
+        return {
+            "success": True,
+            "message": (
+                f"目录已{'存在' if already_existed else '创建'}：{abs_dir}"
+            ),
+            "directory": abs_dir,
+            "already_existed": already_existed,
+        }
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -439,15 +700,63 @@ def move_file(source: str, destination: str) -> Dict[str, Any]:
         if not is_safe_path(os.path.abspath(destination)):
             return {"success": False, "error": "目标路径受保护"}
         os.makedirs(os.path.dirname(destination) or ".", exist_ok=True)
-        shutil.move(source, destination)
+        abs_src = os.path.abspath(source)
+        abs_dst = os.path.abspath(destination)
+        shutil.move(abs_src, abs_dst)
         return {
             "success": True,
-            "message": f"已移动",
-            "new_path": destination,
+            "message": f"已移动：{abs_src} → {abs_dst}",
+            "source": abs_src,
+            "new_path": abs_dst,
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
 
+
+@tool(
+    name="delete_file",
+    description=(
+        "删除文件（移到回收站，可恢复）。"
+        "删除后文件暂存到 data/.trash/，不会立刻从磁盘消失。"
+    ),
+    parameters={
+        "file_path": {"type": "str", "description": "要删除的文件路径（必填）"},
+    },
+    examples=["delete_file(file_path='D:/data/old.txt')"],
+    category="file",
+    danger_level="medium",
+)
+def delete_file(file_path: str) -> Dict[str, Any]:
+    """删除文件到回收站。"""
+    try:
+        result = move_to_trash(file_path)
+        if not result.get("success"):
+            return result
+        entry = result["entry"]
+        return {
+            "success": True,
+            "message": f"已移入回收站：{entry['original_name']}",
+            "original_path": entry["original_path"],
+            "trash_id": entry["id"],
+            "new_path": entry["trash_path"],   # 让 _file_log_entry 能取到路径
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@tool(
+    name="restore_file",
+    description="从回收站恢复文件到原始路径。",
+    parameters={
+        "trash_id": {"type": "str", "description": "回收站条目的 ID（必填）"},
+    },
+    examples=["restore_file(trash_id='abc12345')"],
+    category="file",
+    danger_level="medium",
+)
+def restore_file(trash_id: str) -> Dict[str, Any]:
+    """恢复回收站文件。"""
+    return restore_from_trash(trash_id)
 
 @tool(
     name="read_text_file",
@@ -467,11 +776,20 @@ def read_text_file(file_path: str, encoding: str = "utf-8") -> Dict[str, Any]:
             return {"success": False, "error": "路径受保护"}
         with open(file_path, "r", encoding=encoding) as f:
             content = f.read()
+        truncated = len(content) > 50000
         return {
             "success": True,
             "content": content[:50000],
-            "file_path": file_path,
+            "file_path": os.path.abspath(file_path),
             "size": len(content),
+            "line_count": content.count("\n") + (1 if content else 0),
+            "truncated": truncated,
+            "message": (
+                f"已读取 {os.path.abspath(file_path)}"
+                f"（{len(content)} 字符，{content.count(chr(10)) + 1} 行"
+                + ("，已截断前 50000 字符" if truncated else "")
+                + "）"
+            ),
         }
     except Exception as e:
         return {"success": False, "error": str(e)}

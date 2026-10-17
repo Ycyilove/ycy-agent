@@ -1,6 +1,6 @@
 import { useReducer, useRef, useCallback, useEffect, useContext } from 'react';
 import { AppContext } from './AppContext';
-import { listAgentTasks } from '../../services/api';
+import { listAgentTasks, listFileLogs } from '../../services/api';
 
 const EMPTY_WORKSPACE = { allowed: [], denied: [] };
 
@@ -14,6 +14,9 @@ const initialState = {
   trash: [],
   approvals: [],
   rightCollapsed: false,
+  // 已被前端处理过的 approval id 集合。
+  // 客户端权威，不会被后端 SSE 覆盖。
+  resolvedApprovalIds: new Set(),
 };
 
 function reducer(state, action) {
@@ -206,6 +209,40 @@ function reducer(state, action) {
       };
     }
 
+    case 'HYDRATE_FILE_LOG': {
+      // 合并策略：保留本地已有的，追加后端拉回的，按 time 去重倒序
+      const incoming = action.logs || [];
+      const existingIds = new Set(state.fileLog.map((e) => e.id));
+      const merged = [
+        ...state.fileLog,
+        ...incoming.filter((e) => !existingIds.has(e.id)),
+      ];
+      merged.sort((a, b) => (b.time || 0) - (a.time || 0));
+      return {
+        ...state,
+        fileLog: merged.slice(0, 200),
+      };
+    }
+
+    case 'ADD_TASK_RESOURCE': {
+      const { taskId, resource } = action;
+      const task = state.tasks[taskId];
+      if (!task) return state;
+      const existing = task.resources || [];
+      // 按 id 去重
+      if (existing.some((r) => r.id === resource.id)) return state;
+      return {
+        ...state,
+        tasks: {
+          ...state.tasks,
+          [taskId]: {
+            ...task,
+            resources: [...existing, resource],
+          },
+        },
+      };
+    }
+
     case 'ADD_FILE_LOG':
       return {
         ...state,
@@ -249,11 +286,15 @@ function reducer(state, action) {
         ],
       };
 
-    case 'RESOLVE_APPROVAL':
+    case 'RESOLVE_APPROVAL': {
+      const nextResolved = new Set(state.resolvedApprovalIds);
+      nextResolved.add(action.id);
       return {
         ...state,
         approvals: state.approvals.filter((item) => item.id !== action.id),
+        resolvedApprovalIds: nextResolved,
       };
+    }
 
     // ── 工作区：作用在会话上 ──
     case 'ADD_WORKSPACE_DIR': {

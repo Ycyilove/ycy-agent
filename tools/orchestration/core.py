@@ -7,7 +7,10 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional
+
+from backend.services.llm_debug_log import dump_llm_call
 
 from tools.agent import (
     ToolAgent,
@@ -23,7 +26,12 @@ from tools.semantics import (
 
 from .prompt import ORCHESTRATOR_PROMPT
 from .state import OrchestratorState, params_key
-from .validator import requires_tool_call, classify_request
+from .validator import (
+    requires_tool_call,
+    classify_request,
+    is_web_query,
+    check_web_query_completion,
+)
 from .intent_router import route_intent
 
 
@@ -39,6 +47,79 @@ class OrchestratorStep:
     done: bool = False
 
 
+# ─────────────────────────────────────────────────────────────
+# 结构化历史（跨 turn 上下文）
+# ─────────────────────────────────────────────────────────────
+
+def _format_relative_time(iso_ts: Optional[str], now_ts: float) -> str:
+    """把 ISO 时间戳转成「刚刚」/「3 分钟前」/「昨天」这类相对时间。
+
+    空输入 / 解析失败 → 返回空字符串。
+    """
+    if not iso_ts:
+        return ""
+    try:
+        dt = datetime.fromisoformat(iso_ts)
+        delta = now_ts - dt.timestamp()
+    except Exception:
+        return ""
+
+    if delta < 0:
+        return "刚刚"
+    if delta < 60:
+        return "刚刚"
+    if delta < 3600:
+        return f"{int(delta // 60)} 分钟前"
+    if delta < 86400:
+        return f"{int(delta // 3600)} 小时前"
+    if delta < 86400 * 7:
+        return f"{int(delta // 86400)} 天前"
+    return dt.strftime("%Y-%m-%d")
+
+
+def _build_structured_history(
+    messages: List[Dict[str, Any]],
+    max_items: int = 6,
+    now_ts: Optional[float] = None,
+) -> str:
+    """把原始消息列表压成结构化历史块。
+
+    设计意图：
+        - **用户消息**：保留内容（截断到 300 字符）——这是用户意图
+        - **assistant 消息**：只标记「已回复」，**不带原文**
+          —— 避免历史里的绝对化结论（如"无法渲染"）污染当前决策
+        - 每条消息带**相对时间**，让 LLM 区分"过去"和"现在"
+    """
+    if not messages:
+        return ""
+    import time as _time
+    now_ts = now_ts if now_ts is not None else _time.time()
+
+    recent = messages[-max_items:]
+    lines: List[str] = []
+    for m in recent:
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role", "user")
+        ts = m.get("timestamp") or ""
+        rel = _format_relative_time(ts, now_ts)
+
+        if role == "user":
+            content = (m.get("content") or "").strip()
+            if not content:
+                continue
+            if len(content) > 300:
+                content = content[:300] + "..."
+            prefix = f"[{rel}] " if rel else ""
+            lines.append(f"- {prefix}用户：{content}")
+        elif role == "assistant":
+            prefix = f"[{rel}] " if rel else ""
+            lines.append(f"- {prefix}Agent 已回复（内容省略）")
+        # 其他 role 忽略
+
+    return "\n".join(lines)
+
+
 class AgentOrchestrator:
     """Multi-step tool orchestration loop with strategies A/B/D/E."""
 
@@ -48,11 +129,13 @@ class AgentOrchestrator:
         llm_provider: Callable[[], Any],
         max_steps: int = 10,
         enable_intent_router: bool = True,
+        shortlister_provider: Optional[Callable[[], Any]] = None,
     ):
         self._agent_provider = agent_provider
         self._llm_provider = llm_provider
         self._max_steps = max_steps
         self._enable_intent_router = enable_intent_router
+        self._shortlister_provider = shortlister_provider
 
     # ── 工具格式化（策略 A：带用途标签） ──
 
@@ -168,6 +251,115 @@ class AgentOrchestrator:
 
         return "\n".join(lines)
 
+    def _format_tool_directory(self, tools: Dict[str, Any]) -> str:
+        """只给工具名 + 一句描述 + tags，用于「选工具」阶段。
+
+        不带参数 schema，避免干扰 LLM 的语义匹配。
+        """
+        if not tools:
+            return "(无可用工具)"
+
+        # discovery 类工具：完整保留描述，避免截断掉关键引导句
+        _FULL_DESC_TOOLS = frozenset({"search_and_connect_mcp"})
+
+        lines = []
+        for name, meta in tools.items():
+            desc_raw = (getattr(meta, "description", "") or "").strip()
+            if name in _FULL_DESC_TOOLS:
+                # 取前 3 行（保留 "Use this when..." 这类引导）
+                desc = "\n    ".join(desc_raw.split("\n")[:3]).strip()
+            else:
+                desc = desc_raw.split("\n")[0].strip()
+                if len(desc) > 70:
+                    desc = desc[:67] + "..."
+
+            tags = get_intent_tags(name)
+            tag_str = ""
+            if tags:
+                tag_str = f"  [tags: {','.join(str(t) for t in tags[:4])}]"
+
+            # 内置工具打 ⭐，让 LLM 倾向选内置
+            marker = "" if name.startswith("mcp__") else "⭐ "
+
+            # MCP 工具：附上 server 名，让 LLM 知道来源
+            server_note = ""
+            if name.startswith("mcp__"):
+                parts = name.split("__", 2)
+                if len(parts) == 3:
+                    server_note = f"  (MCP server: {parts[1]})"
+            lines.append(f"- {marker}`{name}`{server_note}{tag_str}\n    {desc}")
+
+        return "\n".join(lines)
+
+    def _format_single_tool_schema(self, meta: Any) -> str:
+        """给单个工具的完整 schema，用于「填参数」阶段。
+
+        包括嵌套结构、enum、默认值、必填标记。
+        """
+        schema = getattr(meta, "input_schema", None) or {}
+        properties = (
+            schema.get("properties")
+            or getattr(meta, "parameters", None)
+            or {}
+        )
+        required = set(schema.get("required") or [])
+
+        if not properties:
+            return "(该工具无参数)"
+
+        lines = []
+        for pname, pinfo in properties.items():
+            if not isinstance(pinfo, dict):
+                lines.append(f"- {pname}: (任意类型)")
+                continue
+
+            ptype = pinfo.get("type", "any")
+            mark = "必填" if pname in required else "可选"
+            pdesc = pinfo.get("description", "")
+
+            line = f"- `{pname}` ({ptype}, {mark})"
+            if pdesc:
+                line += f": {pdesc}"
+            if "enum" in pinfo and isinstance(pinfo["enum"], list):
+                line += f"\n    可选值: {pinfo['enum']}"
+            if "default" in pinfo:
+                line += f"\n    默认: {pinfo['default']}"
+            lines.append(line)
+
+            # 嵌套对象：展示 1 层
+            nested = pinfo.get("properties")
+            if isinstance(nested, dict) and nested:
+                nested_required = set(pinfo.get("required") or [])
+                for nname, ninfo in nested.items():
+                    if not isinstance(ninfo, dict):
+                        continue
+                    ntype = ninfo.get("type", "any")
+                    nmark = "必填" if nname in nested_required else "可选"
+                    ndesc = ninfo.get("description", "")
+                    sub = f"    - `{nname}` ({ntype}, {nmark})"
+                    if ndesc:
+                        sub += f": {ndesc}"
+                    lines.append(sub)
+
+            # 数组元素
+            items = pinfo.get("items")
+            if isinstance(items, dict):
+                itype = items.get("type", "any")
+                inested = items.get("properties")
+                lines.append(f"    数组元素类型: {itype}")
+                if isinstance(inested, dict) and inested:
+                    for iname, iinfo in inested.items():
+                        if not isinstance(iinfo, dict):
+                            continue
+                        itype2 = iinfo.get("type", "any")
+                        idesc = iinfo.get("description", "")
+                        sub = f"      - `{iname}` ({itype2})"
+                        if idesc:
+                            sub += f": {idesc}"
+                        lines.append(sub)
+
+        return "\n".join(lines)
+
     # ── 工具预筛：从 goal 粗筛相关工具 ──
 
     # 关键词组 → 匹配的工具名/描述关键词
@@ -280,6 +472,73 @@ class AgentOrchestrator:
 
         return None
 
+    # 内置工具覆盖列表：内置版本存在时，同名 MCP 版本可能参数不同
+    _BUILTIN_EDIT_TOOLS = frozenset({"edit_file"})
+
+    @staticmethod
+    def _adapt_params_for_tool(
+        tool_name: str,
+        params: dict,
+        available: Dict[str, Any],
+    ) -> dict:
+        """按工具 schema 适配参数名。
+
+        处理 LLM 混淆「内置 edit_file」和「MCP filesystem edit_file」的情况：
+        LLM 选了内置 `edit_file`，但传了 MCP 格式的 `path` + `edits`。
+        这里自动转成内置格式 `file_path` + `old_text` + `new_text`。
+        """
+        if not isinstance(params, dict):
+            return params
+
+        meta = available.get(tool_name)
+        if meta is None:
+            return params
+
+        schema = getattr(meta, "input_schema", None) or {}
+        allowed = set((schema.get("properties") or {}).keys())
+        if not allowed:
+            return params
+
+        # 参数已全部合法：不动
+        if set(params.keys()).issubset(allowed):
+            return params
+
+        # ── 特化规则：内置 edit_file 收到 MCP 格式 ──
+        if tool_name in AgentOrchestrator._BUILTIN_EDIT_TOOLS:
+            if "path" in params and "edits" in params:
+                edits = params.get("edits") or []
+                if isinstance(edits, list) and edits:
+                    first = edits[0]
+                    if isinstance(first, dict):
+                        old_text = (
+                            first.get("oldText")
+                            or first.get("old_text")
+                            or ""
+                        )
+                        new_text = (
+                            first.get("newText")
+                            or first.get("new_text")
+                            or ""
+                        )
+                        return {
+                            "file_path": params.get("path"),
+                            "old_text": old_text,
+                            "new_text": new_text,
+                        }
+
+        # ── 通用规则：path → file_path ──
+        result = dict(params)
+        if "file_path" in allowed and "path" in result:
+            result["file_path"] = result.pop("path")
+
+        # ── 通用规则：oldText/newText → old_text/new_text ──
+        if "old_text" in allowed and "oldText" in result:
+            result["old_text"] = result.pop("oldText")
+        if "new_text" in allowed and "newText" in result:
+            result["new_text"] = result.pop("newText")
+
+        return result
+
     def _format_history(self, history: List[str], goal: str, state: OrchestratorState) -> str:
         reminder = (
             f"## 提醒\n"
@@ -350,43 +609,168 @@ class AgentOrchestrator:
 
     # ── LLM 决策 ──
 
+    def _select_shortlist(
+        self, goal: str, tools: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """优先用 embedding 筛，失败退到关键词。
+
+        强制保留 discovery 工具，避免语义相似度低导致被筛掉。
+        """
+        # 1. embedding
+        picked = None
+        if self._shortlister_provider is not None:
+            try:
+                sl = self._shortlister_provider()
+                if sl is not None:
+                    picked = sl.shortlist(goal, tools)
+            except Exception:
+                logger.exception(
+                    "[dsh][orchestrator] shortlister raised, fallback to keyword"
+                )
+
+        # 2. 关键词兜底
+        if picked is None:
+            picked = self._shortlist_tools(goal, tools)
+
+        # 3. 强制保留关键工具（discovery + fetch_url + 知识库工具）
+        # 知识库工具必须保留：embedding shortlist 对"人名 + 获奖"这类
+        # 查询的语义相似度低，容易把 search_knowledge 筛掉。
+        if picked is not None:
+            added = []
+            picked = dict(picked)
+            force_keep = self._MCP_DISCOVERY_TOOLS | {
+                "fetch_url",
+                "search_knowledge",
+                "knowledge_stats",
+                "list_knowledge_sources",
+                # 网页检索：确保搜索/抓取类 MCP 不被 embedding 筛掉
+                "mcp__tavily__tavily_search",
+                "mcp__tavily__tavily_extract",
+                "mcp__tavily__tavily_crawl",
+                "mcp__tavily__tavily_research",
+            }
+            for name in force_keep:
+                if name in tools and name not in picked:
+                    picked[name] = tools[name]
+                    added.append(name)
+            if added:
+                logger.info(
+                    "[dsh][orchestrator] force-kept tools: %s", added
+                )
+
+        return picked
+
     async def _decide(
         self,
         goal: str,
         state: OrchestratorState,
         tools: Dict[str, Any],
+        prior_messages: Optional[List[Dict[str, str]]] = None,
     ) -> Optional[OrchestratorStep]:
-        # 预筛：只把相关工具塞进 prompt
-        shortlist = self._shortlist_tools(goal, tools)
+        # 预筛：优先 embedding，退关键词
+        shortlist = self._select_shortlist(goal, tools)
+
+        # 对话历史（结构化）——只保留用户意图，不保留 assistant 结论
+        conversation_block = ""
+        if prior_messages:
+            structured = _build_structured_history(prior_messages, max_items=6)
+            if structured:
+                conversation_block = (
+                    "## 对话历史（结构化）\n"
+                    + structured
+                    + "\n\n**注意**："
+                    "`Agent 已回复（内容省略）` 只表示上一轮已响应，"
+                    "**不代表当前状态**。历史结论可能已过时——"
+                    "重新审视当前工具目录再决策。\n\n"
+                )
+
+        # 如果之前读过文件，把它放进 prompt 的 history 部分
+        history_text = self._format_history(state.history, goal, state)
+        if state.last_read_content:
+            path = state.last_read_path or "(未知)"
+            content = state.last_read_content
+            if len(content) > 4000:
+                content = content[:4000] + "\n... (truncated)"
+            history_text += (
+                f"\n\n## 最近读取的文件（已缓存）\n"
+                f"路径：`{path}`\n"
+                f"内容：\n```\n{content}\n```\n"
+            )
 
         prompt = (
             ORCHESTRATOR_PROMPT
-            .replace("{tools}", self._format_tools(shortlist))
-            .replace("{history}", self._format_history(state.history, goal, state))
+            .replace("{tool_directory}", self._format_tool_directory(shortlist))
+            .replace("{history}", history_text)
             .replace("{goal}", goal)
             .replace("{max_steps}", str(self._max_steps))
         )
+        # 把对话历史插入 prompt 头部（ORCHESTRATOR_PROMPT 里没有占位符）
+        if conversation_block:
+            prompt = conversation_block + prompt
+        import time as _time
+        _t0 = _time.time()
+
         try:
             logger.info(
-                "[dsh][orchestrator] calling LLM, prompt length=%d chars, "
-                "tools_in_prompt=%d (total=%d)",
+                "[dsh][orchestrator] _decide calling LLM, prompt length=%d chars, "
+                "tools_in_directory=%d (total=%d)",
                 len(prompt), len(shortlist), len(tools),
             )
-            response = await asyncio.to_thread(
-                self._llm_provider().generate,
-                [{"role": "user", "content": prompt}],
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._llm_provider().generate,
+                    [{"role": "user", "content": prompt}],
+                ),
+                timeout=120.0,
             )
+            duration_ms = (_time.time() - _t0) * 1000
             logger.info("[dsh][orchestrator] raw LLM response: %r", response)
-        except Exception:
+
+            # 落盘
+            dump_llm_call(
+                kind="decide",
+                prompt=prompt,
+                response=response,
+                model=getattr(self._llm_provider(), "model", None),
+                duration_ms=duration_ms,
+                extra={
+                    "tools_in_prompt": list(shortlist.keys()),
+                    "tools_total": len(tools),
+                },
+            )
+        except asyncio.TimeoutError:
+            duration_ms = (_time.time() - _t0) * 1000
+            logger.warning("[dsh][orchestrator] _decide LLM timed out after 120s")
+            dump_llm_call(
+                kind="decide",
+                prompt=prompt,
+                response=None,
+                duration_ms=duration_ms,
+                error="timeout(120s)",
+                extra={"tools_in_prompt": list(shortlist.keys())},
+            )
+            return None
+        except asyncio.CancelledError:
+            logger.warning("[dsh][orchestrator] _decide cancelled")
+            raise
+        except Exception as exc:
+            duration_ms = (_time.time() - _t0) * 1000
             logger.exception("Orchestrator LLM call failed")
+            dump_llm_call(
+                kind="decide",
+                prompt=prompt,
+                response=None,
+                duration_ms=duration_ms,
+                error=str(exc),
+            )
             return None
 
         data = self._parse_json(response)
         if data is None:
-            logger.warning("Orchestrator returned non-JSON: %s", response[:200])
+            logger.warning("_decide non-JSON: %s", response[:200])
             return None
 
-        # 工具名容错：把 write_file 解析到 mcp__filesystem__write_file
+        # 工具名容错
         raw_name = data.get("tool_name")
         resolved_name = raw_name
         if raw_name and raw_name not in tools:
@@ -402,7 +786,7 @@ class AgentOrchestrator:
             step_index=len(state.history) + 1,
             thought=str(data.get("thought", "")),
             tool_name=resolved_name,
-            parameters=data.get("parameters") or {},
+            parameters={},   # ← 参数一律交给 _fill_params
             done=bool(data.get("done", False)),
         )
 
@@ -416,6 +800,16 @@ class AgentOrchestrator:
         """如果 done=true 不合理，返回拒绝原因（字符串）；合理则返回 None。"""
         if not requires_tool_call(goal):
             return None
+
+        # ── 网页检索优先检查（正交于 action / query） ──
+        if is_web_query(goal):
+            web_reject = check_web_query_completion(state)
+            if web_reject:
+                logger.info(
+                    "[dsh][orchestrator] web query done rejected: %s",
+                    web_reject[:120],
+                )
+                return web_reject
 
         kind = classify_request(goal)
 
@@ -533,70 +927,311 @@ class AgentOrchestrator:
         goal: str,
         tool_name: str,
         tools: Dict[str, Any],
+        state: Optional[OrchestratorState] = None,
+        prior_messages: Optional[List[Dict[str, str]]] = None,
     ) -> Dict[str, Any]:
-        """LLM 只填参数，不再选工具。
+        """阶段 2：给单个工具填参数。
 
-        prompt 只放这一个工具的 schema，省 token。
+        prompt 里只放这一个工具的完整 schema；带 history 让 LLM 知道上下文。
         """
         meta = tools.get(tool_name)
         if meta is None:
+            logger.warning(
+                "[dsh][orchestrator] _fill_params: %s not in tools", tool_name
+            )
             return {}
 
-        schema = getattr(meta, "input_schema", None) or {}
-        properties = schema.get("properties") or getattr(meta, "parameters", None) or {}
-        required = list(schema.get("required") or [])
-        if not required and properties:
-            required = list(properties.keys())
+        schema_text = self._format_single_tool_schema(meta)
+        tool_desc = getattr(meta, "description", "") or ""
 
-        # 精简 schema：只给参数名 + 类型 + 描述
-        param_lines = []
-        for pname, pinfo in properties.items():
-            if not isinstance(pinfo, dict):
-                param_lines.append(f"- {pname}: (任意类型)")
-                continue
-            ptype = pinfo.get("type", "any")
-            pdesc = pinfo.get("description", "")
-            mark = "必填" if pname in required else "可选"
-            line = f"- {pname} ({ptype}, {mark})"
-            if pdesc:
-                line += f": {pdesc}"
-            if "enum" in pinfo:
-                line += f" [可选值: {pinfo['enum']}]"
-            param_lines.append(line)
+        # history
+        history_text = ""
+        if state is not None and state.history:
+            history_text = (
+                "## 已执行步骤\n"
+                + "\n".join(state.history[-5:])
+                + "\n\n"
+            )
 
-        schema_text = "\n".join(param_lines) or "(无参数)"
+        # ── 编辑类工具：把最近读到的文件内容拼进 prompt ──
+        NEEDS_FILE_CONTENT_TOOLS = {
+            "edit_file", "write_file",
+            "mcp__filesystem__edit_file", "mcp__filesystem__write_file",
+        }
+        file_content_block = ""
+        if (
+            tool_name in NEEDS_FILE_CONTENT_TOOLS
+            and state is not None
+            and state.last_read_content
+        ):
+            content = state.last_read_content
+            if len(content) > 4000:
+                content = content[:4000] + "\n... (truncated)"
+            path = state.last_read_path or "(未知)"
+            file_content_block = (
+                f"## 最近读取的文件内容\n"
+                f"路径：`{path}`\n"
+                f"内容（**`old_text` 必须逐字匹配这里的内容**）：\n"
+                f"```\n{content}\n```\n\n"
+            )
+
+        # 对话历史（最近 6 条）——关键：让 LLM 知道用户上句说的文件在哪
+        conversation_block = ""
+        if prior_messages:
+            recent = prior_messages[-6:]
+            lines = []
+            for m in recent:
+                role = m.get("role", "user")
+                content = (m.get("content") or "").strip()
+                if not content:
+                    continue
+                if len(content) > 400:
+                    content = content[:400] + "..."
+                lines.append(f"- {role}: {content}")
+            if lines:
+                conversation_block = (
+                    "## 对话历史（最近几条）\n"
+                    + "\n".join(lines)
+                    + "\n\n"
+                )
+
+        # ── Mem0 检索：本会话已知文件路径 ──
+        mem0_block = ""
+        if state is not None and getattr(state, "session_id", None):
+            try:
+                from backend.services.memory_layer import recall_file_paths
+                known_paths = recall_file_paths(state.session_id, limit=5)
+                if known_paths:
+                    mem0_block = (
+                        "## 已知文件路径（本会话历史）\n"
+                        + "\n".join(f"- `{p}`" for p in known_paths)
+                        + "\n\n"
+                    )
+                    logger.info(
+                        "[dsh][orchestrator] mem0 recalled %d paths for session %s",
+                        len(known_paths), state.session_id,
+                    )
+            except Exception:
+                logger.exception("recall_file_paths 失败")
 
         prompt = (
-            f"任务：{goal}\n\n"
-            f"你要调用的工具是 `{tool_name}`。\n"
-            f"工具描述：{getattr(meta, 'description', '')}\n\n"
-            f"参数表：\n{schema_text}\n\n"
-            f"请只输出这个工具的 JSON 参数对象，不要任何解释，不要包裹在 markdown 里。\n"
-            f"示例：{{\"file_path\": \"D:/a.txt\", \"content\": \"hello\"}}\n\n"
+            f"## 任务\n{goal}\n\n"
+            f"{conversation_block}"
+            f"{mem0_block}"
+            f"{history_text}"
+            f"{file_content_block}"
+            f"## 你要调用的工具\n"
+            f"`{tool_name}`：{tool_desc}\n\n"
+            f"## 参数表\n{schema_text}\n\n"
+            f"## 路径参数规则（重要）\n"
+            f"1. **如果任务里给的路径是相对路径或不完整，"
+            f"从「对话历史」里找最近一次明确的完整路径**。\n"
+            f"2. **绝对不要编造路径**（不要用 `./data`、`D:/data` 等占位）。\n"
+            f"3. **优先复用对话历史里出现过的完整路径**。\n"
+            f"4. 对话历史里的 `user` 是用户原话，`assistant` 是 Agent 回复——"
+            f"两边都可能包含真实路径。\n\n"
+            f"## 输出要求\n"
+            f"只输出该工具的 JSON 参数对象，不要任何解释，"
+            f"不要包裹在 markdown 代码块里。\n"
+            f"确保 JSON 合法、字段名与**参数表完全一致**——"
+            f"**只输出参数表里列出的字段**，不要凭经验添加其他字段。\n\n"
+            f"示例（字段名仅供参考格式，**必须用参数表里的真实字段**）：\n"
+            f"```\n"
+            f"{{\"<参数名1>\": <值1>, \"<参数名2>\": <值2>}}\n"
+            f"```\n\n"
             f"只输出 JSON："
         )
 
+        import time as _time
+        _t0 = _time.time()
+
         try:
             logger.info(
-                "[dsh][orchestrator] filling params for %s, prompt length=%d",
+                "[dsh][orchestrator] _fill_params: calling LLM for %s, "
+                "prompt length=%d",
                 tool_name, len(prompt),
             )
-            raw = await asyncio.to_thread(
-                self._llm_provider().generate,
-                [{"role": "user", "content": prompt}],
+            raw = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._llm_provider().generate,
+                    [{"role": "user", "content": prompt}],
+                ),
+                timeout=120.0,
             )
+            duration_ms = (_time.time() - _t0) * 1000
             logger.info(
-                "[dsh][orchestrator] params raw response: %r", raw
+                "[dsh][orchestrator] _fill_params raw response for %s: %r",
+                tool_name, raw,
             )
-        except Exception:
-            logger.exception("Param filling LLM call failed")
+
+            # 落盘
+            dump_llm_call(
+                kind="fill_params",
+                prompt=prompt,
+                response=raw,
+                model=getattr(self._llm_provider(), "model", None),
+                duration_ms=duration_ms,
+                tool_name=tool_name,
+                extra={"goal": goal[:200]},
+            )
+        except asyncio.TimeoutError:
+            duration_ms = (_time.time() - _t0) * 1000
+            logger.warning(
+                "[dsh][orchestrator] _fill_params timed out (120s) for %s",
+                tool_name,
+            )
+            dump_llm_call(
+                kind="fill_params",
+                prompt=prompt,
+                response=None,
+                duration_ms=duration_ms,
+                tool_name=tool_name,
+                error="timeout(120s)",
+            )
+            return {}
+        except asyncio.CancelledError:
+            logger.warning("[dsh][orchestrator] _fill_params cancelled")
+            raise
+        except Exception as exc:
+            duration_ms = (_time.time() - _t0) * 1000
+            logger.exception(
+                "[dsh][orchestrator] _fill_params LLM failed for %s", tool_name
+            )
+            dump_llm_call(
+                kind="fill_params",
+                prompt=prompt,
+                response=None,
+                duration_ms=duration_ms,
+                tool_name=tool_name,
+                error=str(exc),
+            )
             return {}
 
         data = self._parse_json(raw)
         if not isinstance(data, dict):
-            logger.warning("Param filling returned non-JSON: %s", raw[:200])
+            logger.warning(
+                "[dsh][orchestrator] _fill_params non-JSON for %s: %s",
+                tool_name, raw[:200],
+            )
             return {}
-        return data
+
+        # 参数名自适应
+        adapted = self._adapt_params_for_tool(tool_name, data, tools)
+        if adapted != data:
+            logger.info(
+                "[dsh][orchestrator] _fill_params params adapted for %s: "
+                "%r → %r",
+                tool_name, data, adapted,
+            )
+        return adapted
+
+        # ── 结果达标评估 ──
+
+    async def _assess_result(
+        self,
+        goal: str,
+        tool_name: str,
+        params: Dict[str, Any],
+        result: ToolCallResult,
+        state: OrchestratorState,
+    ) -> Optional[Dict[str, Any]]:
+        """评估最近一次工具结果是否足以回答用户目标。
+
+        返回 {"sufficient": bool, "gap": str, "next_hint": str}；
+        评估失败返回 None（上层视为通过，避免卡死）。
+        """
+        # 只评估信息获取类工具；写类工具成功即视为完成
+        if self._is_write_operation(tool_name):
+            return None
+
+        # 取结果文本
+        payload = result.result
+        if isinstance(payload, dict):
+            content_blocks = payload.get("content") or []
+            texts = []
+            if isinstance(content_blocks, list):
+                for block in content_blocks:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        t = block.get("text") or ""
+                        if t:
+                            texts.append(t)
+            preview = "\n".join(texts)
+        elif isinstance(payload, str):
+            preview = payload
+        else:
+            preview = str(payload) if payload is not None else ""
+
+        if not preview:
+            return {
+                "sufficient": False,
+                "gap": "工具返回内容为空",
+                "next_hint": "换一个 URL 或换一个搜索词重试",
+            }
+
+        if len(preview) > 3000:
+            preview = preview[:3000] + "\n... (truncated)"
+
+        prompt = (
+            "你是结果评估助手。判断最近一次工具返回是否足以回答用户目标。\n\n"
+            f"## 用户目标\n{goal}\n\n"
+            f"## 刚刚执行\n工具：{tool_name}\n参数：{params}\n\n"
+            f"## 返回内容摘要\n{preview}\n\n"
+            "## 判断标准\n"
+            "- 用户问「某个页面上的具体内容」，返回的是「关于该页面的分析文章」"
+            "→ 不达标。\n"
+            "- 用户问「实时/最新数据」，返回的是「历史数据」→ 不达标。\n"
+            "- 用户问「列表」，返回的只是「分类概览」→ 不达标。\n"
+            "- 用户问「页面 A 的内容」，返回的是「页面 B 的内容」→ 不达标。\n"
+            "- 返回内容包含用户要的具体信息 → 达标。\n\n"
+            "## 输出（严格 JSON，不要额外解释）\n"
+            "{\n"
+            '    "sufficient": true 或 false,\n'
+            '    "gap": "缺少什么（sufficient=false 时必填）",\n'
+            '    "next_hint": "下一步建议（sufficient=false 时必填）"\n'
+            "}\n"
+        )
+
+        import time as _time
+        _t0 = _time.time()
+
+        try:
+            raw = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._llm_provider().generate,
+                    [{"role": "user", "content": prompt}],
+                ),
+                timeout=60.0,
+            )
+            duration_ms = (_time.time() - _t0) * 1000
+            logger.info(
+                "[dsh][orchestrator] _assess_result raw response: %r", raw
+            )
+            dump_llm_call(
+                kind="assess_result",
+                prompt=prompt,
+                response=raw,
+                model=getattr(self._llm_provider(), "model", None),
+                duration_ms=duration_ms,
+                tool_name=tool_name,
+                extra={"goal": goal[:200]},
+            )
+        except asyncio.TimeoutError:
+            logger.warning("[dsh][orchestrator] _assess_result timed out (60s)")
+            return None
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("_assess_result LLM call failed")
+            return None
+
+        data = self._parse_json(raw)
+        if not isinstance(data, dict):
+            return None
+        return {
+            "sufficient": bool(data.get("sufficient", True)),
+            "gap": str(data.get("gap", "")),
+            "next_hint": str(data.get("next_hint", "")),
+        }
     
     async def run(
         self,
@@ -606,7 +1241,28 @@ class AgentOrchestrator:
         allow_mcp_discovery: bool = True,
         workspace_paths: Optional[List[str]] = None,
         plan_mode: bool = False,
+        resume_state: Optional[OrchestratorState] = None,
+        resume_from_step: int = 1,
+        prior_messages: Optional[List[Dict[str, str]]] = None,
+        session_id: Optional[str] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
+        # ── 调试：确认 session_id 是否传进来 ──
+        logger.info(
+            "[dsh][orchestrator] run() session_id=%r, "
+            "resume_state=%r, goal=%r",
+            session_id,
+            resume_state is not None,
+            goal[:100],
+        )
+        
+        # ── 等 mem0 ready，避免冷启动首轮写入丢失 ──
+        try:
+            from backend.services.memory_layer import wait_until_ready
+            ready = await wait_until_ready(timeout=30.0)
+            logger.info("[dsh][orchestrator] mem0 ready=%r", ready)
+        except Exception:
+            logger.exception("wait_until_ready 失败，继续执行")
+            
         # 每个任务开始重置"已试过的 MCP 服务器"
         try:
             from tools.mcp_discovery import reset_tried_servers
@@ -615,7 +1271,22 @@ class AgentOrchestrator:
             logger.exception("failed to reset tried MCP servers")
 
         agent = self._agent_provider()
-        tools = agent.list_all_tools(allowed_danger_levels=allowed_danger_levels)
+
+        def _refresh_tools() -> Dict[str, Any]:
+            """重新从 registry 拉取工具列表。
+
+            MCP discovery 会在任务执行中途动态注册工具，
+            因此必须每步刷新，而不是只在开头取一次。
+            """
+            t = agent.list_all_tools(allowed_danger_levels=allowed_danger_levels)
+            if not allow_mcp_discovery:
+                t = {
+                    name: meta for name, meta in t.items()
+                    if name not in self._MCP_DISCOVERY_TOOLS
+                }
+            return t
+
+        tools = _refresh_tools()
         logger.info(
             "[dsh][orchestrator] allowed_dangers=%r, filtered tools count=%d, "
             "has write_file=%r",
@@ -624,40 +1295,47 @@ class AgentOrchestrator:
             "write_file" in tools,
         )
 
-        # 关闭自动发现时，隐藏所有 MCP discovery 工具
-        if not allow_mcp_discovery:
-            tools = {
-                name: meta for name, meta in tools.items()
-                if name not in self._MCP_DISCOVERY_TOOLS
-            }
-            logger.info(
-                "[dsh][orchestrator] MCP discovery disabled; hid tools=%r",
-                sorted(self._MCP_DISCOVERY_TOOLS),
-            )
-
         if not tools:
             yield {"type": "error", "message": "当前模式下没有可用的工具"}
             return
 
-        state = OrchestratorState(goal=goal)
+        # ── 初始化 state（可能从快照恢复） ──
+        if resume_state is not None:
+            state = resume_state
+            # 旧快照没有 session_id → 用本次传入的补上
+            if state.session_id is None:
+                state.session_id = session_id
+            start_step = max(1, resume_from_step)
+            logger.info(
+                "[dsh][orchestrator] resuming from step %d, history=%d entries, "
+                "session_id=%r",
+                start_step, len(state.history), state.session_id,
+            )
+        else:
+            state = OrchestratorState(goal=goal, session_id=session_id)
+            start_step = 1
 
-        for step_index in range(1, self._max_steps + 1):
+        for step_index in range(start_step, self._max_steps + 1):
+            # ── 每步刷新工具列表 ──
+            # 上一步的 search_and_connect_mcp 可能刚注册了新 MCP 工具，
+            # 不刷新会导致 LLM 选了新工具却被判定为"不存在"。
+            tools = _refresh_tools()
+
             decision = self._try_fast_path(goal, state, tools)
             if decision is None:
-                decision = await self._decide(goal, state, tools)
+                decision = await self._decide(
+                    goal, state, tools, prior_messages=prior_messages,
+                )
 
             if decision is None:
                 yield {"type": "error", "message": "编排决策失败"}
                 return
 
-            # 快速路径选出了工具但没给参数 → 补一次
-            if (
-                decision.tool_name
-                and not decision.parameters
-                and not decision.done
-            ):
+            # 决策要调工具 → 必填参数（渐进式披露第 2 阶段）
+            if decision.tool_name and not decision.done:
                 decision.parameters = await self._fill_params(
-                    goal, decision.tool_name, tools
+                    goal, decision.tool_name, tools, state,
+                    prior_messages=prior_messages,
                 )
                 logger.info(
                     "[dsh][orchestrator] filled params for %s: %r",
@@ -759,6 +1437,8 @@ class AgentOrchestrator:
                     "step": step_index,
                     "tool_call": tool_call,
                     "reason": "路径不在工作区内",
+                    "state_snapshot": state.snapshot(),
+                    "next_step": step_index + 1,
                 }
                 return
 
@@ -775,6 +1455,11 @@ class AgentOrchestrator:
                 "tool_call": tool_call,
             }
 
+            logger.info(
+                "[dsh][orchestrator] executing tool: %s params=%r",
+                tool_name, params,
+            )
+
             try:
                 result = await agent.execute_tool_async(tool_call)
             except Exception as error:
@@ -785,6 +1470,20 @@ class AgentOrchestrator:
                     error=str(error),
                 )
 
+            logger.info(
+                "[dsh][orchestrator] tool result: %s success=%r error=%r "
+                "result_type=%s result_preview=%r",
+                tool_name,
+                result.success,
+                result.error,
+                type(result.result).__name__,
+                (
+                    str(result.result)[:300]
+                    if result.result is not None
+                    else None
+                ),
+            )
+
             log = agent.format_tool_result(result)
             status = self._classify_status(log, result.success)
             state.add_history(
@@ -794,6 +1493,69 @@ class AgentOrchestrator:
 
             if result.success:
                 state.mark_success(tool_name, params, step_index)
+
+                # ── 结果达标评估 ──
+                assessment = await self._assess_result(
+                    goal, tool_name, params, result, state
+                )
+                if assessment and not assessment.get("sufficient", True):
+                    gap = assessment.get("gap", "")
+                    hint = assessment.get("next_hint", "")
+                    assess_msg = (
+                        f"⚠️ Step {step_index} 结果评估：不达标。\n"
+                        f"缺失：{gap}\n"
+                        f"建议：{hint}\n"
+                        f"**必须继续尝试，不要 done=true。**"
+                    )
+                    state.add_history(assess_msg)
+                    logger.info(
+                        "[dsh][orchestrator] result insufficient: %s",
+                        assess_msg[:200],
+                    )
+                    yield {
+                        "type": "thinking",
+                        "step": step_index,
+                        "thought": f"[结果评估] 不达标：{gap}",
+                    }
+                    
+                # ── Mem0 写入：工具成功后提取结构化事实 ──
+                try:
+                    from backend.services.memory_layer import (
+                        remember_tool_success,
+                    )
+                    remember_tool_success(
+                        session_id=state.session_id or "",
+                        tool_name=tool_name,
+                        params=params,
+                        result=result.result,
+                    )
+                except Exception:
+                    logger.exception("remember_tool_success 失败")
+
+                # 记录最近一次读到的文件内容，供 _fill_params 用
+                if "read" in tool_name.lower():
+                    try:
+                        payload = result.result
+                        content = None
+                        if isinstance(payload, dict):
+                            content = payload.get("content")
+                        elif isinstance(payload, str):
+                            content = payload
+                        if content:
+                            state.last_read_content = str(content)
+                            state.last_read_path = (
+                                params.get("file_path")
+                                or params.get("path")
+                                or params.get("directory")
+                            )
+                            logger.info(
+                                "[dsh][orchestrator] cached read content: "
+                                "path=%r len=%d",
+                                state.last_read_path,
+                                len(state.last_read_content),
+                            )
+                    except Exception:
+                        logger.exception("记录读取内容失败")
             else:
                 state.mark_failure(tool_name, params, result.error or "")
 

@@ -16,12 +16,43 @@ class DocumentParser:
         raise NotImplementedError
 
     def _clean_text(self, text: str) -> str:
-        """清理文本：去除多余空白和乱码"""
+        """清理文本：去除多余空白和乱码。
+
+        关键修复：pypdf 提取中文时经常在字符间插空格
+        （如"钱 易"），导致搜索"钱易"命不中。
+        这里去掉中文之间的空格，但保留英文/数字间的空格。
+        """
         if not text:
             return ""
+
         text = re.sub(r'\r\n', '\n', text)
         text = re.sub(r'[ \t]+', ' ', text)
         text = re.sub(r'\n{3,}', '\n\n', text)
+
+        # ── 去掉中文字符之间的空格 ──
+        # 循环处理，因为"钱 易 王"这种连续空格需要多轮才能全清
+        prev = None
+        while prev != text:
+            prev = text
+            # 中文 + 空格 + 中文
+            text = re.sub(
+                r'(?<=[\u4e00-\u9fff]) (?=[\u4e00-\u9fff])',
+                '',
+                text,
+            )
+            # 中文 + 空格 + 中文标点
+            text = re.sub(
+                r'(?<=[\u4e00-\u9fff]) (?=[，。！？、；：（）【】《》""''])',
+                '',
+                text,
+            )
+            # 中文标点 + 空格 + 中文
+            text = re.sub(
+                r'(?<=[，。！？、；：（）【】《》""'']) (?=[\u4e00-\u9fff])',
+                '',
+                text,
+            )
+
         return text.strip()
 
 

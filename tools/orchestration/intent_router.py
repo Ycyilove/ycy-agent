@@ -14,6 +14,50 @@ logger = logging.getLogger(__name__)
 
 _PATH_RE = re.compile(r"[A-Za-z]:[\\/][^\s\"']*|/[^\s\"']+")
 
+# 二进制/结构化文档扩展名 → 对应工具后缀（按优先级）
+_DOC_TOOL_MAP = [
+    (".xlsx", ("write_excel",)),
+    (".xls",  ("write_excel",)),
+    (".docx", ("write_docx",)),
+    (".pdf",  ("create_pdf", "write_pdf", "merge_pdfs")),
+]
+
+# 读类：按扩展名选专用读取工具
+_READ_DOC_MAP = [
+    (".xlsx", ("read_excel",)),
+    (".xls",  ("read_excel",)),
+    (".csv",  ("read_csv",)),
+    (".docx", ("read_docx_text", "read_docx_tables")),
+    (".pdf",  ("read_pdf_text", "read_pdf_metadata")),
+]
+
+
+def _detect_ext(goal: str) -> Optional[str]:
+    """从 goal 里提取文件扩展名（小写，带点）。"""
+    lower = goal.lower()
+    for ext, _ in _DOC_TOOL_MAP:
+        if ext in lower:
+            return ext
+    for ext, _ in _READ_DOC_MAP:
+        if ext in lower:
+            return ext
+    return None
+
+
+def _pick_for_ext(
+    tools: Dict[str, Any],
+    ext: str,
+    mapping: list,
+) -> Optional[str]:
+    """按扩展名从 mapping 里找工具名。"""
+    for candidate_ext, candidates in mapping:
+        if candidate_ext != ext:
+            continue
+        for name in candidates:
+            if name in tools:
+                return name
+    return None
+
 
 def _extract_path(goal: str) -> Optional[str]:
     m = _PATH_RE.search(goal)
@@ -42,6 +86,16 @@ def route_intent(goal: str, tools: Dict[str, Any]) -> Optional[str]:
     if any(k in goal for k in ("创建", "新建", "写入", "写文件", "保存", "生成文件")) \
        or any(k in lower for k in ("create file", "write file", "save file")):
         if has_path:
+            # 先按扩展名选专用工具（xlsx/docx/pdf）
+            ext = _detect_ext(goal)
+            if ext:
+                picked = _pick_for_ext(tools, ext, _DOC_TOOL_MAP)
+                if picked:
+                    logger.info(
+                        "[dsh][intent] create %s → %s", ext, picked,
+                    )
+                    return picked
+            # 兜底：普通文本文件
             picked = _pick(tools, "write_file", "create_file", "write_text_file")
             if picked:
                 logger.info("[dsh][intent] create-file → %s", picked)
@@ -51,6 +105,14 @@ def route_intent(goal: str, tools: Dict[str, Any]) -> Optional[str]:
     if any(k in goal for k in ("读取", "查看", "打开", "看看", "内容")) \
        or any(k in lower for k in ("read file", "open file", "cat ")):
         if has_path:
+            ext = _detect_ext(goal)
+            if ext:
+                picked = _pick_for_ext(tools, ext, _READ_DOC_MAP)
+                if picked:
+                    logger.info(
+                        "[dsh][intent] read %s → %s", ext, picked,
+                    )
+                    return picked
             picked = _pick(tools, "read_text_file", "read_file")
             if picked:
                 logger.info("[dsh][intent] read-file → %s", picked)

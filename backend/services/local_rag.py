@@ -4,23 +4,39 @@ import json
 import os
 import uuid
 from typing import Dict, List, Optional
+import logging
 
-from rag import DocumentParserFactory, FAISSVectorStore, ResourceManager, TextChunker
+from rag import (
+    DocumentParserFactory,
+    FAISSVectorStore,
+    ResourceManager,
+    TextChunker,
+    BM25Store,
+    rrf_fuse,
+)
 
 from .llm import ModelScopeLLM
 
+logger = logging.getLogger(__name__)
 
 class LocalRAGService:
     """Ingest files, link extracted resources, and answer retrieval queries."""
 
     def __init__(
         self,
-        embedding_model: str = 'sentence-transformers/all-MiniLM-L6-v2',
+        embedding_model: Optional[str] = None,
         resource_dir: Optional[str] = None,
         resource_metadata_path: Optional[str] = None,
     ):
+        if embedding_model is None:
+            try:
+                from backend.config import RAG_EMBEDDING_MODEL
+                embedding_model = RAG_EMBEDDING_MODEL
+            except ImportError:
+                embedding_model = 'BAAI/bge-small-zh-v1.5'
         self.embedding_model = embedding_model
         self.vector_store = FAISSVectorStore(embedding_model=embedding_model)
+        self.bm25_store = BM25Store()
         self.chunker = TextChunker(chunk_size=500, overlap=100)
         self.resource_manager = ResourceManager(
             root=resource_dir or os.getenv('RAG_RESOURCE_DIR', './rag_resources'),
@@ -68,6 +84,8 @@ class LocalRAGService:
                 self.resource_manager.delete_source(filename)
                 return result
 
+            self.bm25_store.reset()
+
             self.resource_manager.repository.link_chunks(chunk_ids, resource_ids)
             result['resources'] = [self.resource_manager.to_ref(resource) for resource in resources]
             return result
@@ -95,8 +113,69 @@ class LocalRAGService:
             'details': results,
         }
 
-    def search(self, query: str, top_k: int = 3) -> List[Dict]:
-        return self.resource_manager.enrich_search_results(self.vector_store.search(query, top_k))
+    def search(
+        self,
+        query: str,
+        top_k: int = 15,
+        rewrite: bool = True,
+        use_bm25: bool = True,
+    ) -> List[Dict]:
+        """向量检索 + BM25 混合检索 + 可选 query 改写。
+
+        Args:
+            query: 用户查询
+            top_k: 返回数量
+            rewrite: 是否用 LLM 改写 query
+            use_bm25: 是否启用 BM25 混合检索
+        """
+        # 1. query 改写
+        effective_query = query
+        if rewrite:
+            try:
+                from backend.config import RAG_QUERY_REWRITE_ENABLED
+                if RAG_QUERY_REWRITE_ENABLED:
+                    from rag import get_query_rewriter
+                    effective_query = get_query_rewriter().rewrite(query)
+            except Exception:
+                logger.exception("[dsh][rag] query 改写失败，用原 query")
+
+        # 2. 向量检索（多取一些，供融合）
+        pool_size = max(top_k * 3, top_k + 10)
+        vector_results = self.vector_store.search(
+            effective_query, pool_size
+        )
+
+        # 3. BM25 检索（用原 query + 改写 query 各搜一次，取并集）
+        bm25_results: List[Dict] = []
+        if use_bm25:
+            try:
+                from backend.config import RAG_BM25_ENABLED
+                if RAG_BM25_ENABLED:
+                    def _provider():
+                        return self.vector_store.metadata
+                    bm25_results = self.bm25_store.search(
+                        query, pool_size, _provider
+                    )
+                    if effective_query != query:
+                        bm25_results += self.bm25_store.search(
+                            effective_query, pool_size, _provider
+                        )
+            except Exception:
+                logger.exception("[dsh][rag] BM25 检索失败，仅用向量结果")
+
+        # 4. 融合
+        if bm25_results:
+            from backend.config import RAG_RRF_K
+            fused = rrf_fuse(
+                vector_results,
+                bm25_results,
+                k=RAG_RRF_K,
+                limit=top_k,
+            )
+        else:
+            fused = vector_results[:top_k]
+
+        return self.resource_manager.enrich_search_results(fused)
 
     def _build_context(self, retrieved_docs: List[Dict]) -> str:
         context_parts = []
@@ -171,11 +250,13 @@ class LocalRAGService:
         result = self.vector_store.delete_file(filename)
         if result.get('status') == 'success':
             result['deleted_resources'] = self.resource_manager.delete_source(filename)
+            self.bm25_store.reset()
         return result
 
     def clear_all(self) -> Dict:
         result = self.vector_store.clear_all()
         self.resource_manager.clear()
+        self.bm25_store.reset()
         result.update({'resources': 'cleared'})
         return result
 

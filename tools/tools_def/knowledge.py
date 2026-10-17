@@ -45,7 +45,10 @@ def _resource_to_dict(resource: Any) -> Dict[str, Any]:
 
 @tool(
     name="knowledge_stats",
-    description="Get knowledge base statistics: number of documents, chunks, and resources.",
+    description=(
+        "查看知识库统计：文档数、分块数、资源数。"
+        "**不确定知识库是否有内容时，先用这个工具检查。**"
+    ),
     parameters={},
     examples=["knowledge_stats()"],
     category="knowledge",
@@ -63,7 +66,10 @@ def knowledge_stats() -> Dict[str, Any]:
 
 @tool(
     name="list_knowledge_sources",
-    description="List all documents in the knowledge base.",
+    description=(
+        "列出知识库中所有已索引的文档。"
+        "**用于查看有哪些文档可以供 search_knowledge 检索。**"
+    ),
     parameters={},
     examples=["list_knowledge_sources()"],
     category="knowledge",
@@ -171,23 +177,24 @@ def get_knowledge_resource(resource_id: str) -> Dict[str, Any]:
 @tool(
     name="search_knowledge",
     description=(
-        "Semantic search across the knowledge base. "
-        "Returns top-k text chunks with their linked resources. "
-        "Use this when you need to find information or context to answer a question."
+        "检索本地知识库（用户导入的 PDF / TXT / DOCX 文档）。"
+        "**当用户询问文档内容、事实性问题，或任何可能已导入的知识时，优先使用这个工具**。"
+        "不要用 search_content 代替——那只搜文件系统，搜不到知识库。"
+        "返回相关文本片段和关联资源（图片/附件）。"
     ),
     parameters={
         "query": {"type": "str", "description": "Natural language search query"},
-        "top_k": {"type": "int", "description": "Number of chunks to return, default 3"},
+        "top_k": {"type": "int", "description": "Number of chunks to return, default 15"},
     },
-    examples=["search_knowledge(query='summary of the design doc', top_k=5)"],
+    examples=["search_knowledge(query='summary of the design doc', top_k=15)"],
     category="knowledge",
     danger_level="safe",
 )
-def search_knowledge(query: str, top_k: int = 3) -> Dict[str, Any]:
+def search_knowledge(query: str, top_k: int = 15) -> Dict[str, Any]:
     """Semantic search with linked resources."""
     try:
         rag = _get_rag()
-        results = rag.search(query, top_k)
+        results = rag.search(query, top_k, rewrite=True)
         resources = rag.resource_manager.collect_refs(results)
         chunks = [
             {

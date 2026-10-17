@@ -24,8 +24,14 @@ torch>=2.0.0
 # PDF 加载 (可选)
 pypdf>=3.0.0
 
+# 数据分析（read_excel / analyze_csv 依赖）
+pandas>=2.0.0
+
 # DOCX 加载
 python-docx>=0.8.0
+
+# Excel 读写（不依赖 pandas）
+openpyxl>=3.1.0
 
 # 其他依赖
 anthropic>=0.18.0
@@ -34,8 +40,23 @@ openai>=1.0.0
 # 中文 NLP 处理
 jieba>=0.42.1
 
+# BM25 混合检索
+rank-bm25>=0.2.2
+
 # MySQL 数据库
 pymysql>=1.1.0
 
 # Model Context Protocol 客户端
 mcp>=1.0.0
+
+# Langfuse 可观测性
+langfuse>=2.0.0
+
+# E2B 沙箱
+e2b-code-interpreter>=1.0.0
+
+# Mem0 结构化记忆
+mem0ai>=0.1.0
+qdrant-client>=1.7.0
+
+python-dotenv>=1.0.0

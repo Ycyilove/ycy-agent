@@ -42,7 +42,6 @@ class MCPClientManager:
         self.server_tool_names: Dict[str, set[str]] = {}
         self.resources: Dict[str, list] = {}
         self.resource_templates: Dict[str, list] = {}
-        self.tried_servers: set[str] = set()
         self.statuses: Dict[str, dict] = {
             config.name: {
                 "name": config.name,
@@ -118,14 +117,16 @@ class MCPClientManager:
 
         try:
             if config.transport == "stdio":
-                parameters = StdioServerParameters(
+                from mcp.client.stdio import stdio_client, StdioServerParameters
+
+                params = StdioServerParameters(
                     command=config.command,
                     args=list(config.args),
                     env={**os.environ, **self._stdio_env(config)},
                 )
-                logger.info("[dsh][mcp] entering stdio_client: %s", config.name)
+
                 read_stream, write_stream = await stack.enter_async_context(
-                    stdio_client(parameters)
+                    stdio_client(params)
                 )
                 logger.info("[dsh][mcp] stdio_client ready: %s", config.name)
             elif config.transport == "sse":

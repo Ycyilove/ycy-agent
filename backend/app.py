@@ -9,6 +9,7 @@
     - 服务工厂保留在本文件（涉及全局单例和惰性加载）
 """
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -28,6 +29,9 @@ from .config import (
     SILICONFLOW_BASE_URL,
 )
 from .services.session_memory import get_session_memory
+from .services.observability import init_langfuse
+from .services.sandbox_backend import close_backend as close_sandbox_backend
+from .services.memory_layer import init_mem0
 from .services.lazy_loader import (
     register_lazy_module,
     ensure_module_loaded,
@@ -74,7 +78,7 @@ register_lazy_module(
 # ── 业务模块 import ──
 
 import tools.loader
-from tools import knowledge_tools
+from tools.tools_def import knowledge as knowledge_tools
 from tools.agent import ToolAgent, IntentAnalysis, ToolCallRequest, ToolCallResult
 
 from rag import DocumentParserFactory, ResourceManager, TextChunker, FAISSVectorStore
@@ -105,6 +109,8 @@ from .routes.rag import create_rag_router
 from .routes.sessions import create_sessions_router
 from .routes.models import create_models_router
 from .routes.health import create_health_router
+from .routes.trash import create_trash_router
+from .routes.resource import create_resource_router
 
 
 logging.basicConfig(
@@ -123,6 +129,7 @@ tool_agent: Optional[ToolAgent] = None
 mcp_client_manager: Optional[MCPManagerProxy] = None
 mcp_worker: Optional[MCPWorker] = None
 agent_task_service: Optional[AgentTaskService] = None
+tool_shortlister = None
 local_rag_service = None
 llm_instance = None
 multimodal_client = None
@@ -137,6 +144,32 @@ rag_service = None
 async def app_lifespan(_app: FastAPI):
     """启动 MCP worker task，所有连接操作在 worker task 里执行。"""
     global mcp_client_manager, mcp_worker
+
+    # ── Langfuse 初始化（未配置时静默 no-op） ──
+    try:
+        init_langfuse()
+    except Exception:
+        logger.exception("Langfuse 初始化失败")
+
+    # ── Mem0 初始化（后台异步，不阻塞启动） ──
+    # Mem0 加载 embedding 模型需要 30-60 秒，放后台避免阻塞服务启动。
+    # 加载完成前，memory_layer 的所有操作是 no-op。
+    async def _init_mem0_background():
+        try:
+            logger.info("[boot] initializing mem0 in background...")
+            await asyncio.to_thread(init_mem0)
+            logger.info("[boot] mem0 initialized")
+        except Exception:
+            logger.exception("Mem0 初始化失败")
+
+    asyncio.create_task(_init_mem0_background())
+
+    # ── 清理过期的 agent 资源 ──
+    try:
+        from .services.resource_store import cleanup_expired
+        await asyncio.to_thread(cleanup_expired)
+    except Exception:
+        logger.exception("清理 agent 资源失败")
 
     try:
         configs = load_mcp_config()
@@ -181,11 +214,30 @@ async def app_lifespan(_app: FastAPI):
     except Exception:
         logger.exception("MCP discovery context 注入失败")
 
+    # ── 启动后台预加载 ──
     try:
         preload_all_in_background()
         logger.info("[boot] background preload scheduled")
     except Exception:
         logger.exception("[boot] background preload failed to schedule")
+
+    # ── 预热工具筛选器的 embedding 模型 ──
+    async def _warmup_shortlister():
+        try:
+            sl = get_tool_shortlister()
+            if sl is None:
+                return
+            # 在 executor 里跑（模型加载是同步阻塞）
+            await asyncio.to_thread(sl.warmup)
+            # 顺便索引一次当前工具集
+            agent = get_tool_agent()
+            tools_map = agent.list_all_tools()
+            await asyncio.to_thread(sl._ensure_index, tools_map)
+            logger.info("[boot] ToolShortlister warmed up")
+        except Exception:
+            logger.exception("[boot] ToolShortlister warmup failed")
+
+    asyncio.create_task(_warmup_shortlister())
 
     try:
         yield
@@ -197,6 +249,12 @@ async def app_lifespan(_app: FastAPI):
             logger.exception("关闭 MCP worker 失败")
         mcp_worker = None
         mcp_client_manager = None
+
+        # ── 关闭 E2B 沙箱 ──
+        try:
+            close_sandbox_backend()
+        except Exception:
+            logger.exception("关闭 E2B 沙箱失败")
 
 # ─────────────────────────────────────────────────────────────
 # FastAPI app
@@ -226,6 +284,24 @@ def get_tool_agent() -> ToolAgent:
     return tool_agent
 
 
+def get_tool_shortlister():
+    """获取工具筛选器（延迟初始化）。失败返回 None。"""
+    global tool_shortlister
+    if tool_shortlister is None:
+        try:
+            from tools.orchestration.tool_shortlister import ToolShortlister
+            tool_shortlister = ToolShortlister(
+                top_k=15,
+                min_score=0.10,
+                min_keep=3,
+            )
+            logger.info("[boot] ToolShortlister created")
+        except Exception:
+            logger.exception("[boot] ToolShortlister 创建失败")
+            tool_shortlister = None
+    return tool_shortlister
+
+
 def get_local_rag_service():
     """获取本地 RAG 服务实例。"""
     global local_rag_service
@@ -245,6 +321,7 @@ def get_agent_task_service() -> AgentTaskService:
                 agent_provider=get_tool_agent,
                 llm_provider=get_llm,
                 max_steps=10,
+                shortlister_provider=get_tool_shortlister,
             )
 
         agent_task_service = AgentTaskService(
@@ -329,6 +406,10 @@ knowledge_tools.set_rag_provider(get_local_rag_service)
 # ─────────────────────────────────────────────────────────────
 
 app.include_router(create_health_router(get_all_module_status))
+
+app.include_router(create_trash_router())
+
+app.include_router(create_resource_router())
 
 app.include_router(create_tools_router(get_tool_agent))
 

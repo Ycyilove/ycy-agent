@@ -1,0 +1,23 @@
+{
+  "timestamp": "2026-09-30T10:08:28.966847",
+  "session_id": "7fa2f39e-7762-485a-a86a-a4c4d6cf277c",
+  "task_id": "task-1790734012391",
+  "turn_id": "turn-01",
+  "turn_index": 1,
+  "step_index": 5,
+  "step_label": "5. 回答完成",
+  "step_group": "answer",
+  "kind": "stream_answer_response",
+  "tool_name": null,
+  "model": null,
+  "duration_ms": null,
+  "prompt_len": 0,
+  "response_len": 160,
+  "prompt": "",
+  "response": "第十届“中国高校计算机大赛-团体程序设计天梯赛”是中国高校计算机教育领域的年度重要赛事，旨在通过团队编程竞赛形式提升学生的算法设计与编程能力。比赛通常包含多个编程题目，参赛队伍需协作解决问题，考验逻辑思维、代码实现及团队合作。具体赛事细节如时间、地点、题目内容等需参考官方公告或赛事报道，当前工具返回结果未包含这些信息。",
+  "error": null,
+  "extra": {
+    "thinking_len": 143,
+    "answer_len": 160
+  }
+}
