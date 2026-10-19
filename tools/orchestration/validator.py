@@ -4,6 +4,7 @@
 """
 
 from __future__ import annotations
+from typing import Optional
 
 import re
 
@@ -66,4 +67,80 @@ def classify_request(goal: str) -> str:
 def requires_tool_call(goal: str) -> bool:
     """判断请求是否必须调用工具。"""
     kind = classify_request(goal)
-    return kind in ("action", "query")
+    if kind in ("action", "query"):
+        return True
+    # 网页检索也强制要求调用工具
+    if is_web_query(goal):
+        return True
+    return False
+
+# ─────────────────────────────────────────────────────────────
+# 网页检索完成度检查
+# ─────────────────────────────────────────────────────────────
+
+# 网页检索信号词
+_WEB_SIGNALS = (
+    "网页", "页面", "网站", "网址", "链接", "榜单", "排行榜",
+    "新闻", "最新", "实时", "动态", "热搜",
+    "web", "page", "website", "url", "link", "news", "latest",
+)
+
+# 搜索类工具名关键词
+_SEARCH_TOOL_HINTS = ("search",)
+# 抓取类工具名关键词
+_EXTRACT_TOOL_HINTS = ("extract", "fetch", "crawl", "research")
+
+
+def is_web_query(goal: str) -> bool:
+    """判断请求是否属于网页检索类。
+
+    与 classify_request 正交：一个请求可能同时是 query 和 web_query。
+    """
+    if not goal:
+        return False
+    goal_lower = goal.lower()
+    return any(s in goal_lower for s in _WEB_SIGNALS)
+
+
+def check_web_query_completion(state) -> Optional[str]:
+    """网页检索类请求的完成度检查。
+
+    返回拒绝原因（字符串）；通过则返回 None。
+
+    完成条件：
+        1. 至少调用过一次搜索类工具；
+        2. 至少调用过一次抓取类工具（extract / fetch / crawl / research）。
+    """
+    seq = getattr(state, "successful_tool_sequence", []) or []
+
+    if not seq:
+        return (
+            "⛔ 校验失败 —— 这是网页检索请求，但还没有成功调用任何工具。\n"
+            "**下一步：先用搜索类工具（名字含 search）获取候选 URL。**"
+        )
+
+    has_search = any(
+        any(h in n.lower() for h in _SEARCH_TOOL_HINTS)
+        for n in seq
+    )
+    has_extract = any(
+        any(h in n.lower() for h in _EXTRACT_TOOL_HINTS)
+        for n in seq
+    )
+
+    if not has_search:
+        return (
+            "⛔ 校验失败 —— 网页检索必须先调用搜索类工具"
+            "（名字含 search 的 MCP 工具）获取候选 URL。\n"
+            "**下一步：调用搜索类工具。**"
+        )
+
+    if not has_extract:
+        return (
+            "⛔ 校验失败 —— 你只做了搜索，没有读取搜索结果里的 URL。\n"
+            "用户问的是页面内容，不是搜索摘要。\n"
+            "**下一步：从搜索结果里选一个最相关的 URL，"
+            "用名字含 extract / fetch / crawl 的工具读取页面内容。**"
+        )
+
+    return None

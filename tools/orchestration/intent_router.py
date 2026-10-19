@@ -157,6 +157,14 @@ def route_intent(goal: str, tools: Dict[str, Any]) -> Optional[str]:
             logger.info("[dsh][intent] time → %s", picked)
             return picked
 
+    # ── 网页检索 ──
+    if any(k in goal for k in ("网页", "页面", "文章", "网址", "链接")) \
+       or any(k in lower for k in ("web page", "webpage", "article", "url")):
+        picked = _pick(tools, "tavily_search", "brave_search", "web_search", "search")
+        if picked:
+            logger.info("[dsh][intent] web-search → %s", picked)
+            return picked
+        
     # ── 默认：无法判定 ──
     return None
 

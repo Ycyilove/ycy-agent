@@ -26,7 +26,12 @@ from tools.semantics import (
 
 from .prompt import ORCHESTRATOR_PROMPT
 from .state import OrchestratorState, params_key
-from .validator import requires_tool_call, classify_request
+from .validator import (
+    requires_tool_call,
+    classify_request,
+    is_web_query,
+    check_web_query_completion,
+)
 from .intent_router import route_intent
 
 
@@ -377,8 +382,8 @@ class AgentOrchestrator:
             ("list", "dir", "tree", "walk"),
         ),
         (
-            ("搜索", "查找", "search", "find", "grep"),
-            ("search", "find", "list", "grep"),
+            ("搜索", "查找", "最新", "新闻", "消息", "search", "find", "latest", "news"),
+            ("search", "tavily", "brave", "web", "fetch", "http"),
         ),
         (
             ("重命名", "改名", "rename", "move", "移动"),
@@ -638,6 +643,11 @@ class AgentOrchestrator:
                 "search_knowledge",
                 "knowledge_stats",
                 "list_knowledge_sources",
+                # 网页检索：确保搜索/抓取类 MCP 不被 embedding 筛掉
+                "mcp__tavily__tavily_search",
+                "mcp__tavily__tavily_extract",
+                "mcp__tavily__tavily_crawl",
+                "mcp__tavily__tavily_research",
             }
             for name in force_keep:
                 if name in tools and name not in picked:
@@ -790,6 +800,16 @@ class AgentOrchestrator:
         """如果 done=true 不合理，返回拒绝原因（字符串）；合理则返回 None。"""
         if not requires_tool_call(goal):
             return None
+
+        # ── 网页检索优先检查（正交于 action / query） ──
+        if is_web_query(goal):
+            web_reject = check_web_query_completion(state)
+            if web_reject:
+                logger.info(
+                    "[dsh][orchestrator] web query done rejected: %s",
+                    web_reject[:120],
+                )
+                return web_reject
 
         kind = classify_request(goal)
 
@@ -1104,6 +1124,114 @@ class AgentOrchestrator:
                 tool_name, data, adapted,
             )
         return adapted
+
+        # ── 结果达标评估 ──
+
+    async def _assess_result(
+        self,
+        goal: str,
+        tool_name: str,
+        params: Dict[str, Any],
+        result: ToolCallResult,
+        state: OrchestratorState,
+    ) -> Optional[Dict[str, Any]]:
+        """评估最近一次工具结果是否足以回答用户目标。
+
+        返回 {"sufficient": bool, "gap": str, "next_hint": str}；
+        评估失败返回 None（上层视为通过，避免卡死）。
+        """
+        # 只评估信息获取类工具；写类工具成功即视为完成
+        if self._is_write_operation(tool_name):
+            return None
+
+        # 取结果文本
+        payload = result.result
+        if isinstance(payload, dict):
+            content_blocks = payload.get("content") or []
+            texts = []
+            if isinstance(content_blocks, list):
+                for block in content_blocks:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        t = block.get("text") or ""
+                        if t:
+                            texts.append(t)
+            preview = "\n".join(texts)
+        elif isinstance(payload, str):
+            preview = payload
+        else:
+            preview = str(payload) if payload is not None else ""
+
+        if not preview:
+            return {
+                "sufficient": False,
+                "gap": "工具返回内容为空",
+                "next_hint": "换一个 URL 或换一个搜索词重试",
+            }
+
+        if len(preview) > 3000:
+            preview = preview[:3000] + "\n... (truncated)"
+
+        prompt = (
+            "你是结果评估助手。判断最近一次工具返回是否足以回答用户目标。\n\n"
+            f"## 用户目标\n{goal}\n\n"
+            f"## 刚刚执行\n工具：{tool_name}\n参数：{params}\n\n"
+            f"## 返回内容摘要\n{preview}\n\n"
+            "## 判断标准\n"
+            "- 用户问「某个页面上的具体内容」，返回的是「关于该页面的分析文章」"
+            "→ 不达标。\n"
+            "- 用户问「实时/最新数据」，返回的是「历史数据」→ 不达标。\n"
+            "- 用户问「列表」，返回的只是「分类概览」→ 不达标。\n"
+            "- 用户问「页面 A 的内容」，返回的是「页面 B 的内容」→ 不达标。\n"
+            "- 返回内容包含用户要的具体信息 → 达标。\n\n"
+            "## 输出（严格 JSON，不要额外解释）\n"
+            "{\n"
+            '    "sufficient": true 或 false,\n'
+            '    "gap": "缺少什么（sufficient=false 时必填）",\n'
+            '    "next_hint": "下一步建议（sufficient=false 时必填）"\n'
+            "}\n"
+        )
+
+        import time as _time
+        _t0 = _time.time()
+
+        try:
+            raw = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._llm_provider().generate,
+                    [{"role": "user", "content": prompt}],
+                ),
+                timeout=60.0,
+            )
+            duration_ms = (_time.time() - _t0) * 1000
+            logger.info(
+                "[dsh][orchestrator] _assess_result raw response: %r", raw
+            )
+            dump_llm_call(
+                kind="assess_result",
+                prompt=prompt,
+                response=raw,
+                model=getattr(self._llm_provider(), "model", None),
+                duration_ms=duration_ms,
+                tool_name=tool_name,
+                extra={"goal": goal[:200]},
+            )
+        except asyncio.TimeoutError:
+            logger.warning("[dsh][orchestrator] _assess_result timed out (60s)")
+            return None
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("_assess_result LLM call failed")
+            return None
+
+        data = self._parse_json(raw)
+        if not isinstance(data, dict):
+            return None
+        return {
+            "sufficient": bool(data.get("sufficient", True)),
+            "gap": str(data.get("gap", "")),
+            "next_hint": str(data.get("next_hint", "")),
+        }
     
     async def run(
         self,
@@ -1366,6 +1494,30 @@ class AgentOrchestrator:
             if result.success:
                 state.mark_success(tool_name, params, step_index)
 
+                # ── 结果达标评估 ──
+                assessment = await self._assess_result(
+                    goal, tool_name, params, result, state
+                )
+                if assessment and not assessment.get("sufficient", True):
+                    gap = assessment.get("gap", "")
+                    hint = assessment.get("next_hint", "")
+                    assess_msg = (
+                        f"⚠️ Step {step_index} 结果评估：不达标。\n"
+                        f"缺失：{gap}\n"
+                        f"建议：{hint}\n"
+                        f"**必须继续尝试，不要 done=true。**"
+                    )
+                    state.add_history(assess_msg)
+                    logger.info(
+                        "[dsh][orchestrator] result insufficient: %s",
+                        assess_msg[:200],
+                    )
+                    yield {
+                        "type": "thinking",
+                        "step": step_index,
+                        "thought": f"[结果评估] 不达标：{gap}",
+                    }
+                    
                 # ── Mem0 写入：工具成功后提取结构化事实 ──
                 try:
                     from backend.services.memory_layer import (

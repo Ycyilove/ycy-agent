@@ -38,6 +38,12 @@ class OrchestratorState:
     last_read_content: Optional[str] = None
     last_read_path: Optional[str] = None
 
+    # 按时间顺序记录成功调用的工具名，供完成度校验使用
+    successful_tool_sequence: List[str] = field(default_factory=list)
+
+    # 最近一次结果评估是否通过（供 _validate_done 使用）
+    last_assessment_passed: bool = True
+
     def add_history(self, entry: str) -> None:
         self.history.append(entry)
 
@@ -55,6 +61,7 @@ class OrchestratorState:
         if tool_name not in self.succeeded_tool_names:
             self.succeeded_tool_names[tool_name] = step_index
         self.last_successful_call_key = key
+        self.successful_tool_sequence.append(tool_name)
 
     def mark_failure(self, tool_name: str, params: Any, error: str) -> None:
         key = (tool_name, params_key(params))
@@ -95,6 +102,8 @@ class OrchestratorState:
             "total_attempts": self.total_attempts,
             "last_read_content": self.last_read_content,
             "last_read_path": self.last_read_path,
+            "successful_tool_sequence": list(self.successful_tool_sequence),
+            "last_assessment_passed": self.last_assessment_passed,
         }
 
     @classmethod
@@ -114,4 +123,8 @@ class OrchestratorState:
         st.total_attempts = snap.get("total_attempts", 0)
         st.last_read_content = snap.get("last_read_content")
         st.last_read_path = snap.get("last_read_path")
+        st.successful_tool_sequence = list(
+            snap.get("successful_tool_sequence", [])
+        )
+        st.last_assessment_passed = snap.get("last_assessment_passed", True)
         return st

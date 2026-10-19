@@ -12,6 +12,27 @@
       "connect_timeout": 10,
       "call_timeout": 30,
       "retries": 2
+    },
+    "fetch": {
+      "transport": "stdio",
+      "command": "uvx",
+      "args": [
+        "mcp-server-fetch"
+      ],
+      "connect_timeout": 15,
+      "call_timeout": 60,
+      "retries": 2
+    },
+    "tavily": {
+      "transport": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "tavily-mcp@latest"
+      ],
+      "connect_timeout": 15,
+      "call_timeout": 30,
+      "retries": 2
     }
   }
 }
