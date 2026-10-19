@@ -79,7 +79,7 @@ from .services.llm import (
     ModelScopeLLM as LLMService,
     MultimodalClient as MultimodalService,
 )
-from .services.local_rag import LocalRAGService as PersistentRAGService
+from rag import LocalRAGService
 
 
 # ── 路由工厂 import ──
@@ -286,7 +286,7 @@ def get_local_rag_service():
     """获取本地 RAG 服务实例。"""
     global local_rag_service
     if local_rag_service is None:
-        local_rag_service = PersistentRAGService()
+        local_rag_service = LocalRAGService()
     return local_rag_service
 
 

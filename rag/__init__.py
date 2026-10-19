@@ -30,3 +30,6 @@ __all__ = [
     'DoclingParser',
     'parse_file_to_chunks',
 ]
+
+# 应用层入口（放最后，避免与 service.py 的相对 import 形成循环）
+from .service import LocalRAGService
