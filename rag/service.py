@@ -7,17 +7,17 @@ import re
 import uuid
 from typing import Dict, List, Optional
 
-from rag import (
-    DocumentParserFactory,
-    FAISSVectorStore,
-    ResourceManager,
-    TextChunker,
-    BM25Store,
-    rrf_fuse,
-)
-from rag.text_utils import clean_cn_spaces, clean_heading
+# 全部改成相对 import：service.py 位于 rag/ 内部，
+# 用 from rag import X 会和 rag/__init__.py 形成循环。
+from .document_parser import DocumentParserFactory
+from .vector_store import FAISSVectorStore
+from .resources import ResourceManager
+from .text_chunker import TextChunker
+from .bm25_store import BM25Store, rrf_fuse
+from .text_utils import clean_cn_spaces, clean_heading
 
-from .llm import ModelScopeLLM
+# LLM 走 core.llm.provider（Lazy 加载，首次调用才构造 ChatOpenAI）
+from core.llm.provider import ModelScopeLLM
 
 logger = logging.getLogger(__name__)
 
@@ -61,13 +61,13 @@ class LocalRAGService:
                 return {'status': 'warning', 'message': f'文件 {filename} 已存在，跳过添加'}
 
             # ── 1. 写入临时文件（Docling 需要磁盘路径）──
-            ext = os..path.splitext(filename)[1] or ".pdf"
+            ext = os.path.splitext(filename)[1] or ".pdf"
             fd, tmp_path = tempfile.mkstemp(suffix=ext, prefix="rag_")
-            with os..fdopen(fd, "wb") as f:
+            with os.fdopen(fd, "wb") as f:
                 f.write(file_content)
 
             # ── 2. Docling 解析 + 切块 ──
-            from rag import DoclingParser
+            from .docling_parser import DoclingParser
             parser = DoclingParser()
             docling_chunks = parser.parse_to_chunks(tmp_path)
             if not docling_chunks:
@@ -83,7 +83,7 @@ class LocalRAGService:
                     RAG_CONTEXTUAL_MIN_CHARS,
                 )
                 if RAG_CONTEXTUAL_ENABLED:
-                    from rag.contextualizer import ChunkContextualizer
+                    from .contextualizer import ChunkContextualizer
 
                     ctx_inputs = []
                     for dc in docling_chunks:
@@ -201,9 +201,9 @@ class LocalRAGService:
             logger.exception("[dsh][rag] 处理文件时出错")
             return {'status': 'error', 'message': f'处理文件时出错: {error}'}
         finally:
-            if tmp_path and os..path.exists(tmp_path):
+            if tmp_path and os.path.exists(tmp_path):
                 try:
-                    os..unlink(tmp_path)
+                    os.unlink(tmp_path)
                 except OSError:
                     pass
 
@@ -247,7 +247,7 @@ class LocalRAGService:
                     RAG_QUERY_REWRITE_TIMEOUT,
                 )
                 if RAG_QUERY_REWRITE_ENABLED:
-                    from rag import get_query_rewriter
+                    from .query_rewriter import get_query_rewriter
                     import concurrent.futures
 
                     # 不能用 with：__exit__ 会 shutdown(wait=True)，
@@ -287,7 +287,7 @@ class LocalRAGService:
                         logger.info("[dsh][rag] BM25 索引未构建，惰性构建")
                         self.bm25_store.build(self.vector_store.metadata)
 
-                    from rag.query_rewriter import extract_entities
+                    from .query_rewriter import extract_entities
 
                     def _provider():
                         return self.vector_store.metadata

@@ -28,9 +28,9 @@ import os
 import re
 from typing import Any, Dict, List, Optional
 
-from ..config import MEM0_ENABLED, MEM0_API_KEY, MEM0_CONFIG
+from backend.config import MEM0_ENABLED, MEM0_API_KEY, MEM0_CONFIG
 
-from .mem0_debug_log import (
+from infra.debug_log.mem0 import (
     begin_task,
     end_task,
     record_add,

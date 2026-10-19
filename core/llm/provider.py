@@ -9,7 +9,7 @@
 import json
 from typing import Dict, List
 
-from ..config import (
+from backend.config import (
     DEFAULT_MODEL,
     LOCAL_MODEL_CONFIG,
     MODESCOPE_API_KEY,
@@ -119,7 +119,7 @@ class ModelScopeLLM:
         未启用 Langfuse 时返回 None，langchain 会忽略。
         """
         try:
-            from .observability import get_callback_handler
+            from infra.observability import get_callback_handler
         except ImportError:
             return None
         handler = get_callback_handler()

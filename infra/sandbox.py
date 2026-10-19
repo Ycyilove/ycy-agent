@@ -20,7 +20,7 @@ import logging
 import time
 from typing import Any, Dict, Optional
 
-from ..config import (
+from backend.config import (
     E2B_API_KEY,
     E2B_TEMPLATE,
     SANDBOX_BACKEND,

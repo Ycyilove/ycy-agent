@@ -52,7 +52,7 @@ from contextlib import redirect_stdout, redirect_stderr
 from typing import Dict, Any, Optional
 
 from .. import tool, get_registry
-from backend.services.sandbox_backend import get_backend as _get_e2b_backend
+from infra.sandbox import get_backend as _get_e2b_backend
 
 DANGEROUS_PATTERNS = [
     r'import\s+os\b',

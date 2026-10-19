@@ -43,7 +43,7 @@ def create_trash_router() -> APIRouter:
         # ── 写 file_log ──
         if body.session_id:
             try:
-                from backend.services.session_memory import get_session_memory
+                from core.memory.session import get_session_memory
                 get_session_memory().add_file_log(body.session_id, {
                     "id": f"restore-{body.id}-{int(time.time() * 1000)}",
                     "action": "restore",
@@ -66,7 +66,7 @@ def create_trash_router() -> APIRouter:
         # ── 写 file_log ──
         if body.session_id:
             try:
-                from backend.services.session_memory import get_session_memory
+                from core.memory.session import get_session_memory
                 get_session_memory().add_file_log(body.session_id, {
                     "id": f"purge-{body.id}-{int(time.time() * 1000)}",
                     "action": "delete",

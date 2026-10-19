@@ -26,7 +26,7 @@ from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 from tools.agent import ToolAgent, ToolCallRequest, ToolCallResult
 from tools.orchestration.state import OrchestratorState
 
-from .prompts import (
+from core.llm.prompts import (
     attachment_context as build_attachment_context,
     attachment_label,
     build_prompt,
@@ -37,8 +37,8 @@ from .stream_parser import (
     parse_provider_chunk,
 )
 
-from .llm_debug_log import begin_turn, end_turn
-from .observability import set_turn_context
+from infra.debug_log.llm import begin_turn, end_turn
+from infra.observability import set_turn_context
 
 logger = logging.getLogger(__name__)
 
@@ -835,7 +835,7 @@ class AgentTaskService:
 
             # 落盘 stream_answer 的输入
             try:
-                from .llm_debug_log import dump_llm_call
+                from infra.debug_log.llm import dump_llm_call
                 full_prompt = "\n\n".join(
                     f"[{m.get('role', 'user')}]\n{m.get('content', '')}"
                     for m in messages
@@ -933,7 +933,7 @@ class AgentTaskService:
 
         # 落盘 stream_answer 的响应
         try:
-            from .llm_debug_log import dump_llm_call
+            from infra.debug_log.llm import dump_llm_call
             dump_llm_call(
                 kind="stream_answer_response",
                 prompt="",                      # prompt 已经落过，不重复
@@ -1326,7 +1326,7 @@ class AgentTaskService:
 
         # ── 开启 mem0 记录（per-task） ──
         try:
-            from .mem0_debug_log import begin_task as begin_mem0_task
+            from infra.debug_log.mem0 import begin_task as begin_mem0_task
             begin_mem0_task(session_id=session_id, task_id=task_id)
         except Exception:
             logger.exception("begin_mem0_task failed")
@@ -1562,7 +1562,7 @@ class AgentTaskService:
           finally:
             end_turn()
             try:
-                from .mem0_debug_log import end_task as end_mem0_task
+                from infra.debug_log.mem0 import end_task as end_mem0_task
                 end_mem0_task()
             except Exception:
                 logger.exception("end_mem0_task failed")

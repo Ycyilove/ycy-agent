@@ -2,7 +2,7 @@
 
 import os
 
-from .services.local_model import LocalModelConfig, ModelSource
+from core.llm.local_model import LocalModelConfig, ModelSource
 
 from dotenv import load_dotenv
 

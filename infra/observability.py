@@ -21,7 +21,8 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Iterator, Optional
 
-from ..config import (
+from backend.config import (
+    LANGFUSE_ENABLED,
     LANGFUSE_HOST,
     LANGFUSE_PUBLIC_KEY,
     LANGFUSE_SECRET_KEY,
@@ -41,8 +42,13 @@ _handler_var: ContextVar[Optional[Any]] = ContextVar(
 # ── 初始化 ──
 
 def init_langfuse() -> bool:
-    """启动时调用。未配置或依赖缺失时静默返回 False。"""
+    """启动时调用。未启用 / 未配置 / 依赖缺失时静默返回 False。"""
     global _enabled
+
+    if not LANGFUSE_ENABLED:
+        logger.info("[langfuse] LANGFUSE_ENABLED=false，可观测性关闭")
+        _enabled = False
+        return False
 
     if not LANGFUSE_PUBLIC_KEY or not LANGFUSE_SECRET_KEY:
         logger.info("[langfuse] 未配置 PUBLIC/SECRET KEY，可观测性关闭")
