@@ -1,4 +1,4 @@
-# Python
+# ===== Python =====
 __pycache__/
 *.py[cod]
 *$py.class
@@ -6,35 +6,66 @@ __pycache__/
 .Python
 venv/
 env/
+.venv/
 .env
-.venv
+.env.*
+pip-wheel-metadata/
+*.egg-info/
+.eggs/
+build/
+dist/
+wheels/
 
-# Node
+# ===== Node =====
 node_modules/
 dist/
 build/
+.vite/
+*.local
 
-# IDE
+# ===== IDE / 编辑器 =====
 .idea/
 .vscode/
 *.swp
 *.swo
+*~
 
-# 项目特定
-output/
+# ===== 项目特定：模型与向量库（大文件，不入库）=====
+models/
+vector_store/
 vector_store/*.index
 vector_store/*.pkl
-*.log
+vector_store/*.json
+rag_resources/
+rag/rag_resources/
 
-# 测试
+# ===== 日志 =====
+logs/
+*.log
+logs/**/*.log
+
+# ===== 运行时数据 / 数据库 =====
+data/.trash/
+data/mem0_qdrant/
+*.db
+*.sqlite
+*.sqlite3
+*.lock
+
+# ===== 本地缓存 / 临时文件 =====
+.cache/
 .pytest_cache/
 .coverage
 htmlcov/
-
-# OS
-.DS_Store
-Thumbs.db
-
-# 临时文件
 *.tmp
 temp/
+out.txt
+
+# ===== 生成的中间产物（按需保留）=====
+# 如果你不想提交这些 chunk 文件，取消下面注释
+# *.chunks.jsonl
+# *.easyocr.chunks.jsonl
+
+# ===== OS =====
+.DS_Store
+Thumbs.db

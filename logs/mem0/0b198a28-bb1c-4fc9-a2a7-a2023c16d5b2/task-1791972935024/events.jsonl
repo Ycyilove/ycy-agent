@@ -1,4 +1,0 @@
-{"timestamp": "2026-10-14T18:15:45.853591", "index": 1, "event": "recall", "session_id": "0b198a28-bb1c-4fc9-a2a7-a2023c16d5b2", "limit": 5, "hit_count": 0, "results": []}
-{"timestamp": "2026-10-14T18:17:35.778898", "index": 2, "event": "recall", "session_id": "0b198a28-bb1c-4fc9-a2a7-a2023c16d5b2", "limit": 5, "hit_count": 0, "results": []}
-{"timestamp": "2026-10-14T18:18:16.635100", "index": 3, "event": "recall", "session_id": "0b198a28-bb1c-4fc9-a2a7-a2023c16d5b2", "limit": 5, "hit_count": 0, "results": []}
-{"timestamp": "2026-10-14T18:18:57.394272", "index": 4, "event": "add", "session_id": "0b198a28-bb1c-4fc9-a2a7-a2023c16d5b2", "fact": "/", "fact_type": "file_path", "success": true, "error": null}
