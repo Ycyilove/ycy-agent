@@ -133,7 +133,7 @@ class QueryRewriter:
         if self._llm_provider is not None:
             self._llm = self._llm_provider()
         else:
-            from backend.services.llm import ModelScopeLLM
+            from core.llm.provider import ModelScopeLLM
             self._llm = ModelScopeLLM()
         return self._llm
 

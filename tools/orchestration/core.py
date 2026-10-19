@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
-from backend.services.llm_debug_log import dump_llm_call
+from infra.debug_log.llm import dump_llm_call
 
 from tools.agent import (
     ToolAgent,
@@ -805,7 +805,7 @@ class AgentOrchestrator:
         mem0_block = ""
         if state is not None and getattr(state, "session_id", None):
             try:
-                from backend.services.memory_layer import recall_file_paths
+                from core.memory.mem0_layer import recall_file_paths
                 known_paths = recall_file_paths(state.session_id, limit=5)
                 # 过滤根路径/盘符，避免 LLM 拿 "/" 当 PDF 路径
                 known_paths = [
@@ -1167,7 +1167,7 @@ class AgentOrchestrator:
 
         # ── 等 mem0 ready，避免冷启动首轮写入丢失 ──
         try:
-            from backend.services.memory_layer import wait_until_ready
+            from core.memory.mem0_layer import wait_until_ready
             ready = await wait_until_ready(timeout=30.0)
             logger.info("[dsh][orchestrator] mem0 ready=%r", ready)
         except Exception:
@@ -1430,7 +1430,7 @@ class AgentOrchestrator:
 
                 # ── Mem0 写入：工具成功后提取结构化事实 ──
                 try:
-                    from backend.services.memory_layer import (
+                    from core.memory.mem0_layer import (
                         remember_tool_success,
                     )
                     remember_tool_success(

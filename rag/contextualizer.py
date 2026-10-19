@@ -10,7 +10,7 @@
     - Anthropic Contextual Retrieval: https://www.anthropic.com/news/contextual-retrieval
 
 依赖：
-    - backend.services.llm.ModelScopeLLM（SiliconFlow Qwen3-8B）
+    - core.llm.provider.ModelScopeLLM（SiliconFlow Qwen3-8B）
 """
 
 from __future__ import annotations
@@ -76,7 +76,7 @@ class ChunkContextualizer:
         if self._llm_provider is not None:
             self._llm = self._llm_provider()
         else:
-            from backend.services.llm import ModelScopeLLM
+            from core.llm.provider import ModelScopeLLM
             self._llm = ModelScopeLLM()
         return self._llm
 

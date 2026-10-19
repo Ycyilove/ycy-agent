@@ -6,7 +6,7 @@ from typing import Any, Callable, Dict, List, Optional
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 
-from ..services.task_service import with_sse_done
+from core.task.service import with_sse_done
 
 
 def _parse_json_list(value: str, field_name: str) -> List[Any]:

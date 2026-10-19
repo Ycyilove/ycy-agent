@@ -14,7 +14,7 @@
       FastAPI 的 sync 路由、独立线程）里调用。
 
 用法：
-    from backend.services.lazy_loader import (
+    from infra.lazy_loader import (
         register_lazy_module,
         ensure_module_loaded,
         ensure_module_loaded_sync,

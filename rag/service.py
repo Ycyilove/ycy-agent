@@ -16,8 +16,8 @@ from .text_chunker import TextChunker
 from .bm25_store import BM25Store, rrf_fuse
 from .text_utils import clean_cn_spaces, clean_heading
 
-# LLM 仍在 backend.services.llm（阶段 2 会移到 core.llm.provider）
-from backend.services.llm import ModelScopeLLM
+# LLM 走 core.llm.provider（Lazy 加载，首次调用才构造 ChatOpenAI）
+from core.llm.provider import ModelScopeLLM
 
 logger = logging.getLogger(__name__)
 

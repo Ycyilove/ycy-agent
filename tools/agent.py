@@ -75,11 +75,11 @@ class LLMIntentRecognizer:
         if self.llm_client:
             return self.llm_client
         try:
-            from backend.services.llm import ModelScopeLLM
+            from core.llm.provider import ModelScopeLLM
             return ModelScopeLLM()
         except ImportError:
             logger.warning(
-                "[dsh][intent] backend.services.llm 不可用，LLM 意图识别禁用"
+                "[dsh][intent] core.llm.provider 不可用，LLM 意图识别禁用"
             )
             return None
 

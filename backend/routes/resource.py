@@ -4,7 +4,7 @@ import logging
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 
-from ..services.resource_store import get, get_path
+from core.resource.store import get, get_path
 
 logger = logging.getLogger(__name__)
 
