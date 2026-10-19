@@ -98,13 +98,6 @@ def create_agent_router(
     async def list_agent_tasks(session_id: str):
         return {'status': 'success', 'tasks': session_provider().list_tasks(session_id)}
 
-    @router.get('/api/agent/tasks/{task_id}')
-    async def get_agent_task(task_id: str):
-        task = session_provider().get_task(task_id)
-        if task is None:
-            raise HTTPException(status_code=404, detail='任务不存在')
-        return {'status': 'success', 'task': task}
-
     @router.delete('/api/agent/tasks/{task_id}')
     async def delete_agent_task(task_id: str):
         deleted = session_provider().delete_task(task_id)

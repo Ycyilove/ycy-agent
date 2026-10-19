@@ -1,10 +1,11 @@
 """Persistent local vector-store RAG service."""
 
 import json
+import logging
 import os
+import re
 import uuid
 from typing import Dict, List, Optional
-import logging
 
 from rag import (
     DocumentParserFactory,
@@ -17,8 +18,6 @@ from rag import (
 from rag.text_utils import clean_cn_spaces, clean_heading
 
 from .llm import ModelScopeLLM
-
-import re
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +51,6 @@ class LocalRAGService:
     def add_file(self, file_content: bytes, filename: str) -> Dict:
         """解析文件 → Docling 层级解析 → HybridChunker 切块 → 索引。"""
         import tempfile
-        import os as _os
 
         document_id = uuid.uuid4().hex
         resources_ingested = False
@@ -63,9 +61,9 @@ class LocalRAGService:
                 return {'status': 'warning', 'message': f'文件 {filename} 已存在，跳过添加'}
 
             # ── 1. 写入临时文件（Docling 需要磁盘路径）──
-            ext = _os.path.splitext(filename)[1] or ".pdf"
+            ext = os..path.splitext(filename)[1] or ".pdf"
             fd, tmp_path = tempfile.mkstemp(suffix=ext, prefix="rag_")
-            with _os.fdopen(fd, "wb") as f:
+            with os..fdopen(fd, "wb") as f:
                 f.write(file_content)
 
             # ── 2. Docling 解析 + 切块 ──
@@ -203,9 +201,9 @@ class LocalRAGService:
             logger.exception("[dsh][rag] 处理文件时出错")
             return {'status': 'error', 'message': f'处理文件时出错: {error}'}
         finally:
-            if tmp_path and _os.path.exists(tmp_path):
+            if tmp_path and os..path.exists(tmp_path):
                 try:
-                    _os.unlink(tmp_path)
+                    os..unlink(tmp_path)
                 except OSError:
                     pass
 
@@ -252,20 +250,24 @@ class LocalRAGService:
                     from rag import get_query_rewriter
                     import concurrent.futures
 
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                    # 不能用 with：__exit__ 会 shutdown(wait=True)，
+                    # 超时后仍会阻塞到改写跑完，超时形同虚设。
+                    ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                    try:
                         future = ex.submit(
                             get_query_rewriter().rewrite, query
                         )
-                        try:
-                            effective_query = future.result(
-                                timeout=RAG_QUERY_REWRITE_TIMEOUT
-                            )
-                        except concurrent.futures.TimeoutError:
-                            logger.warning(
-                                "[dsh][rag] query 改写超时(%ss)，用原 query",
-                                RAG_QUERY_REWRITE_TIMEOUT,
-                            )
-                            effective_query = query
+                        effective_query = future.result(
+                            timeout=RAG_QUERY_REWRITE_TIMEOUT
+                        )
+                    except concurrent.futures.TimeoutError:
+                        logger.warning(
+                            "[dsh][rag] query 改写超时(%ss)，用原 query",
+                            RAG_QUERY_REWRITE_TIMEOUT,
+                        )
+                        effective_query = query
+                    finally:
+                        ex.shutdown(wait=False, cancel_futures=True)
             except Exception:
                 logger.exception("[dsh][rag] query 改写失败，用原 query")
 
@@ -290,27 +292,39 @@ class LocalRAGService:
                     def _provider():
                         return self.vector_store.metadata
 
-                    # ── 原 query 的实体 ──
-                    entities = extract_entities(query)
-                    bm25_query = " ".join(entities) if entities else query
+                    def _bm25_query_for(text: str) -> str:
+                        ents = extract_entities(text)
+                        return " ".join(ents) if ents else text
+
+                    bm25_query = _bm25_query_for(query)
                     if bm25_query != query:
                         logger.info(
                             "[dsh][rag] BM25 query 用实体: %r → %r",
                             query, bm25_query,
                         )
-                    bm25_results = self.bm25_store.search(
-                        bm25_query, pool_size, _provider,
+
+                    eff_bm25_query = (
+                        _bm25_query_for(effective_query)
+                        if effective_query != query
+                        else bm25_query
                     )
 
-                    # ── 改写 query 的实体（可选）──
-                    if effective_query != query:
-                        eff_entities = extract_entities(effective_query)
-                        eff_bm25_query = (
-                            " ".join(eff_entities) if eff_entities
-                            else effective_query
+                    if eff_bm25_query == bm25_query:
+                        # 实体相同：只搜一次，避免重复结果 + 双倍开销
+                        bm25_results = self.bm25_store.search(
+                            bm25_query, pool_size, _provider,
                         )
-                        bm25_results += self.bm25_store.search(
+                    else:
+                        # 实体不同：两次结果用 RRF 融合，不直接拼接
+                        from backend.config import RAG_RRF_K
+                        r1 = self.bm25_store.search(
+                            bm25_query, pool_size, _provider,
+                        )
+                        r2 = self.bm25_store.search(
                             eff_bm25_query, pool_size, _provider,
+                        )
+                        bm25_results = rrf_fuse(
+                            r1, r2, k=RAG_RRF_K, limit=pool_size,
                         )
             except Exception:
                 logger.exception("[dsh][rag] BM25 检索失败，仅用向量结果")
@@ -329,20 +343,27 @@ class LocalRAGService:
             fused = vector_results[:top_k]
 
         # ── 返回前：从 metadata 取 headings ──
+        # 关键：返回 index 里实际存的文本（enriched / contextual），
+        # 而不是 original_text。否则会出现：
+        #   向量/BM25 命中 enriched，但返回给用户的是 original，
+        #   用户搜的词在返回文本里找不到。
         enriched = []
         for item in fused:
             meta = item.get("metadata", {})
             headings = meta.get("headings", [])
-            original = meta.get("original_text", item.get("text", ""))
+            indexed_text = item.get("text", "")
 
-            if headings:
+            # indexed_text 通常已带 heading 前缀（add_file 里 parser.get_enriched_text 产出），
+            # 只有缺失时才补一次，避免重复前缀。
+            if headings and not indexed_text.startswith(headings[0]):
                 prefix = " > ".join(headings) + "\n"
-                item["text"] = prefix + original
+                item["text"] = prefix + indexed_text
             else:
-                item["text"] = original
+                item["text"] = indexed_text
 
             item["headings"] = headings
             item["page_numbers"] = meta.get("page_numbers", [])
+            item["has_contextual"] = meta.get("has_contextual", False)
             enriched.append(item)
 
         return self.resource_manager.enrich_search_results(enriched)
@@ -352,14 +373,27 @@ class LocalRAGService:
         for index, doc in enumerate(retrieved_docs, 1):
             source = doc.get('filename', '未知来源')
             content = doc.get('text', '')
+
             resource_lines = []
             for resource in doc.get('resources', []):
-                location = f"，第 {resource['page_no']} 页" if resource.get('page_no') else ''
-                resource_lines.append(
-                    f"[[asset:{resource['id']}]] {resource['kind']}: {resource['filename']}{location}"
+                location = (
+                    f"，第 {resource['page_no']} 页"
+                    if resource.get('page_no') else ''
                 )
-            resource_text = f"\n关联资源:\n{'\n'.join(resource_lines)}" if resource_lines else ''
-            context_parts.append(f'【文档 {index}】来源: {source}\n{content}{resource_text}')
+                resource_lines.append(
+                    f"[[asset:{resource['id']}]] "
+                    f"{resource['kind']}: {resource['filename']}{location}"
+                )
+
+            if resource_lines:
+                joined = '\n'.join(resource_lines)
+                resource_text = f'\n关联资源:\n{joined}'
+            else:
+                resource_text = ''
+
+            context_parts.append(
+                f'【文档 {index}】来源: {source}\n{content}{resource_text}'
+            )
         return '\n\n'.join(context_parts)
 
     @staticmethod

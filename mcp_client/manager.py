@@ -450,12 +450,20 @@ class MCPClientManager:
         if isinstance(structured, dict):
             message_detail = str(structured.get("message_detail") or "")
 
-        auth_keywords = (
+        # 认证类错误必须同时命中「缺失/无效」+「凭证类名词」，
+        # 否则 "invalid parameter" 会被误判成认证失败。
+        _AUTH_MISSING = (
             "missing", "required", "unauthenticated", "unauthorized",
-            "not registered", "invalid", "expired", "forbidden",
+            "not registered", "expired", "forbidden",
+        )
+        _AUTH_CREDENTIAL = (
+            "api key", "api-key", "apikey", "token", "bearer",
+            "credential", "auth", "secret",
         )
         detail_lower = message_detail.lower()
-        needs_auth = any(kw in detail_lower for kw in auth_keywords)
+        has_missing = any(kw in detail_lower for kw in _AUTH_MISSING)
+        has_cred = any(kw in detail_lower for kw in _AUTH_CREDENTIAL)
+        needs_auth = has_missing and has_cred
 
         has_next_action = (
             isinstance(structured, dict)

@@ -36,18 +36,24 @@ RAG_BM25_ENABLED = os.getenv('RAG_BM25_ENABLED', 'true').lower() in ('1', 'true'
 RAG_QUERY_REWRITE_ENABLED = os.getenv('RAG_QUERY_REWRITE_ENABLED', 'true').lower() in ('1', 'true', 'yes')
 RAG_RRF_K = int(os.getenv('RAG_RRF_K', '20'))
 
-MODESCOPE_API_KEY = os.getenv(
-    'MODESCOPE_API_KEY',
-    'ms-e0031b6d-4579-45d0-8e43-cd411cb9de1e',
-)
+def _require_env(name: str, allow_empty: bool = False) -> str:
+    """必须从 .env 读取的敏感配置。缺失时启动即报错，避免静默用占位值。"""
+    value = os.getenv(name, '').strip()
+    if not value and not allow_empty:
+        raise RuntimeError(
+            f"缺少必需环境变量 {name}，请在 .env 中配置。"
+            f"（不要硬编码到代码里——一旦提交就是永久泄漏）"
+        )
+    return value
+
+
+MODESCOPE_API_KEY = _require_env('MODESCOPE_API_KEY')
 MODESCOPE_BASE_URL = 'https://api-inference.modelscope.cn/v1'
-SILICONFLOW_API_KEY = os.getenv(
-    'SILICONFLOW_API_KEY',
-    'sk-gsyxarvnkavbcihjvicddegjcbfvtrzfvcjkeslwyzguvueg',
-)
+SILICONFLOW_API_KEY = _require_env('SILICONFLOW_API_KEY')
 SILICONFLOW_BASE_URL = 'https://api.siliconflow.cn/v1'
-DEFAULT_MODEL = 'Qwen/Qwen3-8B'
-# DEFAULT_MODEL = 'deepseek-ai/DeepSeek-V4.1-Flash'
+YUNDU_API_KEY = _require_env('YUNDU_API_KEY')
+YUNDU_BASE_URL = 'https://yundu.lol/v1'
+DEFAULT_MODEL = os.getenv('DEFAULT_MODEL', 'gpt-5.6-luna')
 MODEL_SOURCE = ModelSource.ONLINE
 
 LOCAL_MODEL_CONFIG = LocalModelConfig(
@@ -66,8 +72,9 @@ LOCAL_MODEL_CONFIG = LocalModelConfig(
 # ── Langfuse 可观测性 ──
 # 开关：LANGFUSE_ENABLED=true 且 PUBLIC/SECRET KEY 非空时才启用
 LANGFUSE_ENABLED = os.getenv('LANGFUSE_ENABLED', 'false').lower() in ('1', 'true', 'yes')
-LANGFUSE_PUBLIC_KEY = os.getenv('LANGFUSE_PUBLIC_KEY', 'pk-lf-b6ce2022-518a-4d12-a9d0-49db68702d34')
-LANGFUSE_SECRET_KEY = os.getenv('LANGFUSE_SECRET_KEY', 'sk-lf-d8d61132-ab0d-4a01-9441-e3eaa5946fff')
+# Langfuse 是可选功能：未配置时 observability 会静默降级，所以允许为空
+LANGFUSE_PUBLIC_KEY = os.getenv('LANGFUSE_PUBLIC_KEY', '').strip()
+LANGFUSE_SECRET_KEY = os.getenv('LANGFUSE_SECRET_KEY', '').strip()
 LANGFUSE_HOST = os.getenv('LANGFUSE_HOST', 'https://cloud.langfuse.com')
 
 # ── Mem0 结构化记忆 ──

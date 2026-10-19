@@ -58,11 +58,6 @@ register_lazy_module(
     loader=lambda: __import__("langchain_core"),
     description="LangChain Core（消息、回调等）",
 )
-register_lazy_module(
-    name="langchain_text_splitters",
-    loader=lambda: __import__("langchain_text_splitters"),
-    description="RAG 文本分块",
-)
 
 # ── 业务模块 import ──
 

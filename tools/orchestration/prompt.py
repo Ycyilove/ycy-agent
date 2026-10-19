@@ -22,11 +22,11 @@ ORCHESTRATOR_PROMPT = """你是一个多步工具编排助手。
 
 ## 输出格式（严格 JSON，不要额外解释）
 
-{
+{{
     "thought": "简短推理",
     "done": true 或 false,
     "tool_name": "工具名（done=false 时必填）"
-}
+}}
 
 ## 信息查询优先级（重要）
 

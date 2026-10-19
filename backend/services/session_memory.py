@@ -486,17 +486,31 @@ class SessionMemory:
                 (session_id,)
             )
             task_rows = cursor.fetchall()
+            if not task_rows:
+                return []
+
+            task_ids = [row["task_id"] for row in task_rows]
+            placeholders = ",".join("?" for _ in task_ids)
+            cursor.execute(
+                f"SELECT * FROM task_steps WHERE task_id IN ({placeholders}) "
+                f"ORDER BY task_id, order_index ASC",
+                task_ids,
+            )
+            steps_by_task: Dict[str, List[Dict[str, Any]]] = {
+                tid: [] for tid in task_ids
+            }
+            for step_row in cursor.fetchall():
+                steps_by_task[step_row["task_id"]].append(
+                    self._step_row_to_dict(step_row)
+                )
+
             tasks = []
             for row in task_rows:
                 task = self._task_row_to_dict(row)
-                cursor.execute(
-                    "SELECT * FROM task_steps WHERE task_id = ? ORDER BY order_index ASC",
-                    (task["id"],)
-                )
-                task["steps"] = [self._step_row_to_dict(r) for r in cursor.fetchall()]
+                task["steps"] = steps_by_task.get(task["task_id"], [])
                 tasks.append(task)
             return tasks
-
+            
     def delete_task(self, task_id: str) -> bool:
         with self._lock:
             with self._get_connection() as conn:

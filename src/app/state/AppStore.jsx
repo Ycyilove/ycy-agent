@@ -115,6 +115,39 @@ function reducer(state, action) {
       };
     }
 
+    case 'DELETE_TASK': {
+      const task = state.tasks[action.id];
+      if (!task) return state;
+
+      const tasks = { ...state.tasks };
+      delete tasks[action.id];
+
+      const session = state.sessions[task.sessionId];
+      if (!session) {
+        return { ...state, tasks };
+      }
+
+      const remainingTaskIds = session.taskIds.filter(
+        (id) => id !== action.id
+      );
+      return {
+        ...state,
+        tasks,
+        sessions: {
+          ...state.sessions,
+          [task.sessionId]: {
+            ...session,
+            taskIds: remainingTaskIds,
+            // 删的是当前激活任务 → 回退到最后一个剩余任务
+            activeTaskId:
+              session.activeTaskId === action.id
+                ? remainingTaskIds[remainingTaskIds.length - 1] || null
+                : session.activeTaskId,
+          },
+        },
+      };
+    }
+
     case 'SET_ACTIVE_TASK': {
       const session = state.sessions[action.sessionId];
       if (!session) return state;

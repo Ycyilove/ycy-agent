@@ -32,6 +32,14 @@ def _check_path(path: str) -> Optional[Dict[str, Any]]:
     """路径安全检查，返回 None 表示通过。"""
     if not os.path.exists(path):
         return {"success": False, "error": f"文件不存在: {path}"}
+    if not os.path.isfile(path):
+        return {
+            "success": False,
+            "error": (
+                f"路径不是文件（可能是目录或根路径）: {path}。"
+                f"请提供具体文件名，例如 D:/data/xxx.pdf"
+            ),
+        }
     if not is_safe_path(os.path.abspath(path)):
         return {"success": False, "error": f"操作被拒绝：路径受保护: {path}"}
     return None

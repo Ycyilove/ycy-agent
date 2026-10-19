@@ -1,6 +1,7 @@
 import Icon from '../../shared/ui/Icon';
 import { I } from '../../shared/ui/icons';
 import { useApp } from '../../app/state/AppContext';
+import { deleteAgentTask } from '../../services/api';
 
 const STATUS = {
   idle: { dot: 'bg-[var(--dim)]' },
@@ -106,36 +107,70 @@ function TaskItem({ task, isActive }) {
   const { dispatch } = useApp();
   const s = STATUS[task.status] || STATUS.running;
 
-  return (
-    <button
-      onClick={() =>
-        dispatch({
-          type: 'SET_ACTIVE_TASK',
-          sessionId: task.sessionId,
-          taskId: task.id,
-        })
+  const handleDelete = async (event) => {
+    // 阻止冒泡，避免触发外层“选中任务”
+    event.stopPropagation();
+    if (!window.confirm(`删除任务「${task.title}」？`)) return;
+
+    // 本地任务未提交到后端（id 以 task- 开头且无 createdAt 服务端字段）
+    // 直接本地删除即可
+    try {
+      await deleteAgentTask(task.id);
+    } catch (error) {
+      // 404 说明后端已不存在，本地删除仍然正确
+      const status = error?.status ?? error?.response?.status;
+      if (status !== 404) {
+        console.error('[dsh][task] 删除任务失败', error);
+        return;
       }
-      className={`w-full rounded-md border px-2.5 py-2 text-left transition-colors ${
+    }
+
+    dispatch({ type: 'DELETE_TASK', id: task.id });
+  };
+
+  return (
+    <div
+      className={`group flex w-full items-center gap-1 rounded-md border px-2.5 py-2 transition-colors ${
         isActive
           ? 'border-[var(--border)] bg-[var(--surface-2)]'
           : 'border-transparent hover:bg-[var(--surface)]'
       }`}
     >
-      <div className="flex min-w-0 items-center gap-2">
-        <span className={`h-1.5 w-1.5 flex-shrink-0 rounded-full ${s.dot}`} />
-        <span
-          className={`truncate text-xs ${
-            isActive ? 'text-[var(--text)]' : 'text-[var(--muted)]'
-          }`}
-        >
-          {task.title}
-        </span>
-      </div>
-      {task.steps?.length > 0 && (
-        <div className="mt-0.5 truncate pl-3.5 text-[11px] text-[var(--dim)]">
-          {task.steps[task.steps.length - 1].label}
+      <button
+        onClick={() =>
+          dispatch({
+            type: 'SET_ACTIVE_TASK',
+            sessionId: task.sessionId,
+            taskId: task.id,
+          })
+        }
+        className="min-w-0 flex-1 text-left"
+      >
+        <div className="flex min-w-0 items-center gap-2">
+          <span className={`h-1.5 w-1.5 flex-shrink-0 rounded-full ${s.dot}`} />
+          <span
+            className={`truncate text-xs ${
+              isActive ? 'text-[var(--text)]' : 'text-[var(--muted)]'
+            }`}
+          >
+            {task.title}
+          </span>
         </div>
-      )}
-    </button>
+        {task.steps?.length > 0 && (
+          <div className="mt-0.5 truncate pl-3.5 text-[11px] text-[var(--dim)]">
+            {task.steps[task.steps.length - 1].label}
+          </div>
+        )}
+      </button>
+
+      <button
+        onClick={handleDelete}
+        className="flex-shrink-0 rounded p-1 text-[var(--dim)] opacity-0 transition-opacity hover:text-[var(--danger)] group-hover:opacity-100"
+        title="删除任务"
+        aria-label="删除任务"
+      >
+        <Icon d={I.trash} className="h-3 w-3" />
+      </button>
+    </div>
   );
 }

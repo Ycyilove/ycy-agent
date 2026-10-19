@@ -137,119 +137,6 @@ class AgentOrchestrator:
         self._enable_intent_router = enable_intent_router
         self._shortlister_provider = shortlister_provider
 
-    # ── 工具格式化（策略 A：带用途标签） ──
-
-    def _format_tools(self, tools: Dict[str, Any]) -> str:
-        if not tools:
-            return "(无可用工具)"
-
-        lines: List[str] = []
-
-        # 顶部：用途标签索引
-        tag_index: Dict[str, List[str]] = {}
-        for name in tools:
-            for tag in get_intent_tags(name):
-                tag_index.setdefault(tag, []).append(name)
-        if tag_index:
-            lines.append("## 按用途标签索引")
-            for tag in sorted(tag_index):
-                desc = INTENT_TAG_DESCRIPTIONS.get(tag, tag)
-                tools_for_tag = tag_index[tag][:5]
-                lines.append(f"- **{desc}** ({tag}): {', '.join(tools_for_tag)}")
-            lines.append("")
-
-        # 逐个工具详情
-        lines.append("## 工具详情")
-        for name, meta in tools.items():
-            lines.append("")
-            lines.append(f"### {name}")
-            lines.append(f"描述: {meta.description}")
-
-            tags = get_intent_tags(name)
-            if tags:
-                tag_descs = [get_intent_tag_description(t) for t in tags]
-                lines.append(f"🏷️ 用途标签: {'、'.join(tag_descs)}")
-
-            schema = getattr(meta, "input_schema", None) or {}
-            required = set(schema.get("required") or [])
-            properties = schema.get("properties") or getattr(meta, "parameters", None) or {}
-
-            if not properties:
-                lines.append("参数: 无")
-                continue
-
-            lines.append("参数:")
-            for pname, pinfo in properties.items():
-                if not isinstance(pinfo, dict):
-                    lines.append(f"  - {pname}: (任意类型)")
-                    continue
-
-                ptype = pinfo.get("type", "any")
-                mark = "必填" if pname in required else "可选"
-                pdesc = pinfo.get("description", "")
-                part = f"  - {pname} ({ptype}, {mark})"
-                if pdesc:
-                    part += f": {pdesc}"
-                if "enum" in pinfo and isinstance(pinfo["enum"], list):
-                    part += f" [可选值: {pinfo['enum']}]"
-                if "default" in pinfo:
-                    part += f" [默认: {pinfo['default']}]"
-                lines.append(part)
-
-                nested = pinfo.get("properties")
-                if isinstance(nested, dict) and nested:
-                    nested_required = set(pinfo.get("required") or [])
-                    for nname, ninfo in nested.items():
-                        if not isinstance(ninfo, dict):
-                            continue
-                        ntype = ninfo.get("type", "any")
-                        nmark = "必填" if nname in nested_required else "可选"
-                        ndesc = ninfo.get("description", "")
-                        sub = f"      - {nname} ({ntype}, {nmark})"
-                        if ndesc:
-                            sub += f": {ndesc}"
-                        lines.append(sub)
-
-                items = pinfo.get("items")
-                if isinstance(items, dict):
-                    itype = items.get("type", "any")
-                    lines.append(f"      (数组元素类型: {itype})")
-
-            required_params = [p for p in properties if p in required]
-            if required_params:
-                lines.append(
-                    f"  ⚠️ **必填参数**：{', '.join(required_params)}"
-                )
-
-        return "\n".join(lines)
-
-    # ── 精简工具格式（降低 prompt 长度） ──
-
-    def _format_tools_compact(self, tools: Dict[str, Any]) -> str:
-        """一行一个工具 + 必填参数名，省去嵌套 schema、enum、examples。"""
-        if not tools:
-            return "(无可用工具)"
-
-        lines = ["## 可用工具", ""]
-        for name, meta in tools.items():
-            desc = (getattr(meta, "description", "") or "").split("\n")[0].strip()
-            if len(desc) > 90:
-                desc = desc[:87] + "..."
-
-            schema = getattr(meta, "input_schema", None) or {}
-            properties = schema.get("properties") or getattr(meta, "parameters", None) or {}
-            required = list(schema.get("required") or [])
-            if not required and properties:
-                # 有些工具没标 required，把全部参数名作为提示
-                required = list(properties.keys())
-
-            req_str = ", ".join(required[:6]) if required else "(无)"
-            if len(required) > 6:
-                req_str += f" …(+{len(required) - 6})"
-
-            lines.append(f"- `{name}` — {desc}  [参数: {req_str}]")
-
-        return "\n".join(lines)
 
     def _format_tool_directory(self, tools: Dict[str, Any]) -> str:
         """只给工具名 + 一句描述 + tags，用于「选工具」阶段。
@@ -360,93 +247,8 @@ class AgentOrchestrator:
 
         return "\n".join(lines)
 
-    # ── 工具预筛：从 goal 粗筛相关工具 ──
-
-    # 关键词组 → 匹配的工具名/描述关键词
-    _INTENT_TO_TOOL_HINTS: List[tuple] = [
-        (
-            ("创建", "新建", "写入", "写文件", "保存", "生成文件",
-             "create", "write", "save", "append"),
-            ("write", "create", "edit", "save", "append"),
-        ),
-        (
-            ("读取", "查看", "打开", "read", "open", "cat"),
-            ("read", "list", "get", "load", "open"),
-        ),
-        (
-            ("删除", "移除", "delete", "remove", "unlink"),
-            ("delete", "remove", "move", "trash"),
-        ),
-        (
-            ("列出", "目录", "文件夹", "list", "dir", "ls"),
-            ("list", "dir", "tree", "walk"),
-        ),
-        (
-            ("搜索", "查找", "最新", "新闻", "消息", "search", "find", "latest", "news"),
-            ("search", "tavily", "brave", "web", "fetch", "http"),
-        ),
-        (
-            ("重命名", "改名", "rename", "move", "移动"),
-            ("rename", "move", "edit"),
-        ),
-        (
-            ("执行", "运行", "跑", "run", "execute", "python"),
-            ("run", "execute", "python", "shell", "command"),
-        ),
-        (
-            ("时间", "日期", "time", "date", "时区"),
-            ("time", "date", "timestamp", "clock"),
-        ),
-        (
-            ("http", "url", "网页", "接口", "api", "请求", "抓取", "fetch"),
-            ("http", "fetch", "url", "web", "json"),
-        ),
-        (
-            ("csv", "excel", "表格", "spreadsheet"),
-            ("csv", "excel", "table", "spreadsheet"),
-        ),
-        (
-            ("mysql", "数据库", "sql", "database"),
-            ("mysql", "sql", "query", "database"),
-        ),
-        (
-            ("知识库", "rag", "检索", "knowledge", "文档库"),
-            ("knowledge", "rag", "search", "retrieve"),
-        ),
-        (
-            ("mcp", "外部", "发现", "连接", "connect", "discover"),
-            ("mcp", "search_and_connect"),
-        ),
-    ]
-
-    def _shortlist_tools(self, goal: str, tools: Dict[str, Any]) -> Dict[str, Any]:
-        """按 goal 关键词粗筛工具。筛不到相关就返回全量。"""
-        MIN_KEEP = 8
-        lower = goal.lower()
-
-        matched_hints: set = set()
-        for triggers, hints in self._INTENT_TO_TOOL_HINTS:
-            if any(t in lower for t in triggers):
-                matched_hints.update(hints)
-
-        if not matched_hints:
-            return tools
-
-        filtered: Dict[str, Any] = {}
-        for name, meta in tools.items():
-            name_lower = name.lower()
-            desc_lower = (getattr(meta, "description", "") or "").lower()
-            hay = f"{name_lower} {desc_lower}"
-            if any(h in hay for h in matched_hints):
-                filtered[name] = meta
-
-        if len(filtered) < MIN_KEEP:
-            return tools
-
-        return filtered
 
     # ── 工具名解析（容错 LLM 幻觉出的简写） ──
-
     @staticmethod
     def _resolve_tool_name(requested: str, available: Dict[str, Any]) -> Optional[str]:
         """把 LLM 幻觉出的简写工具名映射到实际存在的工具。
@@ -628,9 +430,13 @@ class AgentOrchestrator:
                     "[dsh][orchestrator] shortlister raised, fallback to keyword"
                 )
 
-        # 2. 关键词兜底
+        # 2. ToolShortlister 不可用时不筛（全量交给 LLM）
+        # 不再用关键词兜底：两套 intent 映射容易失配
         if picked is None:
-            picked = self._shortlist_tools(goal, tools)
+            logger.info(
+                "[dsh][orchestrator] shortlister unavailable, use full tool set"
+            )
+            picked = tools
 
         # 3. 强制保留关键工具（discovery + fetch_url + 知识库工具）
         # 知识库工具必须保留：embedding shortlist 对"人名 + 获奖"这类
@@ -1001,6 +807,14 @@ class AgentOrchestrator:
             try:
                 from backend.services.memory_layer import recall_file_paths
                 known_paths = recall_file_paths(state.session_id, limit=5)
+                # 过滤根路径/盘符，避免 LLM 拿 "/" 当 PDF 路径
+                known_paths = [
+                    p for p in known_paths
+                    if isinstance(p, str)
+                    and p.strip()
+                    and p.strip() not in {"/", "\\"}
+                    and not re.fullmatch(r"[A-Za-z]:[\\/]?", p.strip())
+                ]
                 if known_paths:
                     mem0_block = (
                         "## 已知文件路径（本会话历史）\n"
@@ -1113,7 +927,12 @@ class AgentOrchestrator:
                 "[dsh][orchestrator] _fill_params non-JSON for %s: %s",
                 tool_name, raw[:200],
             )
-            return {}
+            # 兜底：从文本里抓第一个 {...}
+            m = re.search(r"\{.*\}", raw or "", re.DOTALL)
+            if m:
+                data = self._parse_json(m.group(0))
+            if not isinstance(data, dict):
+                return {}
 
         # 参数名自适应
         adapted = self._adapt_params_for_tool(tool_name, data, tools)
@@ -1126,6 +945,75 @@ class AgentOrchestrator:
         return adapted
 
         # ── 结果达标评估 ──
+
+    # 检索类工具：返回非空且包含 query 实体即视为充分，不走 LLM
+    _RETRIEVAL_TOOLS = frozenset({
+        "search_knowledge",
+        "knowledge_stats",
+        "list_knowledge_sources",
+        "search_content",
+        "search_files",
+        "read_pdf_text",
+        "read_pdf_metadata",
+        "read_docx_text",
+        "read_docx_tables",
+        "read_csv",
+        "read_text_file",
+        "read_file_range",
+        "fetch_url",
+        "http_get",
+        "fetch_json",
+    })
+
+    @staticmethod
+    def _extract_query_terms(goal: str) -> List[str]:
+        """从 goal 里提取 2-4 字的中文实体片段，用于确定性匹配。"""
+        terms: List[str] = []
+        for m in re.finditer(r"[\u4e00-\u9fff]{2,4}", goal or ""):
+            terms.append(m.group(0))
+        seen = set()
+        out = []
+        for t in terms:
+            if t not in seen:
+                seen.add(t)
+                out.append(t)
+        return out[:8]
+
+    def _deterministic_assess(
+        self,
+        goal: str,
+        tool_name: str,
+        preview: str,
+    ) -> Optional[Dict[str, Any]]:
+        """确定性充分性判断。返回 None 表示需要 LLM 兜底。"""
+        if not preview:
+            return {
+                "sufficient": False,
+                "gap": "工具返回内容为空",
+                "next_hint": "换一个 URL 或换一个搜索词重试",
+            }
+
+        if tool_name not in self._RETRIEVAL_TOOLS:
+            return None
+
+        # 检索类工具：preview 里出现任意 query 实体片段 → 充分
+        terms = self._extract_query_terms(goal)
+        if terms and any(t in preview for t in terms):
+            return {
+                "sufficient": True,
+                "gap": "",
+                "next_hint": "",
+            }
+
+        # 没有实体片段但 preview 很长（> 500 字），视为有内容
+        if len(preview) > 500:
+            return {
+                "sufficient": True,
+                "gap": "",
+                "next_hint": "",
+            }
+
+        return None
 
     async def _assess_result(
         self,
@@ -1146,30 +1034,52 @@ class AgentOrchestrator:
 
         # 取结果文本
         payload = result.result
+        preview = ""
         if isinstance(payload, dict):
-            content_blocks = payload.get("content") or []
-            texts = []
-            if isinstance(content_blocks, list):
-                for block in content_blocks:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        t = block.get("text") or ""
-                        if t:
-                            texts.append(t)
-            preview = "\n".join(texts)
+            # MCP 风格：content 数组
+            blocks = payload.get("content") or []
+            if isinstance(blocks, list):
+                texts = [
+                    b.get("text", "") for b in blocks
+                    if isinstance(b, dict) and b.get("type") == "text"
+                ]
+                preview = "\n".join(t for t in texts if t)
+
+            # 知识库风格：chunks 数组
+            if not preview:
+                chunks = payload.get("chunks") or []
+                if isinstance(chunks, list):
+                    texts = [
+                        c.get("text", "") for c in chunks
+                        if isinstance(c, dict)
+                    ]
+                    preview = "\n".join(t for t in texts if t)
+
+            # 统计类扁平 dict：任意字符串/数字字段都算内容
+            if not preview:
+                flat = [
+                    f"{k}: {v}" for k, v in payload.items()
+                    if isinstance(v, (str, int, float)) and v
+                ]
+                preview = "\n".join(flat)
+
         elif isinstance(payload, str):
             preview = payload
         else:
             preview = str(payload) if payload is not None else ""
 
-        if not preview:
-            return {
-                "sufficient": False,
-                "gap": "工具返回内容为空",
-                "next_hint": "换一个 URL 或换一个搜索词重试",
-            }
+        # ── 确定性优先：检索类工具命中实体即充分，不走 LLM ──
+        deterministic = self._deterministic_assess(goal, tool_name, preview)
+        if deterministic is not None:
+            logger.info(
+                "[dsh][orchestrator] deterministic assess: %s → sufficient=%r",
+                tool_name, deterministic["sufficient"],
+            )
+            return deterministic
 
-        if len(preview) > 3000:
-            preview = preview[:3000] + "\n... (truncated)"
+        # preview 放宽到 12000，避免实体被截断
+        if len(preview) > 12000:
+            preview = preview[:12000] + "\n... (truncated)"
 
         prompt = (
             "你是结果评估助手。判断最近一次工具返回是否足以回答用户目标。\n\n"
@@ -1232,7 +1142,7 @@ class AgentOrchestrator:
             "gap": str(data.get("gap", "")),
             "next_hint": str(data.get("next_hint", "")),
         }
-    
+
     async def run(
         self,
         goal: str,
@@ -1254,7 +1164,7 @@ class AgentOrchestrator:
             resume_state is not None,
             goal[:100],
         )
-        
+
         # ── 等 mem0 ready，避免冷启动首轮写入丢失 ──
         try:
             from backend.services.memory_layer import wait_until_ready
@@ -1262,7 +1172,7 @@ class AgentOrchestrator:
             logger.info("[dsh][orchestrator] mem0 ready=%r", ready)
         except Exception:
             logger.exception("wait_until_ready 失败，继续执行")
-            
+
         # 每个任务开始重置"已试过的 MCP 服务器"
         try:
             from tools.mcp_discovery import reset_tried_servers
@@ -1517,7 +1427,7 @@ class AgentOrchestrator:
                         "step": step_index,
                         "thought": f"[结果评估] 不达标：{gap}",
                     }
-                    
+
                 # ── Mem0 写入：工具成功后提取结构化事实 ──
                 try:
                     from backend.services.memory_layer import (

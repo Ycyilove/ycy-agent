@@ -91,6 +91,28 @@ _TOOL_INTENT_TAGS_BY_SUFFIX: Dict[str, List[str]] = {
 
     # 知识库
     "search_knowledge": ["knowledge_read"],
+    "knowledge_stats": ["knowledge_read"],
+    "list_knowledge_sources": ["knowledge_read"],
+    "list_knowledge_resources": ["knowledge_read"],
+    "get_knowledge_resource": ["knowledge_read"],
+
+    # 文档读取（之前漏了，导致 embedding 筛不到）
+    "read_pdf_text": ["read_text"],
+    "read_pdf_metadata": ["stat"],
+    "read_docx_text": ["read_text"],
+    "read_docx_tables": ["read_text"],
+    "write_docx": ["write_new"],
+    "edit_docx": ["write_modify"],
+    "write_excel": ["write_new"],
+    "edit_excel": ["write_modify"],
+    "add_excel_sheet": ["write_new"],
+    "merge_pdfs": ["write_new"],
+    "split_pdf": ["write_new"],
+
+    # 检索/搜索
+    "search_content": ["search_content"],
+    "search_files": ["search_name"],
+    "read_file_range": ["read_text"],
 }
 
 

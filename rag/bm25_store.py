@@ -135,11 +135,23 @@ def rrf_fuse(*result_lists, k=60, limit=10, weights=None):
     if len(weights) != len(result_lists):
         raise ValueError("weights 数量必须与 result_lists 一致")
 
-    scores = {}
-    items = {}
+    def _key(item: dict):
+        # 优先用 chunk_id：不同 chunk 的前 200 字可能相同
+        # （表格重复行、模板文头），用 text[:200] 会误合并。
+        cid = (item.get("metadata") or {}).get("chunk_id")
+        if cid:
+            return ("chunk", cid)
+        # 兜底：filename + 完整 text 的 hash
+        import hashlib
+        text = item.get("text", "")
+        digest = hashlib.md5(text.encode("utf-8", "ignore")).hexdigest()
+        return ("text", item.get("filename", ""), digest)
+
+    scores: Dict[tuple, float] = {}
+    items: Dict[tuple, dict] = {}
     for results, weight in zip(result_lists, weights):
         for rank, item in enumerate(results):
-            key = (item.get("filename", ""), item.get("text", "")[:200])
+            key = _key(item)
             scores[key] = scores.get(key, 0.0) + weight / (k + rank + 1)
             if key not in items:
                 items[key] = item

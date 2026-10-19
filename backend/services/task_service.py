@@ -521,9 +521,12 @@ class AgentTaskService:
     def _strip_bytes(obj: Any, _depth: int = 0) -> Any:
         """递归把 bytes 替换成占位字符串。
 
-        避免 json.dumps / prompt 里出现原始二进制。
+        与 json.dumps(default=str) 的分工：
+        - _strip_bytes: bytes → "<binary N bytes>"（可读、可控长度）
+        - default=str : 其他不可序列化对象（datetime、自定义类）→ str()
+        两者**不能互相替代**：只留 default=str 会让大二进制变成
+        几 MB 的 b'...'；只留 _strip_bytes 遇到 datetime 会抛。
         - dict / list / tuple 递归处理
-        - bytes 替换成 "<binary N bytes>"
         - 深度超限返回类型名，防止循环引用
         """
         if _depth > 10:
@@ -848,7 +851,8 @@ class AgentTaskService:
                 logger.exception("dump stream_answer prompt failed")
 
         # 用 StreamSplitter 解析
-        splitter_events: List[Dict[str, Any]] = []
+        from collections import deque
+        splitter_events: "deque[Dict[str, Any]]" = deque()
 
         def on_thinking(text: str) -> None:
             step = self._step(
@@ -877,7 +881,7 @@ class AgentTaskService:
 
                 # 把本轮 splitter 产生的事件 yield 出去
                 while splitter_events:
-                    evt = splitter_events.pop(0)
+                    evt = splitter_events.popleft()
                     yield self._emit_step(task_id, evt["step"])
 
         # finalize
@@ -955,6 +959,7 @@ class AgentTaskService:
         tool_call: ToolCallRequest,
         turn_id: str,
         step_id: Optional[str] = None,
+        tool_execution_context: Optional[List[str]] = None,
     ) -> AsyncIterator[str]:
         step_id = step_id or f"{task_id}:{turn_id}:tool:{uuid.uuid4().hex[:8]}"
         label = f"执行工具：{tool_call.tool_name}"
@@ -1023,6 +1028,21 @@ class AgentTaskService:
                 )
         except Exception:
             logger.exception("提取工具资源失败")
+
+        # 把结果累积到 tool_execution_context（如果调用方传了）
+        # 这样外层不再需要重复 execute_tool_async
+        if tool_execution_context is not None:
+            try:
+                if result.success and result.result is not None:
+                    if isinstance(result.result, dict):
+                        payload = json.dumps(result.result, ensure_ascii=False)
+                    else:
+                        payload = str(result.result)
+                    tool_execution_context.append(
+                        f"【工具 {tool_call.tool_name} 返回】\n{payload[:8000]}"
+                    )
+            except Exception:
+                logger.exception("累积工具结果失败")
 
         self._session_provider().add_message(session_id, "assistant", log)
         final_status = "done" if result.success else "failed"
@@ -1493,26 +1513,10 @@ class AgentTaskService:
                         return
 
                     async for event in self._execute_tool(
-                        task_id, session_id, tool_call, turn_id
+                        task_id, session_id, tool_call, turn_id,
+                        tool_execution_context=tool_execution_context,
                     ):
                         yield event
-
-                    try:
-                        fallback_result = await self._agent_provider().execute_tool_async(
-                            tool_call
-                        )
-                        if fallback_result.success and fallback_result.result is not None:
-                            if isinstance(fallback_result.result, dict):
-                                payload = json.dumps(
-                                    fallback_result.result, ensure_ascii=False
-                                )
-                            else:
-                                payload = str(fallback_result.result)
-                            tool_execution_context.append(
-                                f"【工具 {tool_call.tool_name} 返回】\n{payload[:8000]}"
-                            )
-                    except Exception:
-                        logger.exception("回退路径累积工具结果失败")
 
                     return
 
@@ -1662,10 +1666,20 @@ class AgentTaskService:
             found = self._extract_resources_from_tool_result(
                 result,
                 task_id=task_id,
-                session_id=session_id,
+                session_id=pending.session_id,
             )
             if found:
                 accumulated_resources.extend(found)
+                yield self._emit_step(
+                    task_id,
+                    self._step(
+                        f"{task_id}:{step_id}:resources",
+                        f"工具产生 {len(found)} 个资源",
+                        "done",
+                        "resource",
+                        resources=found,
+                    ),
+                )
         except Exception:
             logger.exception("提取工具资源失败")
 
@@ -1674,8 +1688,9 @@ class AgentTaskService:
             result.result = self._strip_bytes(result.result)
 
         log_parts: List[str] = []
-        if event.get("log"):
-            log_parts.append(str(event["log"]))
+        # 审批路径没有 orchestrator event；log 已是 format_tool_result 的结果
+        if log:
+            log_parts.append(str(log))
 
         result_payload = getattr(result, "result", None)
         if result_payload is not None:
@@ -1725,27 +1740,6 @@ class AgentTaskService:
                     "deleted_at": datetime.now().isoformat(),
                     "size": 0,
                 })
-
-        # ── 提取二进制资源 ──
-        try:
-            found = self._extract_resources_from_tool_result(
-                result,
-                task_id=task_id,
-                session_id=pending.session_id,
-            )
-            if found:
-                yield self._emit_step(
-                    task_id,
-                    self._step(
-                        f"{task_id}:{step_id}:resources",
-                        f"工具产生 {len(found)} 个资源",
-                        "done",
-                        "resource",
-                        resources=found,
-                    ),
-                )
-        except Exception:
-            logger.exception("提取工具资源失败")
 
         # ── 无法恢复 orchestrator → 直接结束 ──
         if (
@@ -1901,13 +1895,6 @@ class AgentTaskService:
                     resources=accumulated_resources,
                 ),
             )
-
-        memory = self._session_provider()
-        prior_messages = (
-            memory.get_conversation_context(session_id, 20)
-            if session_id
-            else []
-        )
 
         async for evt in self._stream_answer(
             task_id,

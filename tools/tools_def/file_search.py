@@ -40,6 +40,8 @@ _SKIP_DIRS = frozenset({
     ".git", "node_modules", "__pycache__", ".venv", "venv",
     ".idea", ".vscode", "dist", "build", ".next", ".pytest_cache",
     "models",  # 你项目的模型缓存，通常很大
+    "$RECYCLE.BIN", "System Volume Information",  # Windows 系统目录
+    ".Trash", ".Trashes",  # macOS
 })
 
 # 默认跳过的二进制扩展名
@@ -64,7 +66,9 @@ def _iter_files(
         # 原地修改 dirnames 以跳过目录
         dirnames[:] = [
             d for d in dirnames
-            if d not in skip_dirs and not d.startswith(".")
+            if d not in skip_dirs
+            and not d.startswith(".")
+            and not d.startswith("$")
         ]
 
         for name in filenames:

@@ -188,6 +188,15 @@ def begin_turn(
         except Exception:
             logger.exception("[dsh][llm-debug] 清空 all-calls.jsonl 失败")
 
+        # 清理上一次 turn 残留的分文件，避免 step 编号重复
+        try:
+            for old in turn_dir.glob("[0-9][0-9]-*.json"):
+                if old.name == "00-meta.json":
+                    continue
+                old.unlink(missing_ok=True)
+        except Exception:
+            logger.exception("[dsh][llm-debug] 清理旧分文件失败")
+
         # 写 meta.json
         try:
             meta = {

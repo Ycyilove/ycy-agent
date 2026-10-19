@@ -85,8 +85,8 @@ _WEB_SIGNALS = (
     "web", "page", "website", "url", "link", "news", "latest",
 )
 
-# 搜索类工具名关键词
-_SEARCH_TOOL_HINTS = ("search",)
+# 搜索类工具名关键词（单元素不必套元组）
+_SEARCH_TOOL_HINT = "search"
 # 抓取类工具名关键词
 _EXTRACT_TOOL_HINTS = ("extract", "fetch", "crawl", "research")
 
@@ -119,10 +119,7 @@ def check_web_query_completion(state) -> Optional[str]:
             "**下一步：先用搜索类工具（名字含 search）获取候选 URL。**"
         )
 
-    has_search = any(
-        any(h in n.lower() for h in _SEARCH_TOOL_HINTS)
-        for n in seq
-    )
+    has_search = any(_SEARCH_TOOL_HINT in n.lower() for n in seq)
     has_extract = any(
         any(h in n.lower() for h in _EXTRACT_TOOL_HINTS)
         for n in seq

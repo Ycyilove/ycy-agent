@@ -75,9 +75,12 @@ class LLMIntentRecognizer:
         if self.llm_client:
             return self.llm_client
         try:
-            from langchain_service import get_llm
-            return get_llm()
+            from backend.services.llm import ModelScopeLLM
+            return ModelScopeLLM()
         except ImportError:
+            logger.warning(
+                "[dsh][intent] backend.services.llm 不可用，LLM 意图识别禁用"
+            )
             return None
 
     def _get_tool_descriptions(self, registry_instance) -> str:
@@ -604,43 +607,6 @@ class ToolAgent:
                 parameters=params,
             )
 
-    @staticmethod
-    def _extract_resource_declarations(result: "ToolCallResult") -> List[Dict[str, Any]]:
-        """从工具返回值里提取资源声明（协议：resources 字段）。
-
-        返回的声明交给 task_service 去做实际的 save_bytes / save_file。
-        只负责"读声明"，不落盘。
-        """
-        if not result or not getattr(result, "success", False):
-            return []
-        payload = result.result
-        if not isinstance(payload, dict):
-            return []
-
-        declared = payload.get("resources")
-        if not isinstance(declared, list):
-            return []
-
-        out: List[Dict[str, Any]] = []
-        for item in declared:
-            if not isinstance(item, dict):
-                continue
-            kind = item.get("kind")
-            if not kind:
-                continue
-            out.append({
-                "kind": kind,
-                "filename": item.get("filename") or f"resource.{kind}",
-                "mime": item.get("mime") or item.get("mime_type") or "",
-                "content": item.get("content"),      # bytes 或 base64 字符串
-                "path": item.get("path") or item.get("file_path"),
-                "columns": item.get("columns"),
-                "rows": item.get("rows"),
-                "page_no": item.get("page_no"),
-                "extra": item.get("extra"),
-            })
-        return out
-        
     def format_tool_result(self, result: ToolCallResult) -> str:
         """格式化工具结果。
 
@@ -778,25 +744,14 @@ class ToolAgent:
                             output += f"📎 [资源: {uri}]\n"
 
                 # ── 4. 无 content 数组时，退到通用字段 ──
+                # 官方 MCP 只用 content / structuredContent；
+                # message / output / data 是非标 server 的旧字段，
+                # 这里不再逐个特判，统一走 leftover 兜底。
                 if not isinstance(content_blocks, list) or not content_blocks:
-                    if "message" in result.result:
-                        output += f"📝 结果: {result.result['message']}\n"
-                    if "output" in result.result:
-                        output += f"📤 输出:\n{result.result['output']}\n"
-                    if "data" in result.result:
-                        try:
-                            output += "📦 数据:\n"
-                            output += json.dumps(
-                                result.result["data"], ensure_ascii=False, indent=2
-                            )[:2000]
-                            output += "\n"
-                        except Exception:
-                            output += f"📦 数据: {str(result.result['data'])[:2000]}\n"
-
-                    # 兜底：如果上面都没命中，把整个 result 输出
-                    handled_keys = {"content", "structuredContent",
-                                    "tools", "message", "output", "data",
-                                    "isError", "resultType", "success", "_meta"}
+                    handled_keys = {
+                        "content", "structuredContent",
+                        "tools", "isError", "resultType", "success", "_meta",
+                    }
                     leftover = {
                         k: v for k, v in result.result.items()
                         if k not in handled_keys
@@ -804,9 +759,14 @@ class ToolAgent:
                     if leftover:
                         try:
                             output += "📦 其他数据:\n"
+                            # chunks / resources 是知识库检索的核心内容，
+                            # 放宽到 12000，避免人名/实体被截断
+                            limit = 12000 if (
+                                "chunks" in leftover or "resources" in leftover
+                            ) else 4000
                             output += json.dumps(
                                 leftover, ensure_ascii=False, indent=2
-                            )[:2000]
+                            )[:limit]
                             output += "\n"
                         except Exception:
                             pass

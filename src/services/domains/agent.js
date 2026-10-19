@@ -35,7 +35,6 @@ export const approveAgentTask = async (taskId, approvalId, action = 'allow', sig
 export const listAgentTasks = (sessionId) => requestJson(
   `/api/agent/tasks?session_id=${encodeURIComponent(sessionId)}`
 );
-export const getAgentTask = (taskId) => requestJson(`/api/agent/tasks/${taskId}`);
 export const deleteAgentTask = (taskId) => requestJson(`/api/agent/tasks/${taskId}`, {
   method: 'DELETE',
 });

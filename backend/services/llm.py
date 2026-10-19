@@ -16,6 +16,8 @@ from ..config import (
     MODESCOPE_BASE_URL,
     SILICONFLOW_API_KEY,
     SILICONFLOW_BASE_URL,
+    YUNDU_API_KEY,
+    YUNDU_BASE_URL,
     MODEL_SOURCE,
 )
 from .local_model import get_local_model_service, ModelSource
@@ -66,8 +68,8 @@ class ModelScopeLLM:
             model=self.model,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
-            api_key=SILICONFLOW_API_KEY,
-            base_url=SILICONFLOW_BASE_URL,
+            api_key=YUNDU_API_KEY,
+            base_url=YUNDU_BASE_URL,
         )
 
     def generate(self, messages: List[Dict[str, str]], mode: str = 'quick') -> str:
