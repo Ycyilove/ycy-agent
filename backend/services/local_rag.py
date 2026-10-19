@@ -61,9 +61,9 @@ class LocalRAGService:
                 return {'status': 'warning', 'message': f'文件 {filename} 已存在，跳过添加'}
 
             # ── 1. 写入临时文件（Docling 需要磁盘路径）──
-            ext = os..path.splitext(filename)[1] or ".pdf"
+            ext = os.path.splitext(filename)[1] or ".pdf"
             fd, tmp_path = tempfile.mkstemp(suffix=ext, prefix="rag_")
-            with os..fdopen(fd, "wb") as f:
+            with os.fdopen(fd, "wb") as f:
                 f.write(file_content)
 
             # ── 2. Docling 解析 + 切块 ──
@@ -201,9 +201,9 @@ class LocalRAGService:
             logger.exception("[dsh][rag] 处理文件时出错")
             return {'status': 'error', 'message': f'处理文件时出错: {error}'}
         finally:
-            if tmp_path and os..path.exists(tmp_path):
+            if tmp_path and os.path.exists(tmp_path):
                 try:
-                    os..unlink(tmp_path)
+                    os.unlink(tmp_path)
                 except OSError:
                     pass
 
