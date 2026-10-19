@@ -121,7 +121,21 @@ def _build_structured_history(
 
 
 class AgentOrchestrator:
-    """Multi-step tool orchestration loop with strategies A/B/D/E."""
+    _MCP_DISCOVERY_TOOLS = frozenset({"search_and_connect_mcp"})
+
+    _WORKSPACE_PATH_KEYS = frozenset({...})
+
+    _WRITE_TOOL_HINTS = (...)
+
+    _HISTORY_LIMITS = {
+        "search_knowledge": 4000,
+        "read_pdf_text": 4000,
+        "read_docx_text": 4000,
+        "read_csv": 2000,
+        "search_content": 2000,
+        "fetch_url": 4000,
+        "http_get": 4000,
+    }
 
     def __init__(
         self,
@@ -687,19 +701,6 @@ class AgentOrchestrator:
         return "OK" if success else "FAIL"
 
     # ── 主循环 ──
-
-    _MCP_DISCOVERY_TOOLS = frozenset({"search_and_connect_mcp"})
-
-    _WORKSPACE_PATH_KEYS = frozenset({
-        "directory", "file_path", "old_path", "output_path", "path",
-    })
-
-    # 只有写类操作才触发工作区审批；读类操作直接放行
-    _WRITE_TOOL_HINTS = (
-        "write", "edit", "create", "delete", "remove",
-        "move", "rename", "mkdir", "append", "insert",
-        "update", "patch", "save", "overwrite",
-    )
 
     @classmethod
     def _is_write_operation(cls, tool_name: str) -> bool:
@@ -1396,10 +1397,8 @@ class AgentOrchestrator:
 
             log = agent.format_tool_result(result)
             status = self._classify_status(log, result.success)
-            state.add_history(
-                f"Step {step_index}: {tool_name}({params}) "
-                f"→ {status}: {log[:400]}"
-            )
+            limit = self._HISTORY_LIMITS.get(tool_name, 400)
+            state.add_history(f"Step {step_index}: {tool_name}({params}) → {status}: {log[:limit]}")
 
             if result.success:
                 state.mark_success(tool_name, params, step_index)

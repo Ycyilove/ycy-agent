@@ -568,7 +568,7 @@ class AgentTaskService:
         if not result or not getattr(result, "success", False):
             return []
 
-        from .resource_store import (
+        from core.resource_store import (
             save_bytes, save_base64, save_file, save_table, save_text,
         )
 
@@ -1352,7 +1352,7 @@ class AgentTaskService:
 
             # ── Mem0：从用户消息提取路径 ──
             try:
-                from .memory_layer import remember_user_message
+                from core.memory.memory_layer import remember_user_message
                 remember_user_message(session_id, message)
             except Exception:
                 logger.exception("remember_user_message 失败")
