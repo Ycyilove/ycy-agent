@@ -28,11 +28,11 @@ from .config import (
     SILICONFLOW_API_KEY,
     SILICONFLOW_BASE_URL,
 )
-from .services.session_memory import get_session_memory
-from .services.observability import init_langfuse
-from .services.sandbox_backend import close_backend as close_sandbox_backend
-from .services.memory_layer import init_mem0
-from .services.lazy_loader import (
+from core.memory.session import get_session_memory
+from infra.observability import init_langfuse
+from infra.sandbox import close_backend as close_sandbox_backend
+from core.memory.mem0_layer import init_mem0
+from infra.lazy_loader import (
     register_lazy_module,
     ensure_module_loaded,
     ensure_module_loaded_sync,
@@ -68,14 +68,14 @@ from tools.agent import ToolAgent, IntentAnalysis, ToolCallRequest, ToolCallResu
 from rag import DocumentParserFactory, ResourceManager, TextChunker, FAISSVectorStore
 from mcp_client import MCPClientManager, load_mcp_config
 from mcp_client.worker import MCPWorker, MCPManagerProxy
-from backend import AgentTaskService
+from core.task.service import AgentTaskService
 
-from .services.local_model import (
+from core.llm.local_model import (
     get_local_model_service,
     download_model_from_modelscope,
     ModelSource,
 )
-from .services.llm import (
+from core.llm.provider import (
     ModelScopeLLM as LLMService,
     MultimodalClient as MultimodalService,
 )
@@ -146,7 +146,7 @@ async def app_lifespan(_app: FastAPI):
 
     # ── 清理过期的 agent 资源 ──
     try:
-        from .services.resource_store import cleanup_expired
+        from core.resource.store import cleanup_expired
         await asyncio.to_thread(cleanup_expired)
     except Exception:
         logger.exception("清理 agent 资源失败")
