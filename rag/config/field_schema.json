@@ -1,0 +1,4 @@
+{
+  "_comment": "字段类型 schema。不配置则只识别通用语法类别（number/date/code），不猜领域类型。",
+  "types": {}
+}

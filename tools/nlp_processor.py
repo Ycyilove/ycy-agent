@@ -259,29 +259,6 @@ class NLPProcessor:
 
         return brackets['['] == 0 and brackets['{'] == 0
 
-    def extract_named_entities(self, text: str) -> List[Tuple[str, str, int]]:
-        """
-        提取命名实体（人名、地名、机构名等）
-
-        Args:
-            text: 输入文本
-
-        Returns:
-            实体列表，每项包含实体、类型和位置
-        """
-        if not JIEBA_AVAILABLE:
-            return []
-
-        entities = []
-        words = pseg.cut(text)
-
-        for word, flag in words:
-            # nr: 人名, ns: 地名, nt: 机构名
-            if flag in ['nr', 'ns', 'nt'] and len(word) > 1:
-                entities.append((word, flag, text.find(word)))
-
-        return entities
-
     def get_keyword_weights(self, text: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """
         提取关键词及其权重（基于 TF-IDF 思想）

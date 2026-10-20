@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from typing import List, Optional
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -19,9 +20,54 @@ class FastChunk:
     """与 Docling chunk 结构对齐的最小字段集。"""
     text: str
     headings: List[str] = field(default_factory=list)
+    heading_levels: List[int] = field(default_factory=list)
     page_no: Optional[int] = None
     font_size: float = 0.0
     is_bold: bool = False
+
+
+# ── 标题层级推断：编号优先，字号兜底 ──
+
+_NUM_HEADING = re.compile(r"^(\d+(?:\.\d+)*)\.?\s+\S")
+
+# 页眉/页脚/水印噪声：arXiv 编号、孤立页码、"Page N"、"第N页"
+_NOISE_PATTERNS = (
+    re.compile(r"^arxiv:\s*\d{4}\.\d{4,5}", re.I),
+    re.compile(r"^page\s+\d+(\s*of\s*\d+)?$", re.I),
+    re.compile(r"^第?\s*\d+\s*页$"),
+    re.compile(r"^\d{1,4}$"),
+)
+
+
+def _is_noise_line(text: str) -> bool:
+    t = text.strip()
+    if len(t) <= 2:
+        return True
+    return any(p.match(t) for p in _NOISE_PATTERNS)
+
+
+_LETTER_HEADING = re.compile(r"^[A-Z]\s+\S")
+
+_TOP_SECTIONS = {
+    "abstract", "摘要", "introduction", "引言",
+    "references", "参考文献", "acknowledgments", "致谢",
+    "appendix", "appendices", "附录",
+}
+
+def _infer_heading_level(text: str, ratio: float) -> int:
+    t = text.strip()
+    if t.lower() in _TOP_SECTIONS:
+        return 1
+    m = _NUM_HEADING.match(t)
+    if m:
+        return m.group(1).count(".") + 1
+    if _LETTER_HEADING.match(t):
+        return 1
+    if ratio >= 1.5:
+        return 1
+    if ratio >= 1.3:
+        return 2
+    return 3
 
 
 def has_text_layer(pdf_path: str, min_chars_per_page: int = 50) -> bool:
@@ -55,6 +101,14 @@ def _is_bold(flags: int) -> bool:
     """PyMuPDF span flags 的 bit 4 表示粗体。"""
     return bool(flags & (1 << 4))
 
+def is_standalone_line(line_text: str, prev_line: str, next_line: str) -> bool:
+    """判断一行是否单独成段。
+
+    只依赖排版结构：
+        - 前后是空行，或
+        - 前后行与它字号/缩进不同（这里退化为：前后行为空）
+    """
+    return (not prev_line.strip()) or (not next_line.strip())
 
 def _looks_like_heading(
     text: str,
@@ -62,28 +116,65 @@ def _looks_like_heading(
     body_font_size: float,
     is_bold: bool,
     size_threshold: float = 1.15,
+    standalone: bool = False,
 ) -> bool:
-    """判断某行是否是标题。
-
-    规则（任一满足）：
-        1. 字号 >= 正文字号 × size_threshold
-        2. 加粗 + 字号 >= 正文字号
-        3. 文本较短 + 加粗
-    """
+    """只依据排版信号判断标题。"""
     text = text.strip()
-    if not text:
+    if not text or _is_noise_line(text):
         return False
-    if len(text) > 60:      # 标题通常不会太长
-        return False
+
+    # 主信号：字号显著更大
     if font_size >= body_font_size * size_threshold:
         return True
-    if is_bold and font_size >= body_font_size:
+
+    # 辅助信号：加粗 + 短 + 单独成段，但不能是句子
+    if (
+        is_bold
+        and font_size >= body_font_size
+        and len(text) <= 30
+        and standalone
+    ):
+        if text.endswith((".", "。", "?", "？", "!", "！", ",", "，")):
+            return False
+        if sum(c in ",，;；:：" for c in text) >= 2:
+            return False
         return True
-    if is_bold and len(text) <= 30:
-        return True
+
     return False
 
+def extract_tables(pdf_path: str) -> List[dict]:
+    """用 PyMuPDF 的 find_tables() 识别表格。
 
+    返回 [{"grid": [[cell_text, ...], ...], "page_numbers": [n]}]。
+    识别不到时返回空列表，不影响段落 chunk。
+    """
+    import pymupdf
+
+    out: List[dict] = []
+    doc = pymupdf.open(pdf_path)
+    try:
+        for page_no, page in enumerate(doc, start=1):
+            try:
+                tabs = page.find_tables()
+            except Exception:
+                logger.exception("[dsh][fastpdf] find_tables 失败，跳过第 %d 页", page_no)
+                continue
+            for tab in getattr(tabs, "tables", []) or []:
+                try:
+                    rows = tab.extract()
+                except Exception:
+                    continue
+                grid = [
+                    [str(c).strip() if c is not None else "" for c in row]
+                    for row in rows
+                ]
+                if len(grid) < 2 or len(grid[0]) < 2:
+                    continue
+                out.append({"grid": grid, "page_numbers": [page_no]})
+    finally:
+        doc.close()
+    return out
+    
 def parse_fast(
     pdf_path: str,
     max_chars_per_chunk: int = 800,   # 新增参数
@@ -134,9 +225,11 @@ def parse_fast(
                 buffer_chars = 0
                 return
             headings = [h for h, _ in heading_stack]
+            levels = [lv for _, lv in heading_stack]
             chunks.append(FastChunk(
                 text=text,
                 headings=headings,
+                heading_levels=levels,
                 page_no=current_page,
                 font_size=page_font_size,
             ))
@@ -146,6 +239,10 @@ def parse_fast(
         for page_no, page in enumerate(doc, start=1):
             current_page = page_no
             d = page.get_text("dict")
+
+            # 先把这一页的所有行拍平，便于取 prev/next 行。
+            # 只依赖排版结构，不依赖文本内容。
+            lines: List[dict] = []
             for block in d.get("blocks", []):
                 for line in block.get("lines", []):
                     line_text = ""
@@ -159,28 +256,69 @@ def parse_fast(
                     line_text = line_text.strip()
                     if not line_text:
                         continue
+                    lines.append({
+                        "text": line_text,
+                        "size": line_size,
+                        "bold": line_bold,
+                    })
 
-                    if _looks_like_heading(
-                        line_text, line_size, body_font_size, line_bold
-                    ):
-                        flush_buffer()
-                        ratio = line_size / body_font_size
-                        if ratio >= 1.5:
-                            level = 1
-                        elif ratio >= 1.3:
-                            level = 2
-                        else:
-                            level = 3
-                        while heading_stack and heading_stack[-1][1] >= level:
-                            heading_stack.pop()
-                        heading_stack.append((line_text, level))
-                    else:
-                        # ── 新增：超长主动切分 ──
-                        if buffer_chars + len(line_text) > max_chars_per_chunk:
-                            flush_buffer()
-                        page_font_size = line_size
-                        buffer_lines.append(line_text)
-                        buffer_chars += len(line_text)
+            # ── 合并“编号行 + 标题行”：PyMuPDF 常把 "2.1\nModels" 拆成两行 ──
+            merged: List[dict] = []
+            j = 0
+            while j < len(lines):
+                cur = lines[j]
+                nxt = lines[j + 1] if j + 1 < len(lines) else None
+                is_num_only = bool(re.fullmatch(r"\d+(?:\.\d+)*", cur["text"]))
+                is_letter_only = bool(re.fullmatch(r"[A-Z]", cur["text"]))
+                if (
+                    nxt is not None
+                    and (is_num_only or is_letter_only)
+                    and not re.match(r"^\d+(?:\.\d+)*\s+\S", nxt["text"])
+                    and len(nxt["text"]) <= 80
+                    and (nxt["bold"] or nxt["size"] >= body_font_size * 1.05)
+                ):
+                    merged.append({
+                        "text": f"{cur['text']} {nxt['text']}",
+                        "size": max(cur["size"], nxt["size"]),
+                        "bold": cur["bold"] or nxt["bold"],
+                    })
+                    j += 2
+                else:
+                    merged.append(cur)
+                    j += 1
+            lines = merged
+
+            for i, line_info in enumerate(lines):
+                line_text = line_info["text"]
+                line_size = line_info["size"]
+                line_bold = line_info["bold"]
+
+                prev_line = lines[i - 1]["text"] if i > 0 else ""
+                next_line = lines[i + 1]["text"] if i + 1 < len(lines) else ""
+
+                is_heading = _looks_like_heading(
+                    line_text, line_size, body_font_size, line_bold,
+                    standalone=is_standalone_line(line_text, prev_line, next_line),
+                )
+                if is_heading:
+                    ratio = line_size / body_font_size if body_font_size else 1.0
+                    level = _infer_heading_level(line_text, ratio)
+                    if heading_stack and level > heading_stack[-1][1] + 1:
+                        level = heading_stack[-1][1] + 1
+                    while heading_stack and heading_stack[-1][1] >= level:
+                        heading_stack.pop()
+                    # 先 flush 上一段正文，确保 heading 不混进正文
+                    flush_buffer()
+                    heading_stack.append((line_text, level))
+                    page_font_size = line_size
+                    continue   # heading 行不进 buffer
+
+                # 无论是否 heading，文本都进入 buffer
+                if buffer_chars + len(line_text) > max_chars_per_chunk:
+                    flush_buffer()
+                page_font_size = line_size
+                buffer_lines.append(line_text)
+                buffer_chars += len(line_text)
 
         flush_buffer()
 

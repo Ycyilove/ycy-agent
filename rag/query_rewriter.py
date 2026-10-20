@@ -15,9 +15,14 @@ from __future__ import annotations
 import logging
 import re
 from typing import List, Optional
+
 from rag.text_utils import clean_cn_spaces
+from rag.entity.extractor import EntityExtractor
+from rag.entity.normalizer import normalize_entity
 
 logger = logging.getLogger(__name__)
+
+_default_extractor = EntityExtractor()
 
 
 _REWRITE_PROMPT = """你是一个搜索查询改写助手。把用户问题改写成适合向量检索的关键词组合。
@@ -39,37 +44,14 @@ _REWRITE_PROMPT = """你是一个搜索查询改写助手。把用户问题改�
 改写："""
 
 
-# ────────── 实体提取（基于 jieba 词性标注，零新增依赖）──────────
-
-# jieba 词性标注里代表实体的标签
-_ENTITY_POS_FLAGS = frozenset({
-    'nr',   # 人名
-    'ns',   # 地名
-    'nt',   # 机构名
-    'nz',   # 其他专名
-    'nrt',  # 音译人名
-    'nrfg', # 人名（古）
-    'nrf',  # 人名（姓）
-})
-
-
 def extract_entities(text: str) -> List[str]:
-    """用 jieba.posseg 提取实体词。
+    """兼容旧接口：返回实体 surface 列表。
 
-    失败时返回空列表，调用方需处理。
+    新代码请直接用 rag.entity.extractor.EntityExtractor。
     """
     if not text or not text.strip():
         return []
-    try:
-        import jieba.posseg as pseg
-        entities = []
-        for word, flag in pseg.cut(text):
-            if flag in _ENTITY_POS_FLAGS and len(word) >= 2:
-                entities.append(word)
-        return entities
-    except Exception:
-        logger.exception("[dsh][rewrite] 实体提取失败")
-        return []
+    return [m.surface for m in _default_extractor.extract(text)]
 
 
 def _normalize_for_match(text: str) -> str:
@@ -78,34 +60,23 @@ def _normalize_for_match(text: str) -> str:
 
 
 def entities_preserved(original: str, rewritten: str) -> bool:
-    """检查原 query 的实体是否都保留在改写结果里。
+    """改写结果必须连续包含原 query 的每个实体。
 
-    用归一化后的子串匹配，容忍标点差异。
+    与旧实现的区别：不再做"逐字包含"的宽松匹配，
+    实体必须作为连续子串出现，防止实体被拆散/同字替换后误判通过。
     """
-    entities = extract_entities(original)
-    if not entities:
-        return True  # 没提取到实体，视为通过
+    mentions = _default_extractor.extract(original)
+    if not mentions:
+        return True
 
-    rewritten_norm = _normalize_for_match(rewritten)
-    original_norm = _normalize_for_match(original)
-
-    for entity in entities:
-        entity_norm = _normalize_for_match(entity)
-        if not entity_norm:
-            continue
-        # 实体在改写结果里，或实体在原 query 里本就存在且改写结果包含它
-        if entity_norm in rewritten_norm:
-            continue
-        # 特殊：实体本身太短（如2字人名），可能在改写时被拆开
-        # 检查实体的每个字符是否都在改写结果里（宽松匹配）
-        if all(ch in rewritten_norm for ch in entity_norm):
-            continue
-        logger.warning(
-            "[dsh][rewrite] 实体 %r 在改写结果中丢失: %r → %r",
-            entity, original, rewritten,
-        )
-        return False
-
+    rewritten_norm = normalize_entity(rewritten)
+    for m in mentions:
+        if m.normalized and m.normalized not in rewritten_norm:
+            logger.warning(
+                "[dsh][rewrite] 实体 %r 在改写结果中丢失: %r → %r",
+                m.surface, original, rewritten,
+            )
+            return False
     return True
 
 

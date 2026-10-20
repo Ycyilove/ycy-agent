@@ -127,6 +127,9 @@ def main():
             record = {
                 "idx": i,
                 "headings": headings_list[i],
+                "heading_levels": list(
+                    getattr(dc.meta, "heading_levels", None) or []
+                ),
                 "page_numbers": pages_list[i],
                 "original_text": originals[i],
                 "enriched_text": enriched,

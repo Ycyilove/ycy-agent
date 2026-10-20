@@ -181,19 +181,27 @@ def get_knowledge_resource(resource_id: str) -> Dict[str, Any]:
         "**当用户询问文档内容、事实性问题，或任何可能已导入的知识时，优先使用这个工具**。"
         "不要用 search_content 代替——那只搜文件系统，搜不到知识库。"
         "返回相关文本片段和关联资源（图片/附件）。"
+        "mode='record' 时优先按表格/列表记录检索，适合'某人属于某团队'这类关联问题。"
     ),
     parameters={
         "query": {"type": "str", "description": "Natural language search query"},
         "top_k": {"type": "int", "description": "Number of chunks to return, default 15"},
+        "mode": {
+            "type": "str",
+            "description": "flat / record / auto，默认 auto",
+        },
     },
-    examples=["search_knowledge(query='summary of the design doc', top_k=15)"],
+    examples=[
+        "search_knowledge(query='summary of the design doc', top_k=15)",
+        "search_knowledge(query='杨灿垣所在团队的奖项', mode='record')",
+    ],
     category="knowledge",
     danger_level="safe",
 )
-def search_knowledge(query: str, top_k: int = 15) -> Dict[str, Any]:
+def search_knowledge(query: str, top_k: int = 15, mode: str = "auto") -> Dict[str, Any]:
     try:
         rag = _get_rag()
-        results = rag.search(query, top_k)
+        results = rag.search(query, top_k, mode=mode)
         resources = rag.resource_manager.collect_refs(results)
 
         chunks = []
@@ -216,11 +224,24 @@ def search_knowledge(query: str, top_k: int = 15) -> Dict[str, Any]:
                 "resources": enriched_resources,
             })
 
+        paths: List[Dict[str, Any]] = []
+        warnings: List[Dict[str, Any]] = []
+        for item in results:
+            for p in item.get("paths", []) or []:
+                if p not in paths:
+                    paths.append(p)
+            for w in item.get("warnings", []) or []:
+                if w not in warnings:
+                    warnings.append(w)
+
         return {
             "success": True,
             "query": query,
+            "mode": mode,
             "chunks": chunks,
             "resources": resources,
+            "paths": paths,
+            "warnings": warnings,
         }
     except Exception as error:
         return {"success": False, "error": str(error)}

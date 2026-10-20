@@ -126,6 +126,14 @@ def route_intent(goal: str, tools: Dict[str, Any]) -> Optional[str]:
             logger.info("[dsh][intent] list-dir → %s", picked)
             return picked
 
+    # ── 知识库关联检索（团队/成员/奖项类多跳）──
+    if any(k in goal for k in ("属于", "队友", "成员", "团队", "关联", "同队", "所在")) \
+       and any(k in goal for k in ("知识库", "文档", "资料", "名单", "获奖")):
+        picked = _pick(tools, "search_knowledge_multihop", "search_knowledge")
+        if picked:
+            logger.info("[dsh][intent] knowledge-relation → %s", picked)
+            return picked
+
     # ── 搜索文件 ──
     if any(k in goal for k in ("搜索文件", "查找文件", "找文件")) \
        or any(k in lower for k in ("search file", "find file")):

@@ -193,6 +193,11 @@ def _get_chunker():
 class DoclingParser:
     """Docling 解析器封装。"""
 
+    def __init__(self):
+        # 最近一次解析的 Docling Document（含 tables/lists），
+        # 供 service.add_file 提取结构化 Record 用；快路径下为 None。
+        self.last_document = None
+
     def parse_to_chunks(self, file_path: str):
         from rag.pdf_router import has_text_layer
 
@@ -205,12 +210,20 @@ class DoclingParser:
                 logger.exception(
                     "[dsh][docling] 关闭 OCR 路线失败，降级到 PyMuPDF 快路径"
                 )
-                from rag.pdf_fast_parser import parse_fast
+                from rag.pdf_fast_parser import parse_fast, extract_tables
+
+                # 用 PyMuPDF 补表格结构，避免 docling 缺失时表格全丢
+                try:
+                    tables = extract_tables(file_path)
+                except Exception:
+                    logger.exception("[dsh][docling] PyMuPDF 表格识别失败")
+                    tables = []
+
+                self.last_fast_tables = tables
+
                 fast_chunks = parse_fast(file_path)
                 if fast_chunks:
-                    # ── 关键：必须包装成有 .meta.headings 的兼容对象 ──
                     return self._wrap_fast_chunks(fast_chunks)
-                # 最后兜底：全量 OCR
                 return self._parse_with_ocr(file_path)
         else:
             return self._parse_with_ocr(file_path)
@@ -220,6 +233,7 @@ class DoclingParser:
         converter = _get_converter(file_path)
         chunker = _get_chunker()
         result = converter.convert(file_path)
+        self.last_document = result.document
         # ... 原有 parse_to_chunks 的剩余逻辑
 
     def _parse_with_text_layer(self, file_path: str):
@@ -267,31 +281,40 @@ class DoclingParser:
         )
 
         doc = result.document
+        self.last_document = doc
         chunker = _get_chunker()
         chunks = list(chunker.chunk(dl_doc=doc))
+        for _c in chunks:
+            if not hasattr(_c.meta, "heading_levels"):
+                _c.meta.heading_levels = []
         logger.info("[dsh][docling] 切块完成: %d 个 chunk", len(chunks))
         return chunks
         
     @staticmethod
     def _wrap_fast_chunks(fast_chunks):
-        """把 FastChunk 包装成和 Docling chunk 兼容的对象。
-
-        只需要有 .text 和 .meta.headings 两个属性，
-        add_file() 里用到的就是这两个。
-        """
+        """把 FastChunk 包装成和 Docling chunk 兼容的对象。"""
         class _Meta:
-            def __init__(self, headings):
+            def __init__(self, headings, heading_levels, page_numbers):
                 self.headings = headings
-                self.page_numbers = []
+                self.heading_levels = heading_levels
+                self.page_numbers = page_numbers
                 self.doc_items = []
 
         class _Chunk:
-            def __init__(self, text, headings):
+            def __init__(self, text, headings, heading_levels, page_numbers):
                 self.text = text
-                self.meta = _Meta(headings)
+                self.meta = _Meta(headings, heading_levels, page_numbers)
 
-        return [_Chunk(c.text, c.headings) for c in fast_chunks]
-
+        return [
+            _Chunk(
+                c.text,
+                c.headings,
+                getattr(c, "heading_levels", []) or [],
+                [c.page_no] if c.page_no is not None else [],
+            )
+            for c in fast_chunks
+        ]
+    
     def get_enriched_text(self, chunk) -> str:
         # 快路径的 chunk 没有 Docling 的 meta.doc_items，直接拼 headings
         headings = list(getattr(chunk.meta, "headings", None) or [])

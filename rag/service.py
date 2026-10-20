@@ -15,6 +15,10 @@ from .resources import ResourceManager
 from .text_chunker import TextChunker
 from .bm25_store import BM25Store, rrf_fuse
 from .text_utils import clean_cn_spaces, clean_heading
+from .entity.extractor import EntityExtractor
+from .index.record_store import RecordStore
+from .search.record_search import record_search
+from .structure.parser import parse_structure
 
 # LLM 走 core.llm.provider（Lazy 加载，首次调用才构造 ChatOpenAI）
 from core.llm.provider import ModelScopeLLM
@@ -47,6 +51,73 @@ class LocalRAGService:
                 or os.getenv('RAG_RESOURCE_METADATA', './vector_store/resources.json')
             ),
         )
+        from .structure.field_classifier import FieldSchema
+        schema_path = os.getenv('RAG_FIELD_SCHEMA', './config/field_schema.json')
+        self._schema = FieldSchema.load(schema_path)
+        self._extractor = EntityExtractor(
+            dictionary=self._schema_dictionary(),
+            patterns=self._schema_patterns(),
+        )
+        self.record_store = RecordStore(
+            path=os.getenv('RAG_RECORD_STORE', './vector_store/records.json'),
+            schema=self._schema,
+        )
+
+    def _schema_dictionary(self) -> Dict[str, str]:
+        """从 schema 抽词典：{词: 类型}。"""
+        out: Dict[str, str] = {}
+        for name, td in self._schema.types.items():
+            for term in td.dictionary:
+                out[term] = name
+        return out
+
+    def _schema_patterns(self) -> Dict[str, str]:
+        """从 schema 抽值模式：{类型: 正则}。多模式时取第一个。"""
+        out: Dict[str, str] = {}
+        for name, td in self._schema.types.items():
+            if td.value_patterns:
+                out[name] = td.value_patterns[0]
+        return out
+
+    def parse_tables_grid(
+        tables: List[dict],
+        source_filename: str,
+        schema: Optional[FieldSchema] = None,
+    ) -> List[Record]:
+        """从 PyMuPDF extract_tables() 的 grid 建 Record。
+
+        grid 是 [[cell_text, ...], ...]，第一行是表头。
+        """
+        if schema is None:
+            schema = get_default_schema()
+
+        class _Cell:
+            def __init__(self, text):
+                self.text = text
+
+        class _Grid:
+            def __init__(self, g):
+                self.grid = g
+
+        class _Table:
+            def __init__(self, g, pages):
+                self.data = _Grid(g)
+                self.prov = [_Prov(p) for p in pages]
+
+        class _Prov:
+            def __init__(self, page_no):
+                self.page_no = page_no
+
+        records: List[Record] = []
+        for t in tables:
+            grid = [[_Cell(c) for c in row] for row in t["grid"]]
+            records.extend(
+                _table_to_records(
+                    _Table(grid, t.get("page_numbers", [])),
+                    source_filename, [], t.get("page_numbers", []), schema,
+                )
+            )
+        return records
 
     def add_file(self, file_content: bytes, filename: str) -> Dict:
         """解析文件 → Docling 层级解析 → HybridChunker 切块 → 索引。"""
@@ -72,6 +143,21 @@ class LocalRAGService:
             docling_chunks = parser.parse_to_chunks(tmp_path)
             if not docling_chunks:
                 return {'status': 'error', 'message': 'Docling 解析后无 chunk'}
+
+            # ── 2.1 结构解析：表格/列表 → Record ──
+            if parser.last_document is not None:
+                records = parse_structure(
+                    parser.last_document, docling_chunks, filename,
+                    schema=self._schema,
+                )
+            elif getattr(parser, "last_fast_tables", None):
+                # docling 不可用时，用 PyMuPDF 识别出的表格建 Record
+                from rag.structure.parser import parse_tables_grid
+                records = parse_tables_grid(
+                    parser.last_fast_tables, filename, schema=self._schema,
+                )
+            else:
+                records = []
 
             # ── 2.5 Contextual Retrieval：为每个 chunk 生成情境化摘要 ──
             contextual_texts = None
@@ -136,6 +222,9 @@ class LocalRAGService:
 
                 headings = list(getattr(dc.meta, "headings", None) or [])
                 headings = [clean_heading(h) for h in headings]
+                heading_levels = list(
+                    getattr(dc.meta, "heading_levels", None) or []
+                )
                 page_numbers = list(getattr(dc.meta, "page_numbers", None) or [])
 
                 indexed_texts.append(enriched)
@@ -151,6 +240,7 @@ class LocalRAGService:
                         and i < len(contextual_texts)
                         and contextual_texts[i]
                     ),
+                    'heading_levels': heading_levels,
                 })
 
             if not indexed_texts:
@@ -177,6 +267,10 @@ class LocalRAGService:
             if result.get('status') != 'success':
                 self.resource_manager.delete_source(filename)
                 return result
+
+            # ── 5.5 记录级索引（表格/列表）──
+            if records:
+                self.record_store.add(records)
 
             # ── 6. 重建 BM25，关联资源 ──
             # 先 reset（清掉旧索引），再 build（构建新索引）
@@ -228,15 +322,19 @@ class LocalRAGService:
         top_k: int = 15,
         rewrite: bool = True,
         use_bm25: bool = True,
+        mode: str = "auto",
     ) -> List[Dict]:
         """向量检索 + BM25 混合检索 + 可选 query 改写。
 
-        设计：
-            - 向量检索用原 query（语义匹配）
-            - BM25 用"实体 query"（精确匹配，避免高频意图词稀释实体）
-            - 融合时 BM25 权重 1.5
+        mode:
+            - "flat"   ：原 chunk 级混合检索
+            - "record" ：记录级检索（表格/列表优先）
+            - "auto"   ：有记录且命中记录 BM25 时走 record，否则 flat
         """
         query = clean_cn_spaces(query)
+
+        if mode == "record" or (mode == "auto" and self._should_use_record(query)):
+            return self._record_search(query, top_k)
 
         # 1. query 改写（带超时降级）
         effective_query = query
@@ -280,51 +378,38 @@ class LocalRAGService:
         bm25_results: List[Dict] = []
         if use_bm25:
             try:
-                from backend.config import RAG_BM25_ENABLED
+                from backend.config import RAG_BM25_ENABLED, RAG_RRF_K
                 if RAG_BM25_ENABLED:
-                    # 索引未构建时才惰性构建（避免每次查询都重建）
                     if not self.bm25_store.is_built():
                         logger.info("[dsh][rag] BM25 索引未构建，惰性构建")
                         self.bm25_store.build(self.vector_store.metadata)
 
-                    from .query_rewriter import extract_entities
-
                     def _provider():
                         return self.vector_store.metadata
 
-                    def _bm25_query_for(text: str) -> str:
-                        ents = extract_entities(text)
-                        return " ".join(ents) if ents else text
+                    # 双 query：实体串 + 全句，两路都搜再融合。
+                    # 不再用实体串替换全句，避免意图词（"获奖"/"团队"）被丢弃。
+                    queries = self._bm25_queries_for(query)
+                    if effective_query != query:
+                        queries.extend(self._bm25_queries_for(effective_query))
 
-                    bm25_query = _bm25_query_for(query)
-                    if bm25_query != query:
-                        logger.info(
-                            "[dsh][rag] BM25 query 用实体: %r → %r",
-                            query, bm25_query,
-                        )
+                    seen = set()
+                    uniq = []
+                    for q in queries:
+                        if q and q not in seen:
+                            seen.add(q)
+                            uniq.append(q)
 
-                    eff_bm25_query = (
-                        _bm25_query_for(effective_query)
-                        if effective_query != query
-                        else bm25_query
-                    )
-
-                    if eff_bm25_query == bm25_query:
-                        # 实体相同：只搜一次，避免重复结果 + 双倍开销
-                        bm25_results = self.bm25_store.search(
-                            bm25_query, pool_size, _provider,
-                        )
-                    else:
-                        # 实体不同：两次结果用 RRF 融合，不直接拼接
-                        from backend.config import RAG_RRF_K
-                        r1 = self.bm25_store.search(
-                            bm25_query, pool_size, _provider,
-                        )
-                        r2 = self.bm25_store.search(
-                            eff_bm25_query, pool_size, _provider,
-                        )
+                    lists = [
+                        self.bm25_store.search(q, pool_size, _provider)
+                        for q in uniq
+                    ]
+                    lists = [r for r in lists if r]
+                    if len(lists) == 1:
+                        bm25_results = lists[0]
+                    elif len(lists) > 1:
                         bm25_results = rrf_fuse(
-                            r1, r2, k=RAG_RRF_K, limit=pool_size,
+                            *lists, k=RAG_RRF_K, limit=pool_size,
                         )
             except Exception:
                 logger.exception("[dsh][rag] BM25 检索失败，仅用向量结果")
@@ -362,11 +447,67 @@ class LocalRAGService:
                 item["text"] = indexed_text
 
             item["headings"] = headings
+            item["heading_levels"] = meta.get("heading_levels", [])
             item["page_numbers"] = meta.get("page_numbers", [])
             item["has_contextual"] = meta.get("has_contextual", False)
             enriched.append(item)
 
         return self.resource_manager.enrich_search_results(enriched)
+
+    def _bm25_queries_for(self, text: str) -> List[str]:
+        """返回 [实体串, 全句]，两路分别检索后 RRF。
+
+        与旧 _bm25_query_for 的区别：不再"二选一"，
+        实体和意图词都保留在检索里。
+        """
+        ents = [m.surface for m in self._extractor.extract(text)]
+        queries: List[str] = []
+        if ents:
+            queries.append(" ".join(ents))
+        queries.append(text)
+        return queries
+
+    _RELATION_HINTS = ("属于", "队友", "成员", "团队", "关联", "同队", "所在", "获得")
+
+    def _should_use_record(self, query: str) -> bool:
+        """auto 模式判定：有记录 + 命中记录 BM25 或含关系词。"""
+        if not self.record_store.stats().get("total_records"):
+            return False
+        if any(h in query for h in self._RELATION_HINTS):
+            return True
+        rec_hits = self.record_store.search(query, top_k=1)
+        if not rec_hits:
+            return False
+        # 记录 BM25 命中即走 record；否则 flat 更稳
+        return True
+
+    def _record_search(self, query: str, top_k: int) -> List[Dict]:
+        """记录级检索 → 转成与 flat search 同构的 dict 列表。"""
+        result = record_search(
+            query, self.record_store, self._extractor,
+            top_k=top_k, schema=self._schema,
+        )
+        docs: List[Dict] = []
+        for record in result["records"]:
+            docs.append({
+                "text": record.to_index_text(),
+                "filename": record.source_filename,
+                "score": 0.0,
+                "metadata": {
+                    "chunk_id": record.record_id,
+                    "record_id": record.record_id,
+                    "source_filename": record.source_filename,
+                    "headings": record.headings,
+                    "page_numbers": record.page_numbers,
+                    "kind": "record",
+                },
+            })
+        enriched = self.resource_manager.enrich_search_results(docs)
+        # 把路径和警告挂在每条结果上，供 _build_context / prompt 使用
+        for item in enriched:
+            item["paths"] = result["paths"]
+            item["warnings"] = result["warnings"]
+        return enriched
 
     def _build_context(self, retrieved_docs: List[Dict]) -> str:
         context_parts = []
@@ -455,17 +596,20 @@ class LocalRAGService:
         result = self.vector_store.delete_file(filename)
         if result.get('status') == 'success':
             result['deleted_resources'] = self.resource_manager.delete_source(filename)
+            result['deleted_records'] = self.record_store.delete_by_source(filename)
             self.bm25_store.reset()
         return result
 
     def clear_all(self) -> Dict:
         result = self.vector_store.clear_all()
         self.resource_manager.clear()
+        self.record_store.clear()
         self.bm25_store.reset()
-        result.update({'resources': 'cleared'})
+        result.update({'resources': 'cleared', 'records': 'cleared'})
         return result
 
     def get_stats(self) -> Dict:
         result = self.vector_store.get_stats()
         result.update(self.resource_manager.stats())
+        result.update(self.record_store.stats())
         return result
