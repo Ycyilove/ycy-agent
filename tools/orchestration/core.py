@@ -123,9 +123,19 @@ def _build_structured_history(
 class AgentOrchestrator:
     _MCP_DISCOVERY_TOOLS = frozenset({"search_and_connect_mcp"})
 
-    _WORKSPACE_PATH_KEYS = frozenset({...})
+    # 参与工作区越界判断的路径参数名
+    _WORKSPACE_PATH_KEYS: frozenset[str] = frozenset({
+        "path", "file_path", "directory", "dir",
+        "source", "destination", "src", "dst",
+        "target", "target_path", "output_path",
+    })
 
-    _WRITE_TOOL_HINTS = (...)
+    # 写类工具名关键词（小写子串匹配）
+    _WRITE_TOOL_HINTS: tuple[str, ...] = (
+        "write", "create", "delete", "remove", "update", "modify",
+        "move", "rename", "mkdir", "rmdir", "append", "truncate",
+        "upload", "put", "edit", "insert", "drop", "copy",
+    )
 
     _HISTORY_LIMITS = {
         "search_knowledge": 4000,
@@ -988,10 +998,21 @@ class AgentOrchestrator:
     ) -> Optional[Dict[str, Any]]:
         """确定性充分性判断。返回 None 表示需要 LLM 兜底。"""
         if not preview:
+            if tool_name in ("search_knowledge", "knowledge_stats", "list_knowledge_sources"):
+                hint = (
+                    "知识库可能为空或 mode 选错；"
+                    "先调用 knowledge_stats 检查，再换 query 或 mode='flat' 重试"
+                )
+            elif tool_name in ("fetch_url", "http_get", "fetch_json"):
+                hint = "换一个 URL 或换一个搜索词重试"
+            elif tool_name in ("search_content", "search_files"):
+                hint = "换一个关键词或扩大搜索范围"
+            else:
+                hint = "换一种策略重试"
             return {
                 "sufficient": False,
                 "gap": "工具返回内容为空",
-                "next_hint": "换一个 URL 或换一个搜索词重试",
+                "next_hint": hint,
             }
 
         if tool_name not in self._RETRIEVAL_TOOLS:
@@ -1056,13 +1077,19 @@ class AgentOrchestrator:
                     ]
                     preview = "\n".join(t for t in texts if t)
 
-            # 统计类扁平 dict：任意字符串/数字字段都算内容
-            if not preview:
-                flat = [
-                    f"{k}: {v}" for k, v in payload.items()
-                    if isinstance(v, (str, int, float)) and v
-                ]
-                preview = "\n".join(flat)
+                if not preview:
+                    _ECHO_KEYS = frozenset({
+                        "success", "query", "mode", "top_k", "error",
+                        "paths", "warnings", "resources", "chunks",
+                    })
+                    flat = [
+                        f"{k}: {v}" for k, v in payload.items()
+                        if k not in _ECHO_KEYS
+                        and isinstance(v, (str, int, float))
+                        and not isinstance(v, bool)   # True/False 不算内容
+                        and v
+                    ]
+                    preview = "\n".join(flat)
 
         elif isinstance(payload, str):
             preview = payload

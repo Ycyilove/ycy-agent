@@ -1,4 +1,23 @@
 {
-  "_comment": "字段类型 schema。不配置则只识别通用语法类别（number/date/code），不猜领域类型。",
-  "types": {}
+  "_comment": "字段类型 schema。空 types 时 record 检索退化为纯 BM25。",
+  "types": {
+    "team": {
+      "header_hints": ["团队", "队伍", "队名", "team"],
+      "value_patterns": ["[A-Z]{2,}[A-Z0-9\\-]*\\d+"],
+      "dictionary": ["GZHU-1", "GZHU-2", "GZHU-3"],
+      "is_entity": true,
+      "is_anchor": true
+    },
+    "person": {
+      "header_hints": ["姓名", "队员", "成员", "name"],
+      "is_entity": true,
+      "is_anchor": true
+    },
+    "award": {
+      "header_hints": ["奖项", "获奖", "名次", "award"],
+      "dictionary": ["金奖", "银奖", "铜奖", "一等奖", "二等奖", "三等奖"],
+      "is_entity": true,
+      "is_anchor": false
+    }
+  }
 }

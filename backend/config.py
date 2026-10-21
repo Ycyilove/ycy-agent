@@ -96,7 +96,8 @@ ALLOWED_CORS_ORIGINS = [
 ]
 
 # query 改写 LLM 调用的超时（秒），超时后降级为原 query
-RAG_QUERY_REWRITE_TIMEOUT = int(os.getenv("RAG_QUERY_REWRITE_TIMEOUT", "5"))
+# LLM 改写实际耗时 10-30 秒，5 秒会让改写结果永远被丢弃
+RAG_QUERY_REWRITE_TIMEOUT = int(os.getenv("RAG_QUERY_REWRITE_TIMEOUT", "15"))
 
 # ─────────────────────────────────────────────────────────────
 # Contextual Retrieval（情境化摘要）

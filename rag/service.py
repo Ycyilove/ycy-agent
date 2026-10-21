@@ -6,6 +6,7 @@ import os
 import re
 import uuid
 from typing import Dict, List, Optional
+from pathlib import Path
 
 # 全部改成相对 import：service.py 位于 rag/ 内部，
 # 用 from rag import X 会和 rag/__init__.py 形成循环。
@@ -52,8 +53,16 @@ class LocalRAGService:
             ),
         )
         from .structure.field_classifier import FieldSchema
-        schema_path = os.getenv('RAG_FIELD_SCHEMA', './config/field_schema.json')
+        _SCHEMA_PATH = Path(__file__).resolve().parent / "config" / "field_schema.json"
+        schema_path = os.getenv("RAG_FIELD_SCHEMA", str(_SCHEMA_PATH))
         self._schema = FieldSchema.load(schema_path)
+
+        # 同步全局单例，避免 RecordStore(schema=None) 拿到空 schema
+        try:
+            from .structure.field_classifier import set_default_schema
+            set_default_schema(self._schema)
+        except Exception:
+            logger.exception("[dsh][rag] set_default_schema 失败")
         self._extractor = EntityExtractor(
             dictionary=self._schema_dictionary(),
             patterns=self._schema_patterns(),
@@ -78,46 +87,6 @@ class LocalRAGService:
             if td.value_patterns:
                 out[name] = td.value_patterns[0]
         return out
-
-    def parse_tables_grid(
-        tables: List[dict],
-        source_filename: str,
-        schema: Optional[FieldSchema] = None,
-    ) -> List[Record]:
-        """从 PyMuPDF extract_tables() 的 grid 建 Record。
-
-        grid 是 [[cell_text, ...], ...]，第一行是表头。
-        """
-        if schema is None:
-            schema = get_default_schema()
-
-        class _Cell:
-            def __init__(self, text):
-                self.text = text
-
-        class _Grid:
-            def __init__(self, g):
-                self.grid = g
-
-        class _Table:
-            def __init__(self, g, pages):
-                self.data = _Grid(g)
-                self.prov = [_Prov(p) for p in pages]
-
-        class _Prov:
-            def __init__(self, page_no):
-                self.page_no = page_no
-
-        records: List[Record] = []
-        for t in tables:
-            grid = [[_Cell(c) for c in row] for row in t["grid"]]
-            records.extend(
-                _table_to_records(
-                    _Table(grid, t.get("page_numbers", [])),
-                    source_filename, [], t.get("page_numbers", []), schema,
-                )
-            )
-        return records
 
     def add_file(self, file_content: bytes, filename: str) -> Dict:
         """解析文件 → Docling 层级解析 → HybridChunker 切块 → 索引。"""
@@ -252,11 +221,80 @@ class LocalRAGService:
                 filename=filename,
                 document_id=document_id,
             )
+
+            # pypdf 没提出图，但 Docling 有 pictures → 补提
+            if not resources and parser.last_document is not None:
+                try:
+                    from .docling_parser import extract_pictures_from_doc
+                    from .resources import ResourceRecord
+                    import hashlib, uuid as _uuid
+
+                    docling_resources = extract_pictures_from_doc(
+                        parser.last_document, filename, document_id,
+                    )
+                    for parsed in docling_resources:
+                        rid = _uuid.uuid4().hex
+                        storage_key = self.resource_manager.store.put(
+                            resource_id=rid,
+                            filename=parsed.filename,
+                            content=parsed.content,
+                        )
+                        record = ResourceRecord(
+                            id=rid,
+                            document_id=document_id,
+                            source_filename=filename,
+                            filename=parsed.filename,
+                            mime_type=parsed.mime_type,
+                            storage_key=storage_key,
+                            sha256=hashlib.sha256(parsed.content).hexdigest(),
+                            kind=parsed.kind.value,
+                            page_no=parsed.page_no,
+                        )
+                        self.resource_manager.repository.save(record)
+                        resources.append(record)
+                    if docling_resources:
+                        logger.info(
+                            "[dsh][rag] pypdf 无资源，Docling 补提 %d 个",
+                            len(docling_resources),
+                        )
+                except Exception:
+                    logger.exception("[dsh][rag] Docling 补提图片失败")
+
             resources_ingested = True
             resource_ids = [r.id for r in resources]
 
+            # ── 按页分配 resource_ids：每个 chunk 只关联自己页码覆盖的资源 ──
+            # 建立 page_no -> [resource_id] 映射
+            page_to_rids: Dict[int, List[str]] = {}
+            no_page_rids: List[str] = []
+            for r in resources:
+                if r.page_no is None:
+                    no_page_rids.append(r.id)
+                else:
+                    page_to_rids.setdefault(r.page_no, []).append(r.id)
+
             for m in metadata:
-                m['resource_ids'] = resource_ids
+                chunk_pages = m.get("page_numbers") or []
+                if chunk_pages:
+                    # chunk 有页码 → 只取覆盖页的资源（±1 容差）
+                    allowed = set()
+                    for p in chunk_pages:
+                        if isinstance(p, int):
+                            allowed.update({p - 1, p, p + 1})
+                    chunk_rids: List[str] = []
+                    for pg in allowed:
+                        chunk_rids.extend(page_to_rids.get(pg, []))
+                    # 无页码的资源（附件类）也带上
+                    chunk_rids.extend(no_page_rids)
+                    # 去重保序
+                    seen = set()
+                    m['resource_ids'] = [
+                        rid for rid in chunk_rids
+                        if not (rid in seen or seen.add(rid))
+                    ]
+                else:
+                    # chunk 无页码 → 不写 resource_ids，让 source_filename 兜底
+                    m['resource_ids'] = []
 
             # ── 5. 写入向量库（用 enriched 文本）──
             result = self.vector_store.add_documents(
@@ -275,11 +313,22 @@ class LocalRAGService:
             # ── 6. 重建 BM25，关联资源 ──
             # 先 reset（清掉旧索引），再 build（构建新索引）
             self.bm25_store.reset()
-            self.bm25_store.build(self.vector_store.metadata)
-            self.resource_manager.repository.link_chunks(
-                [m['chunk_id'] for m in metadata],
-                resource_ids,
-            )
+            # 注意：不在这里 build，让 search() 惰性构建（P2-1 已应用）
+            # 若你还没应用 P2-1，保留 self.bm25_store.build(...)
+
+            # 批量版：一次性收集所有 (chunk_id, rids)，调一次 link_chunks
+            links_map: Dict[str, List[str]] = {}
+            for m in metadata:
+                rids = m.get('resource_ids') or []
+                if rids:
+                    links_map[m['chunk_id']] = rids
+
+            if links_map:
+                # 直接操作 repository 内部，避免多次 _persist
+                with self.resource_manager.repository._lock:
+                    self.resource_manager.repository._links.update(links_map)
+                    self.resource_manager.repository._persist()
+                    
             result['resources'] = [
                 self.resource_manager.to_ref(r) for r in resources
             ]
@@ -333,8 +382,16 @@ class LocalRAGService:
         """
         query = clean_cn_spaces(query)
 
+        fallback_warning = None
         if mode == "record" or (mode == "auto" and self._should_use_record(query)):
-            return self._record_search(query, top_k)
+            record_docs = self._record_search(query, top_k)
+            if record_docs:
+                return record_docs
+            logger.info("[dsh][rag] record 模式空召回，fallback 到 flat 检索")
+            fallback_warning = {
+                "type": "record_empty_fallback",
+                "message": "record 模式未命中结构化记录，已降级为 flat 检索",
+            }
 
         # 1. query 改写（带超时降级）
         effective_query = query
@@ -369,13 +426,29 @@ class LocalRAGService:
             except Exception:
                 logger.exception("[dsh][rag] query 改写失败，用原 query")
 
+        import time as _time
+        _t_search0 = _time.perf_counter()
+
         pool_size = max(top_k * 3, top_k + 10)
 
         # 2. 向量检索：原 query 单路
-        vector_results = self.vector_store.search(query, pool_size)
+        vector_results = []
+        _t_vec0 = _time.perf_counter()
+        try:
+            vector_results = self.vector_store.search(query, pool_size)
+            if not vector_results and self.vector_store.index is not None:
+                logger.warning(
+                    "[dsh][rag] 向量检索返回空，可能是索引维度与模型不匹配；"
+                    "请检查 vector_store 或重建索引"
+                )
+        except Exception:
+            logger.exception("[dsh][rag] 向量检索失败，降级为纯 BM25")
+            vector_results = []
+        _vec_ms = (_time.perf_counter() - _t_vec0) * 1000
 
         # 3. BM25 检索：用实体 query（避免高频意图词稀释）
         bm25_results: List[Dict] = []
+        _t_bm0 = _time.perf_counter()
         if use_bm25:
             try:
                 from backend.config import RAG_BM25_ENABLED, RAG_RRF_K
@@ -387,8 +460,6 @@ class LocalRAGService:
                     def _provider():
                         return self.vector_store.metadata
 
-                    # 双 query：实体串 + 全句，两路都搜再融合。
-                    # 不再用实体串替换全句，避免意图词（"获奖"/"团队"）被丢弃。
                     queries = self._bm25_queries_for(query)
                     if effective_query != query:
                         queries.extend(self._bm25_queries_for(effective_query))
@@ -413,8 +484,10 @@ class LocalRAGService:
                         )
             except Exception:
                 logger.exception("[dsh][rag] BM25 检索失败，仅用向量结果")
+        _bm_ms = (_time.perf_counter() - _t_bm0) * 1000
 
         # 4. 融合
+        _t_fuse0 = _time.perf_counter()
         if bm25_results:
             from backend.config import RAG_RRF_K
             fused = rrf_fuse(
@@ -426,6 +499,15 @@ class LocalRAGService:
             )
         else:
             fused = vector_results[:top_k]
+        _fuse_ms = (_time.perf_counter() - _t_fuse0) * 1000
+
+        _total_ms = (_time.perf_counter() - _t_search0) * 1000
+        logger.info(
+            "[dsh][rag] search timing: vector=%.0fms bm25=%.0fms fuse=%.0fms "
+            "total=%.0fms (vec=%d, bm25=%d, fused=%d)",
+            _vec_ms, _bm_ms, _fuse_ms, _total_ms,
+            len(vector_results), len(bm25_results), len(fused),
+        )
 
         # ── 返回前：从 metadata 取 headings ──
         # 关键：返回 index 里实际存的文本（enriched / contextual），
@@ -452,7 +534,20 @@ class LocalRAGService:
             item["has_contextual"] = meta.get("has_contextual", False)
             enriched.append(item)
 
-        return self.resource_manager.enrich_search_results(enriched)
+        if fallback_warning:
+            for item in enriched:
+                item.setdefault("warnings", []).append(fallback_warning)
+
+        # 把分段耗时挂到第一条结果的 metadata 上（不污染每条）
+        enriched = self.resource_manager.enrich_search_results(enriched)
+        if enriched:
+            enriched[0].setdefault("metadata", {})["timing_ms"] = {
+                "vector": round(_vec_ms, 1),
+                "bm25": round(_bm_ms, 1),
+                "fuse": round(_fuse_ms, 1),
+                "total": round(_total_ms, 1),
+            }
+        return enriched
 
     def _bm25_queries_for(self, text: str) -> List[str]:
         """返回 [实体串, 全句]，两路分别检索后 RRF。
@@ -489,26 +584,26 @@ class LocalRAGService:
         )
         docs: List[Dict] = []
         for record in result["records"]:
-            docs.append({
+            metadata = {
+                "chunk_id": record.record_id,
+                "record_id": record.record_id,
+                "source_filename": record.source_filename,
+                "headings": record.headings,
+                "page_numbers": record.page_numbers,
+                "kind": "record",
+            }
+            item = {
                 "text": record.to_index_text(),
                 "filename": record.source_filename,
                 "score": 0.0,
-                "metadata": {
-                    "chunk_id": record.record_id,
-                    "record_id": record.record_id,
-                    "source_filename": record.source_filename,
-                    "headings": record.headings,
-                    "page_numbers": record.page_numbers,
-                    "kind": "record",
-                },
-            })
-        enriched = self.resource_manager.enrich_search_results(docs)
-        # 把路径和警告挂在每条结果上，供 _build_context / prompt 使用
-        for item in enriched:
-            item["paths"] = result["paths"]
-            item["warnings"] = result["warnings"]
-        return enriched
-
+                "metadata": metadata,
+            }
+            enriched = self.resource_manager._enrich_one(item, metadata)
+            enriched["paths"] = result["paths"]
+            enriched["warnings"] = result["warnings"]
+            docs.append(enriched)
+        return docs
+    
     def _build_context(self, retrieved_docs: List[Dict]) -> str:
         context_parts = []
         for index, doc in enumerate(retrieved_docs, 1):

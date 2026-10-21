@@ -88,6 +88,7 @@ _BLOCKED_MIME = {
     "application/xhtml+xml",
 }
 
+_IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico"})
 
 def _safe_filename(name: str) -> str:
     name = (name or "resource").replace("\\", "/").split("/")[-1]
@@ -126,12 +127,18 @@ def _is_allowed(mime: str, ext: str) -> tuple:
     if e in _BLOCKED_EXT:
         return False, f"扩展名被拒绝: {e}"
     if m in _BLOCKED_MIME:
+        # 例外：扩展名是图片但服务器把 MIME 误报为 text/html / svg+xml
+        if e in _IMAGE_EXTS:
+            return True, ""
         return False, f"MIME 被拒绝: {m}"
     if m in _ALLOWED_MIME_EXACT:
         return True, ""
     for prefix in _ALLOWED_MIME_PREFIXES:
         if m.startswith(prefix):
             return True, ""
+    # 扩展名是图片但 MIME 缺失/未知 → 放行，用扩展名兜底
+    if e in _IMAGE_EXTS and (not m or m == "application/octet-stream"):
+        return True, ""
     return False, f"不支持的 MIME: {m or '(空)'}"
 
 

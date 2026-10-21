@@ -212,7 +212,6 @@ class DoclingParser:
                 )
                 from rag.pdf_fast_parser import parse_fast, extract_tables
 
-                # 用 PyMuPDF 补表格结构，避免 docling 缺失时表格全丢
                 try:
                     tables = extract_tables(file_path)
                 except Exception:
@@ -221,7 +220,16 @@ class DoclingParser:
 
                 self.last_fast_tables = tables
 
-                fast_chunks = parse_fast(file_path)
+                # 先尝试带 heading 识别；若 heading 异常（栈过深/全为长句），
+                # 降级为纯文本切块，避免正文被误判成 heading 污染整份文档
+                fast_chunks = parse_fast(file_path, detect_headings=True)
+                if fast_chunks and self._headings_look_clean(fast_chunks):
+                    return self._wrap_fast_chunks(fast_chunks)
+
+                logger.warning(
+                    "[dsh][docling] heading 识别结果异常，降级为纯文本切块"
+                )
+                fast_chunks = parse_fast(file_path, detect_headings=False)
                 if fast_chunks:
                     return self._wrap_fast_chunks(fast_chunks)
                 return self._parse_with_ocr(file_path)
@@ -289,7 +297,26 @@ class DoclingParser:
                 _c.meta.heading_levels = []
         logger.info("[dsh][docling] 切块完成: %d 个 chunk", len(chunks))
         return chunks
-        
+
+    @staticmethod
+    def _headings_look_clean(fast_chunks) -> bool:
+        """判断 parse_fast 的 heading 是否可信。
+
+        异常信号：
+            - 超过 50% 的 chunk 带有 >= 5 个 heading（正文被误判）
+            - 任一 chunk 的 heading 平均长度 > 60（长句被当 heading）
+        """
+        if not fast_chunks:
+            return False
+        deep = sum(1 for c in fast_chunks if len(c.headings or []) >= 5)
+        if deep / len(fast_chunks) > 0.5:
+            return False
+        for c in fast_chunks:
+            hs = c.headings or []
+            if hs and sum(len(h) for h in hs) / len(hs) > 60:
+                return False
+        return True
+
     @staticmethod
     def _wrap_fast_chunks(fast_chunks):
         """把 FastChunk 包装成和 Docling chunk 兼容的对象。"""
@@ -314,7 +341,7 @@ class DoclingParser:
             )
             for c in fast_chunks
         ]
-    
+        
     def get_enriched_text(self, chunk) -> str:
         # 快路径的 chunk 没有 Docling 的 meta.doc_items，直接拼 headings
         headings = list(getattr(chunk.meta, "headings", None) or [])
@@ -329,3 +356,32 @@ class DoclingParser:
 def parse_file_to_chunks(file_path: str):
     """从文件路径解析为 Docling chunk 列表。"""
     return DoclingParser().parse_to_chunks(file_path)
+
+def extract_pictures_from_doc(doc, filename: str, document_id: str):
+    """从 Docling Document 提取图片，作为 pypdf 提图失败时的兜底。
+
+    返回 List[ParsedResource]（与 rag.resources.ParsedResource 兼容）。
+    """
+    from io import BytesIO
+    from rag.resources import ParsedResource, ResourceKind
+
+    out = []
+    for pic in getattr(doc, "pictures", []) or []:
+        try:
+            img = pic.get_image(doc)          # PIL Image
+            buf = BytesIO()
+            img.save(buf, format="PNG")
+            content = buf.getvalue()
+            prov = getattr(pic, "prov", None) or []
+            page_no = getattr(prov[0], "page_no", None) if prov else None
+            out.append(ParsedResource(
+                filename=f"{document_id}_p{page_no or 0}_{len(out)}.png",
+                mime_type="image/png",
+                content=content,
+                kind=ResourceKind.IMAGE,
+                page_no=page_no,
+            ))
+        except Exception:
+            logger.exception("[dsh][docling] 提取 picture 失败，跳过")
+            continue
+    return out

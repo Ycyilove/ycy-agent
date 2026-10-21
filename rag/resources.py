@@ -22,7 +22,9 @@ from pathlib import Path
 from threading import RLock
 from typing import Dict, Iterable, List, Optional
 from urllib.parse import quote
+import logging
 
+logger = logging.getLogger(__name__)
 
 class ResourceKind(str, Enum):
     IMAGE = "image"
@@ -258,6 +260,11 @@ class ResourceRepository:
             self._links = {}
             self._persist()
 
+    def list_all(self) -> List[ResourceRecord]:
+        """列出全部资源（公开接口，供工具层使用）。"""
+        with self._lock:
+            return list(self._resources.values())
+        
     def stats(self) -> dict:
         with self._lock:
             return {
@@ -268,6 +275,10 @@ class ResourceRepository:
 
 def _guess_mime_type(filename: str) -> str:
     return mimetypes.guess_type(filename)[0] or "application/octet-stream"
+
+
+_ZIP_MAX_SINGLE_BYTES = 50 * 1024 * 1024      # 单文件解压上限
+_ZIP_MAX_TOTAL_BYTES = 200 * 1024 * 1024      # 总解压上限
 
 
 def _extract_zip_resources(
@@ -289,32 +300,84 @@ def _extract_zip_resources(
         return []
 
     resources = []
+    total_bytes = 0
     with zipfile.ZipFile(BytesIO(content)) as archive:
         for item in archive.infolist():
             if item.is_dir():
                 continue
-            if item.filename.startswith(media_prefixes[extension]):
-                item_name = Path(item.filename).name
-                resources.append(
-                    ParsedResource(
-                        filename=item_name,
-                        mime_type=_guess_mime_type(item_name),
-                        content=archive.read(item),
-                        kind=ResourceKind.IMAGE,
-                    )
+
+            is_media = item.filename.startswith(media_prefixes[extension])
+            is_embed = item.filename.startswith(embedding_prefixes[extension])
+            if not (is_media or is_embed):
+                continue
+
+            # ── zip bomb 防护：单文件 + 总量限制 ──
+            if item.file_size > _ZIP_MAX_SINGLE_BYTES:
+                logger.warning(
+                    "[dsh][resource] 跳过超大内嵌文件: %s (%d bytes)",
+                    item.filename, item.file_size,
                 )
-            elif item.filename.startswith(embedding_prefixes[extension]):
-                item_name = Path(item.filename).name
-                resources.append(
-                    ParsedResource(
-                        filename=item_name,
-                        mime_type=_guess_mime_type(item_name),
-                        content=archive.read(item),
-                        kind=ResourceKind.ATTACHMENT,
-                    )
+                continue
+            total_bytes += item.file_size
+            if total_bytes > _ZIP_MAX_TOTAL_BYTES:
+                logger.warning(
+                    "[dsh][resource] zip 解压总量超限，停止提取: %s",
+                    filename,
                 )
+                break
+
+            item_name = Path(item.filename).name
+            kind = ResourceKind.IMAGE if is_media else ResourceKind.ATTACHMENT
+            resources.append(
+                ParsedResource(
+                    filename=item_name,
+                    mime_type=_guess_mime_type(item_name),
+                    content=archive.read(item),
+                    kind=kind,
+                )
+            )
     return resources
 
+def _extract_pdf_with_fitz(content: bytes) -> List[ParsedResource]:
+    """用 PyMuPDF 兜底提取 PDF 图片（覆盖 Form XObject 深层图片）。"""
+    try:
+        import fitz
+    except ImportError:
+        return []
+
+    resources: List[ParsedResource] = []
+    try:
+        doc = fitz.open(stream=content, filetype="pdf")
+    except Exception:
+        return []
+
+    try:
+        for page_no, page in enumerate(doc, start=1):
+            try:
+                img_infos = page.get_images(full=True)
+            except Exception:
+                continue
+            for img_info in img_infos:
+                xref = img_info[0]
+                try:
+                    base = doc.extract_image(xref)
+                except Exception:
+                    continue
+                if not base or not base.get("image"):
+                    continue
+                ext = (base.get("ext") or "png").lower()
+                mime_ext = "jpeg" if ext == "jpg" else ext
+                resources.append(ParsedResource(
+                    filename=f"page_{page_no}_x{xref}.{ext}",
+                    mime_type=f"image/{mime_ext}",
+                    content=base["image"],
+                    kind=ResourceKind.IMAGE,
+                    page_no=page_no,
+                ))
+    finally:
+        doc.close()
+
+    return resources
 
 def _extract_pdf_resources(content: bytes) -> List[ParsedResource]:
     try:
@@ -325,6 +388,11 @@ def _extract_pdf_resources(content: bytes) -> List[ParsedResource]:
     resources = []
     try:
         reader = PdfReader(BytesIO(content))
+        if getattr(reader, "is_encrypted", False):
+            logger.warning(
+                "[dsh][resource] PDF 加密，pypdf 跳过资源提取（fitz 兜底会尝试）"
+            )
+            return []
         for page_no, page in enumerate(reader.pages, 1):
             try:
                 images = page.images
@@ -372,7 +440,19 @@ def extract_resources(content: bytes, filename: str) -> List[ParsedResource]:
     """Extract embedded images and attachments from supported documents."""
     extension = Path(filename).suffix.lower()
     if extension == ".pdf":
-        return _extract_pdf_resources(content)
+        resources = _extract_pdf_resources(content)
+        logger.debug(
+            "[dsh][resource] %s: pypdf 提取 %d 个",
+            filename, len(resources),
+        )
+        if not resources:
+            fitz_resources = _extract_pdf_with_fitz(content)
+            logger.info(
+                "[dsh][resource] %s: pypdf 空，fitz 兜底提取 %d 个",
+                filename, len(fitz_resources),
+            )
+            resources = fitz_resources
+        return resources
     if extension in {".docx", ".pptx", ".xlsx"}:
         try:
             return _extract_zip_resources(content, filename)
@@ -424,6 +504,11 @@ class ResourceManager:
             )
             self.repository.save(record)
             records.append(record)
+            
+        logging.getLogger(__name__).info(
+            "[dsh][resource] ingest %s: %d 个资源, page_nos=%r",
+            filename, len(records), [r.page_no for r in records],
+        )
         return records
 
     def to_ref(self, resource: ResourceRecord) -> dict:
@@ -446,34 +531,54 @@ class ResourceManager:
             "markdown": markdown,
         }
 
+    def _enrich_one(self, item: dict, metadata: dict) -> dict:
+        """给单个检索结果挂资源。被 enrich_search_results 和 service._record_search 共用。"""
+        resources = self.repository.list_by_chunk_ids(
+            [metadata.get("chunk_id")]
+        ).get(metadata.get("chunk_id"), [])
+
+        if not resources:
+            resources = self.repository.list_by_ids(
+                metadata.get("resource_ids", [])
+            )
+        if not resources and metadata.get("kind") == "record":
+            resources = self.repository.resources_for_source(
+                metadata.get("source_filename", "")
+            )
+
+        before_filter = len(resources)
+        chunk_pages = set(metadata.get("page_numbers") or [])
+        if chunk_pages and resources:
+            allowed_pages = set()
+            for p in chunk_pages:
+                if isinstance(p, int):
+                    allowed_pages.update({p - 1, p, p + 1})
+            if allowed_pages:
+                filtered = [
+                    r for r in resources
+                    if r.page_no is None or r.page_no in allowed_pages
+                ]
+                if filtered:
+                    resources = filtered
+
+        logger.debug(
+            "[dsh][resource] enrich chunk=%s: before=%d after=%d pages=%r",
+            (metadata.get("chunk_id") or "")[:8],
+            before_filter,
+            len(resources),
+            sorted(chunk_pages),
+        )
+
+        enriched_item = dict(item)
+        enriched_item["resources"] = [self.to_ref(r) for r in resources]
+        return enriched_item
+
     def enrich_search_results(self, results: List[dict]) -> List[dict]:
-        chunk_ids = [
-            item.get("metadata", {}).get("chunk_id")
+        return [
+            self._enrich_one(item, item.get("metadata", {}))
             for item in results
         ]
-        links = self.repository.list_by_chunk_ids(chunk_ids)
-        enriched = []
-        for item in results:
-            metadata = item.get("metadata", {})
-            resources = links.get(metadata.get("chunk_id"), [])
-            if not resources:
-                resources = self.repository.list_by_ids(
-                    metadata.get("resource_ids", [])
-                )
-
-            # ── 新增：按页过滤 ──
-            chunk_pages = set(metadata.get("page_numbers") or [])
-            if chunk_pages:
-                resources = [
-                    r for r in resources
-                    if r.page_no is None or r.page_no in chunk_pages
-                ]
-
-            enriched_item = dict(item)
-            enriched_item["resources"] = [self.to_ref(resource) for resource in resources]
-            enriched.append(enriched_item)
-        return enriched
-
+    
     def collect_refs(self, results: List[dict]) -> List[dict]:
         refs = {}
         for item in results:

@@ -280,3 +280,49 @@ def parse_structure(
         sum(1 for r in records if r.block_kind == BlockKind.LIST),
     )
     return records
+
+def parse_tables_grid(
+    tables: List[dict],
+    source_filename: str,
+    schema: Optional[FieldSchema] = None,
+) -> List[Record]:
+    """从 PyMuPDF extract_tables() 的 grid 建 Record。
+
+    grid 是 [[cell_text, ...], ...]，第一行是表头。
+    用于 Docling 不可用、走 PyMuPDF fast path 的场景。
+    """
+    if schema is None:
+        schema = get_default_schema()
+
+    class _Cell:
+        def __init__(self, text):
+            self.text = text
+
+    class _Grid:
+        def __init__(self, g):
+            self.grid = g
+
+    class _Prov:
+        def __init__(self, page_no):
+            self.page_no = page_no
+
+    class _Table:
+        def __init__(self, g, pages):
+            self.data = _Grid(g)
+            self.prov = [_Prov(p) for p in pages]
+
+    records: List[Record] = []
+    for t in tables:
+        grid = [[_Cell(c) for c in row] for row in (t.get("grid") or [])]
+        if not grid:
+            continue
+        records.extend(
+            _table_to_records(
+                _Table(grid, t.get("page_numbers") or []),
+                source_filename,
+                [],
+                t.get("page_numbers") or [],
+                schema,
+            )
+        )
+    return records

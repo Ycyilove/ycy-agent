@@ -47,7 +47,7 @@ rank-bm25>=0.2.2
 pymysql>=1.1.0
 
 # Model Context Protocol 客户端
-mcp>=1.0.0
+mcp>=2.0.0,<3.0.0
 
 # Langfuse 可观测性
 langfuse>=2.0.0

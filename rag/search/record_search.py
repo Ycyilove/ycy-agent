@@ -24,10 +24,25 @@ def record_search(
     max_expand: int = 3,
     schema: Optional[FieldSchema] = None,
 ) -> dict:
+    """返回 {records, paths, warnings}。"""
     if schema is None:
         schema = get_default_schema()
+
+    # ── 空 schema：实体倒排里只有 date/number/code，
+    # query 侧 person/org/other 永远对不上 → 跳过下钻，只用 BM25
+    if not schema.types:
+        base = record_store.search(query, top_k=top_k)
+        records = base[:top_k]
+        warnings = []
+        if not records:
+            warnings.append({"type": "no_record_hit", "query": query})
+        logger.info(
+            "[dsh][record] 空 schema，跳过实体下钻，BM25 命中 %d 条",
+            len(records),
+        )
+        return {"records": records, "paths": [], "warnings": warnings}
+
     anchor_kinds = schema.anchor_types()
-    """返回 {records, paths, warnings}。"""
     warnings: List[dict] = []
     mentions = extractor.extract(query)
     if anchor_kinds:

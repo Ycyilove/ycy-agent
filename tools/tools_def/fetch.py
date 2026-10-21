@@ -21,7 +21,7 @@ import ipaddress
 import logging
 import mimetypes
 import socket
-from typing import Any, Dict
+from typing import Any, Dict, List
 from urllib.parse import urlparse
 
 import httpx
@@ -59,6 +59,20 @@ def _is_blocked_ip(ip_str: str) -> bool:
         or ip.is_unspecified
     )
 
+def _resolve_all_ips(host: str) -> List[str]:
+    """解析 host 的所有 A/AAAA 记录，返回 IP 字符串列表。"""
+    import socket
+    ips: List[str] = []
+    try:
+        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+    except socket.gaierror:
+        return []
+    for info in infos:
+        try:
+            ips.append(info[4][0])
+        except (IndexError, TypeError):
+            continue
+    return ips
 
 def _check_url_safety(url: str) -> str:
     """返回空字符串表示安全；否则返回拒绝原因。"""
@@ -83,19 +97,16 @@ def _check_url_safety(url: str) -> str:
     except ValueError:
         pass
 
-    # 域名 → 解析到 IP，检查所有 A/AAAA 记录
-    try:
-        infos = socket.getaddrinfo(host_lower, None, proto=socket.IPPROTO_TCP)
-    except socket.gaierror as exc:
-        return f"无法解析域名: {host_lower} ({exc})"
+    # 域名 → 解析所有 A/AAAA 记录
+    ips = _resolve_all_ips(host_lower)
+    if not ips:
+        return f"无法解析域名: {host_lower}"
 
-    for info in infos:
-        ip_str = info[4][0]
+    for ip_str in ips:
         if _is_blocked_ip(ip_str):
             return f"域名解析到内网地址，已拒绝: {host_lower} → {ip_str}"
 
     return ""
-
 
 def _guess_filename(url: str, mime: str) -> str:
     path = urlparse(url).path
@@ -180,6 +191,27 @@ def fetch_url(url: str, filename: str = "") -> Dict[str, Any]:
                 content = b"".join(chunks)
                 name = filename or _guess_filename(url, mime)
 
+                # ── 重定向后最终 URL 也要过 SSRF 检查 ──
+                final_url = str(resp.url) if hasattr(resp, "url") else url
+                if final_url != url:
+                    final_reason = _check_url_safety(final_url)
+                    if final_reason:
+                        return {
+                            "success": False,
+                            "error": (
+                                f"重定向后的 URL 不安全: {final_reason}"
+                            ),
+                        }
+
+                # ── 按扩展名纠正 MIME（很多 CDN 把图片返回 text/html）──
+                from pathlib import Path
+                _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico"}
+                ext = Path(name).suffix.lower()
+                if ext in _IMAGE_EXTS and not mime.startswith("image/"):
+                    mime = f"image/{ext.lstrip('.')}"
+                    if mime == "image/jpg":
+                        mime = "image/jpeg"
+
     except httpx.HTTPStatusError as exc:
         return {
             "success": False,
@@ -231,7 +263,7 @@ def fetch_url(url: str, filename: str = "") -> Dict[str, Any]:
         "size": len(content),
         "resources": [
             {
-                "kind": "file",          # resource_store 会按 mime 精确判 kind
+                # 不写 kind，让 save_bytes 的 _guess_kind 按 mime/ext 精确判
                 "filename": name,
                 "mime": mime,
                 "content": content,      # bytes

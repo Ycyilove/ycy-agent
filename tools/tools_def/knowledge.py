@@ -128,8 +128,7 @@ def list_knowledge_resources(
         if source_filename:
             records = repository.resources_for_source(source_filename)
         else:
-            with repository._lock:
-                records = list(repository._resources.values())
+            records = repository.list_all()
 
         if kind:
             records = [r for r in records if r.kind == kind]
@@ -205,10 +204,14 @@ def search_knowledge(query: str, top_k: int = 15, mode: str = "auto") -> Dict[st
         resources = rag.resource_manager.collect_refs(results)
 
         chunks = []
+        search_timing = None
         for item in results:
             chunk_text = item.get("text", "")
+            chunk_meta = item.get("metadata", {}) or {}
+            if search_timing is None and chunk_meta.get("timing_ms"):
+                search_timing = chunk_meta["timing_ms"]
+
             chunk_resources = item.get("resources", []) or []
-            # 给每个资源打上 chunk 关联
             enriched_resources = []
             for r in chunk_resources:
                 if not isinstance(r, dict):
@@ -218,10 +221,20 @@ def search_knowledge(query: str, top_k: int = 15, mode: str = "auto") -> Dict[st
                     "chunk_preview": chunk_text[:120],
                     "chunk_filename": item.get("filename", ""),
                 })
+
+            # chunks[].resources 按 id 去重（同一资源可能因 enrich 兜底重复）
+            seen_ids = set()
+            deduped_chunk_resources = []
+            for r in enriched_resources:
+                rid = r.get("id")
+                if rid and rid not in seen_ids:
+                    seen_ids.add(rid)
+                    deduped_chunk_resources.append(r)
+
             chunks.append({
                 "text": chunk_text,
                 "filename": item.get("filename", ""),
-                "resources": enriched_resources,
+                "resources": deduped_chunk_resources,
             })
 
         paths: List[Dict[str, Any]] = []
@@ -234,7 +247,27 @@ def search_knowledge(query: str, top_k: int = 15, mode: str = "auto") -> Dict[st
                 if w not in warnings:
                     warnings.append(w)
 
-        return {
+        if not chunks and mode == "record":
+            warnings.append({
+                "type": "record_mode_empty",
+                "message": (
+                    "record 模式未返回任何结果；文档可能没有结构化表格/列表，"
+                    "或 field_schema 为空。建议改用 mode='flat' 或 'auto'。"
+                ),
+            })
+
+        # ── 新增：命中 chunk 但无资源 ──
+        if chunks and not resources:
+            warnings.append({
+                "type": "chunks_without_resources",
+                "message": (
+                    "命中 chunk 但没有关联资源。可能是文档本身无内嵌图片，"
+                    "或资源提取失败。若怀疑提取失败，可调 "
+                    "list_knowledge_resources 确认该文档是否有资源。"
+                ),
+            })
+
+        result = {
             "success": True,
             "query": query,
             "mode": mode,
@@ -243,5 +276,8 @@ def search_knowledge(query: str, top_k: int = 15, mode: str = "auto") -> Dict[st
             "paths": paths,
             "warnings": warnings,
         }
+        if search_timing:
+            result["timing_ms"] = search_timing
+        return result
     except Exception as error:
         return {"success": False, "error": str(error)}

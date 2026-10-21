@@ -96,6 +96,51 @@ def has_text_layer(pdf_path: str, min_chars_per_page: int = 50) -> bool:
     finally:
         doc.close()
 
+import re
+
+# 页眉/页脚/水印噪声：arXiv 编号、孤立页码、"Page N"、"第N页"、"K-12"
+_NOISE_PATTERNS = (
+    re.compile(r"^arxiv:\s*\d{4}\.\d{4,5}", re.I),
+    re.compile(r"^page\s+\d+(\s*of\s*\d+)?$", re.I),
+    re.compile(r"^第?\s*\d+\s*页$"),
+    re.compile(r"^\d{1,4}$"),
+    re.compile(r"^K-\d{1,4}$", re.I),
+)
+
+# 标题层级推断：编号优先
+_NUM_HEADING = re.compile(r"^(\d+(?:\.\d+)*)\.?\s+\S")
+_LETTER_HEADING = re.compile(r"^[A-Z]\s+\S")
+
+# 无编号常见章节名 → 强制 level 1
+_TOP_SECTIONS = {
+    "abstract", "摘要", "introduction", "引言",
+    "references", "参考文献", "acknowledgments", "致谢",
+    "appendix", "appendices", "附录",
+}
+
+
+def _is_noise_line(text: str) -> bool:
+    t = text.strip()
+    if len(t) <= 2:
+        return True
+    return any(p.match(t) for p in _NOISE_PATTERNS)
+
+
+def _infer_heading_level(text: str, ratio: float) -> int:
+    """编号优先：'2'→1, '2.1'→2；无编号按字号比；常见章节名强制 1。"""
+    t = text.strip()
+    if t.lower() in _TOP_SECTIONS:
+        return 1
+    m = _NUM_HEADING.match(t)
+    if m:
+        return m.group(1).count(".") + 1
+    if _LETTER_HEADING.match(t):
+        return 1
+    if ratio >= 1.5:
+        return 1
+    if ratio >= 1.3:
+        return 2
+    return 3
 
 def _is_bold(flags: int) -> bool:
     """PyMuPDF span flags 的 bit 4 表示粗体。"""
@@ -123,11 +168,13 @@ def _looks_like_heading(
     if not text or _is_noise_line(text):
         return False
 
-    # 主信号：字号显著更大
+    # 主信号：字号显著更大，但不能是长句
     if font_size >= body_font_size * size_threshold:
+        if text.endswith((".", "。")) and len(text) > 40:
+            return False
         return True
 
-    # 辅助信号：加粗 + 短 + 单独成段，但不能是句子
+    # 辅助信号：加粗 + 短 + 单独成段，且不能是句子
     if (
         is_bold
         and font_size >= body_font_size
@@ -138,6 +185,10 @@ def _looks_like_heading(
             return False
         if sum(c in ",，;；:：" for c in text) >= 2:
             return False
+        return True
+
+    # 全大写短行（年报小标题常见）
+    if text.isupper() and 5 <= len(text) <= 80:
         return True
 
     return False
@@ -177,19 +228,20 @@ def extract_tables(pdf_path: str) -> List[dict]:
     
 def parse_fast(
     pdf_path: str,
-    max_chars_per_chunk: int = 800,   # 新增参数
+    max_chars_per_chunk: int = 800,
+    detect_headings: bool = True,
 ) -> List[FastChunk]:
     """快速解析 PDF，返回带 headings 的 chunk 列表。
 
-    新增：正文累积到 max_chars_per_chunk 就主动 flush，
-    避免整份文档被压成几个巨大 chunk。
+    detect_headings=False 时不做 heading 识别，只按 max_chars_per_chunk 切正文，
+    用于版面复杂（年报/杂志）且 Docling 失败时的安全降级。
     """
     import fitz
     from collections import Counter
 
     doc = fitz.open(pdf_path)
     try:
-        # ── 第一遍：统计字号 ──
+        # ── 第一遍：统计字号（只统计正文长度的 span，排除表格/页码/脚注）──
         size_counter: Counter = Counter()
         for page in doc:
             d = page.get_text("dict")
@@ -197,8 +249,19 @@ def parse_fast(
                 for line in block.get("lines", []):
                     for span in line.get("spans", []):
                         text = span.get("text", "").strip()
-                        if text:
+                        if len(text) >= 20:
                             size_counter[round(span["size"], 1)] += len(text)
+
+        if not size_counter:
+            # 退化为全量统计
+            for page in doc:
+                d = page.get_text("dict")
+                for block in d.get("blocks", []):
+                    for line in block.get("lines", []):
+                        for span in line.get("spans", []):
+                            text = span.get("text", "").strip()
+                            if text:
+                                size_counter[round(span["size"], 1)] += len(text)
 
         if not size_counter:
             logger.warning("[dsh][fastpdf] 未提取到任何文本")
@@ -224,12 +287,18 @@ def parse_fast(
                 buffer_lines.clear()
                 buffer_chars = 0
                 return
-            headings = [h for h, _ in heading_stack]
-            levels = [lv for _, lv in heading_stack]
+            # 去重相邻重复 heading，并截断过深栈（>10 层视为异常）
+            raw_headings = [h for h, _ in heading_stack][:10]
+            raw_levels = [lv for _, lv in heading_stack][:10]
+            dedup_h, dedup_lv = [], []
+            for h, lv in zip(raw_headings, raw_levels):
+                if not dedup_h or dedup_h[-1] != h:
+                    dedup_h.append(h)
+                    dedup_lv.append(lv)
             chunks.append(FastChunk(
                 text=text,
-                headings=headings,
-                heading_levels=levels,
+                headings=dedup_h,
+                heading_levels=dedup_lv,
                 page_no=current_page,
                 font_size=page_font_size,
             ))
@@ -288,6 +357,32 @@ def parse_fast(
                     j += 1
             lines = merged
 
+            # ── 合并"编号行 + 标题行"：PyMuPDF 常把 "2.1\nModels" 拆成两行 ──
+            merged: List[dict] = []
+            j = 0
+            while j < len(lines):
+                cur = lines[j]
+                nxt = lines[j + 1] if j + 1 < len(lines) else None
+                is_num_only = bool(re.fullmatch(r"\d+(?:\.\d+)*", cur["text"]))
+                is_letter_only = bool(re.fullmatch(r"[A-Z]", cur["text"]))
+                if (
+                    nxt is not None
+                    and (is_num_only or is_letter_only)
+                    and not re.match(r"^\d+(?:\.\d+)*\s+\S", nxt["text"])
+                    and len(nxt["text"]) <= 80
+                    and (nxt["bold"] or nxt["size"] >= body_font_size * 1.05)
+                ):
+                    merged.append({
+                        "text": f"{cur['text']} {nxt['text']}",
+                        "size": max(cur["size"], nxt["size"]),
+                        "bold": cur["bold"] or nxt["bold"],
+                    })
+                    j += 2
+                else:
+                    merged.append(cur)
+                    j += 1
+            lines = merged
+
             for i, line_info in enumerate(lines):
                 line_text = line_info["text"]
                 line_size = line_info["size"]
@@ -296,10 +391,14 @@ def parse_fast(
                 prev_line = lines[i - 1]["text"] if i > 0 else ""
                 next_line = lines[i + 1]["text"] if i + 1 < len(lines) else ""
 
-                is_heading = _looks_like_heading(
-                    line_text, line_size, body_font_size, line_bold,
-                    standalone=is_standalone_line(line_text, prev_line, next_line),
-                )
+                if detect_headings:
+                    is_heading = _looks_like_heading(
+                        line_text, line_size, body_font_size, line_bold,
+                        standalone=is_standalone_line(line_text, prev_line, next_line),
+                    )
+                else:
+                    is_heading = False
+
                 if is_heading:
                     ratio = line_size / body_font_size if body_font_size else 1.0
                     level = _infer_heading_level(line_text, ratio)
@@ -311,7 +410,7 @@ def parse_fast(
                     flush_buffer()
                     heading_stack.append((line_text, level))
                     page_font_size = line_size
-                    continue   # heading 行不进 buffer
+                    continue
 
                 # 无论是否 heading，文本都进入 buffer
                 if buffer_chars + len(line_text) > max_chars_per_chunk:

@@ -9,6 +9,14 @@
     - 服务工厂保留在本文件（涉及全局单例和惰性加载）
 """
 
+import sys
+from pathlib import Path
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+
 import asyncio
 import logging
 import os
@@ -18,7 +26,7 @@ from typing import Any, Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from .config import (
+from backend.config import (
     ALLOWED_CORS_ORIGINS,
     DEFAULT_MODEL,
     LOCAL_MODEL_CONFIG,
@@ -84,14 +92,14 @@ from rag import LocalRAGService
 
 # ── 路由工厂 import ──
 
-from .routes.agent import create_agent_router
-from .routes.mcp import create_mcp_router
-from .routes.tools import create_tools_router
-from .routes.rag import create_rag_router
-from .routes.sessions import create_sessions_router
-from .routes.health import create_health_router
-from .routes.trash import create_trash_router
-from .routes.resource import create_resource_router
+from backend.routes.agent import create_agent_router
+from backend.routes.mcp import create_mcp_router
+from backend.routes.tools import create_tools_router
+from backend.routes.rag import create_rag_router
+from backend.routes.sessions import create_sessions_router
+from backend.routes.health import create_health_router
+from backend.routes.trash import create_trash_router
+from backend.routes.resource import create_resource_router
 
 
 logging.basicConfig(
@@ -370,4 +378,22 @@ app.include_router(create_agent_router(get_agent_task_service, get_session_memor
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="localhost", port=8000)
+
+    host = os.getenv("APP_HOST", "localhost")
+    port = int(os.getenv("APP_PORT", "8000"))
+
+    uvicorn.run(
+        "backend.app:app",
+        host=host,
+        port=port,
+        reload=False,
+        reload_dirs=[
+            "backend", "core", "tools", "rag", "infra", "mcp_client", "src",
+        ],
+        reload_includes=["*.py"],          # 只关心 .py 变更
+        reload_excludes=[
+            "models/*", "data/*", "logs/*", "vector_store/*",
+            "rag_resources/*", "output/*", "*.jsonl", "*.db",
+            "*.json", "*.md", "*.txt", "*.pdf", "*.jpg", "*.png",
+        ],
+    )

@@ -111,11 +111,23 @@ async def with_sse_done(events: AsyncIterator[str]) -> AsyncIterator[str]:
         try:
             async for event in events:
                 await queue.put(event)
-        except Exception:
-            logger.exception("[dsh][sse] upstream generator raised")
+        except asyncio.CancelledError:
             raise
+        except Exception as exc:
+            logger.exception("[dsh][sse] upstream generator raised")
+            # 把异常作为 error 事件推给前端，避免流悬挂
+            try:
+                await queue.put(sse_event(
+                    "error",
+                    message=f"任务异常：{type(exc).__name__}: {exc}",
+                ))
+            except Exception:
+                pass
         finally:
-            await queue.put(_DONE)
+            try:
+                await queue.put(_DONE)
+            except Exception:
+                pass
 
     pump_task = asyncio.create_task(pump())
 
@@ -568,7 +580,7 @@ class AgentTaskService:
         if not result or not getattr(result, "success", False):
             return []
 
-        from core.resource_store import (
+        from core.resource.store import (
             save_bytes, save_base64, save_file, save_table, save_text,
         )
 
@@ -598,12 +610,7 @@ class AgentTaskService:
                         "source_tool": tool_name,
                         "page_no": item.get("page_no"),
                         "size": item.get("size", 0),
-                        # 保留 chunk 关联（如果有）
-                        **(
-                            {"chunk_preview": item["chunk_preview"],
-                            "chunk_filename": item["chunk_filename"]}
-                            if item.get("chunk_preview") else {}
-                        ),
+                        # chunk_preview / chunk_filename 不下发前端
                     })
                     continue
 
@@ -1352,7 +1359,7 @@ class AgentTaskService:
 
             # ── Mem0：从用户消息提取路径 ──
             try:
-                from core.memory.memory_layer import remember_user_message
+                from core.memory.mem0_layer import remember_user_message
                 remember_user_message(session_id, message)
             except Exception:
                 logger.exception("remember_user_message 失败")
@@ -1767,7 +1774,7 @@ class AgentTaskService:
 
             # ── Mem0：审批后成功也写事实 ──
             try:
-                from .memory_layer import remember_tool_success
+                from core.memory.mem0_layer import remember_tool_success
                 remember_tool_success(
                     session_id=state.session_id or pending.session_id,
                     tool_name=tool_call.tool_name,

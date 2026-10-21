@@ -50,14 +50,8 @@ class FAISSVectorStore:
     # ────────── 内部：加载 / 保存 / 嵌入 ──────────
 
     def _init_embeddings(self):
-        """初始化嵌入模型。
-
-        加载策略：
-            1. 先临时设离线，尝试 local_files_only=True
-            2. 本地没有 → 临时恢复在线，联网下载
-            3. 加载完恢复原始环境变量（不影响 Docling 等其他组件）
-        """
         from sentence_transformers import SentenceTransformer
+        import shutil
 
         _offline_keys = ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")
         _backup = {k: os.environ.get(k) for k in _offline_keys}
@@ -69,39 +63,34 @@ class FAISSVectorStore:
                 else:
                     os.environ[k] = _backup[k]
 
-        # ── 阶段 1：临时离线，尝试本地缓存 ──
         os.environ["HF_HUB_OFFLINE"] = "1"
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
         try:
-            print(f"[模型加载] 尝试从本地缓存加载: {self.embedding_model}")
             try:
-                self.embeddings = SentenceTransformer(
-                    self.embedding_model,
-                    local_files_only=True,
-                )
-                self.embedding_dimension = (
-                    self.embeddings.get_sentence_embedding_dimension()
-                )
+                LOCAL_MODEL_PATH = r"D:\Projects\111\LLM\LLM\models\bge-small-zh-v1.5"
+                self.embeddings = SentenceTransformer(LOCAL_MODEL_PATH, local_files_only=True)
+                self.embedding_dimension = self.embeddings.get_sentence_embedding_dimension()
                 print("[模型加载] ✅ 本地缓存加载成功！")
                 return
-            except Exception as local_error:
-                print(
-                    f"[模型加载] 本地缓存不可用（{type(local_error).__name__}），"
-                    f"将联网下载"
+            except FileNotFoundError:
+                print("[模型加载] 本地无缓存，联网下载")
+            except OSError as e:
+                print(f"[模型加载] 本地缓存损坏（{e}），清理后重新下载")
+                cache_dir = os.path.join(
+                    os.environ.get("HF_HOME", ""),
+                    f"models--{self.embedding_model.replace('/', '--')}",
                 )
+                if os.path.isdir(cache_dir):
+                    shutil.rmtree(cache_dir, ignore_errors=True)
+            except Exception as e:
+                print(f"[模型加载] 本地加载失败（{type(e).__name__}: {e}），联网下载")
 
-            # ── 阶段 2：临时恢复在线，联网下载 ──
             _restore_env()
-            print(f"[模型下载] 正在从镜像源下载嵌入模型: {self.embedding_model}")
-            print("[模型下载] 首次下载约 90MB，请耐心等待...")
             self.embeddings = SentenceTransformer(self.embedding_model)
-            self.embedding_dimension = (
-                self.embeddings.get_sentence_embedding_dimension()
-            )
+            self.embedding_dimension = self.embeddings.get_sentence_embedding_dimension()
             print("[模型加载] ✅ 下载并加载成功！")
         finally:
-            # ── 恢复原始环境（不污染 Docling）──
             _restore_env()
 
     def _load_index(self):
@@ -124,6 +113,41 @@ class FAISSVectorStore:
                 self.metadata = []
                 self.file_index = {}
 
+        # ── 修复：file_index.json 缺失/为空但 metadata 有内容 → 从 metadata 重建 ──
+        if self.metadata and not self.file_index:
+            logger.warning(
+                "[faiss] file_index.json 缺失或为空，从 metadata 重建（%d 条 chunk）",
+                len(self.metadata),
+            )
+            rebuilt: Dict[str, Dict] = {}
+            for meta in self.metadata:
+                fn = meta.get("filename")
+                if not fn:
+                    continue
+                fh = self._get_file_hash(fn)
+                if fh not in rebuilt:
+                    rebuilt[fh] = {
+                        "filename": fn,
+                        "chunk_count": 0,
+                        "added": True,
+                    }
+                rebuilt[fh]["chunk_count"] += 1
+            self.file_index = rebuilt
+            try:
+                with open(self.file_index_file, 'w', encoding='utf-8') as f:
+                    json.dump(self.file_index, f, ensure_ascii=False, indent=2)
+                logger.info("[faiss] file_index 重建完成，%d 个文件", len(rebuilt))
+            except Exception:
+                logger.exception("[faiss] file_index 写回失败")
+
+        # ── 修复：索引维度与模型维度不一致 → 标记索引失效，等首次加载模型时校验 ──
+        if self.index is not None and self.metadata:
+            index_dim = self.index.d
+            logger.info(
+                "[faiss] 索引加载：ntotal=%d, dim=%d, metadata=%d 条",
+                self.index.ntotal, index_dim, len(self.metadata),
+            )
+
     def _get_file_hash(self, filename: str) -> str:
         return hashlib.md5(filename.encode()).hexdigest()
 
@@ -133,7 +157,7 @@ class FAISSVectorStore:
         embeddings = self.embeddings.encode(texts, show_progress_bar=len(texts) > 10)
         return np.array(embeddings, dtype='float32')
 
-    # ────────── 新增：一致性自检 ──────────
+    # ────────── 一致性自检 ──────────
 
     def verify_consistency(self) -> Dict:
         """检查 index 和 metadata 是否一致。"""
@@ -144,7 +168,21 @@ class FAISSVectorStore:
             "metadata_len": meta_count,
             "consistent": index_count == meta_count,
             "file_index_len": len(self.file_index),
+            "index_dim": self.index.d if self.index is not None else None,
         }
+
+    def _check_dim(self, query_dim: int) -> bool:
+        """检查 query 向量维度与索引维度是否一致。"""
+        if self.index is None:
+            return False
+        if self.index.d != query_dim:
+            logger.error(
+                "[faiss] 维度不匹配：index.d=%d, query.d=%d。"
+                "embedding 模型已更换（%s），旧索引失效，请清空 vector_store/ 重建。",
+                self.index.d, query_dim, self.embedding_model,
+            )
+            return False
+        return True
 
     # ────────── 写入 ──────────
 
@@ -164,6 +202,17 @@ class FAISSVectorStore:
             if self.embeddings is None:
                 self._init_embeddings()
             self.index = faiss.IndexFlatL2(self.embedding_dimension)
+        else:
+            # 已有索引但维度不一致 → 拒绝写入，提示重建
+            if self.embeddings is None:
+                self._init_embeddings()
+            if self.index.d != self.embedding_dimension:
+                msg = (
+                    f"索引维度 {self.index.d} 与当前模型 {self.embedding_dimension} 不一致，"
+                    f"请先清空 vector_store/ 重建索引"
+                )
+                logger.error("[faiss] %s", msg)
+                return {"status": "error", "message": msg}
 
         added_chunks = 0
         new_file_index = {}
@@ -226,6 +275,11 @@ class FAISSVectorStore:
             return []
 
         query_embedding = self._generate_embeddings([query])
+
+        # ── 修复：维度不匹配时不再 AssertionError，返回空 + 日志 ──
+        if not self._check_dim(query_embedding.shape[1]):
+            return []
+
         distances, indices = self.index.search(
             query_embedding, min(top_k, len(self.metadata))
         )
@@ -246,13 +300,6 @@ class FAISSVectorStore:
     # ────────── 删除 / 清空 ──────────
 
     def delete_file(self, filename: str) -> Dict:
-        """删除指定文件的向量索引。
-
-        修复：
-            1. 不再依赖 self.embedding_dimension（可能为 None）
-            2. 用 remaining_vectors.shape[1] 获取真实维度
-            3. reconstruct 失败时降级为清空索引，不抛 500
-        """
         if not self.file_index:
             return {"status": "error", "message": "索引为空"}
 
@@ -322,6 +369,7 @@ class FAISSVectorStore:
             "files": list(self.file_index.values()),
             "embedding_model": self.embedding_model,
             "index_path": self.index_path,
+            "index_dim": self.index.d if self.index is not None else None,
         }
 
     def file_exists(self, filename: str) -> bool:
