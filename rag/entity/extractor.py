@@ -55,6 +55,19 @@ class EntityExtractor:
             except re.error:
                 logger.exception("[dsh][entity] 无效 pattern: %s=%r", kind, pattern)
 
+    @classmethod
+    def from_schema(cls, schema) -> "EntityExtractor":
+        """从 FieldSchema 构造注入领域模式/词典的 extractor。"""
+        patterns: Dict[str, str] = {}
+        dictionary: Dict[str, str] = {}
+        if schema and getattr(schema, "types", None):
+            for name, td in schema.types.items():
+                if td.value_patterns:
+                    patterns[name] = "|".join(td.value_patterns)
+                for word in td.dictionary:
+                    dictionary[word] = name
+        return cls(dictionary=dictionary, patterns=patterns)
+        
     def extract(self, text: str, chunk_id: Optional[str] = None) -> List[EntityMention]:
         if not text or not text.strip():
             return []

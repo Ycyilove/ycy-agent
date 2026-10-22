@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from rag.entity.extractor import EntityExtractor
 from rag.structure.field_classifier import FieldSchema, get_default_schema
@@ -44,6 +44,18 @@ def record_search(
 
     anchor_kinds = schema.anchor_types()
     warnings: List[dict] = []
+    # 动态注入 schema 的 value_patterns / dictionary
+    if getattr(extractor, "_dictionary", None) is None and getattr(extractor, "_patterns", None) is None:
+        dictionary = {}
+        patterns = {}
+        for name, td in schema.types.items():
+            if td.value_patterns:
+                patterns[name] = "|".join(td.value_patterns)
+            for word in td.dictionary:
+                dictionary[word] = name
+        from rag.entity.extractor import EntityExtractor
+        extractor = EntityExtractor(dictionary=dictionary, patterns=patterns)
+
     mentions = extractor.extract(query)
     if anchor_kinds:
         anchors = [m for m in mentions if m.kind in anchor_kinds]

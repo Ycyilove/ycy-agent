@@ -21,14 +21,10 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 os.environ.setdefault("HF_HOME", os.path.join(_PROJECT_ROOT, "models"))
 os.environ.setdefault("HUGGINGFACE_HUB_CACHE", os.environ["HF_HOME"])
+# Xet 后端在 hf-mirror.com 镜像下会返回 401，禁用后兼容镜像站
 os.environ["HF_HUB_DISABLE_XET"] = "1"
 
 from typing import Dict, List, Optional
-
-# ── 强制禁用 HuggingFace Xet 存储后端 ──
-# Xet 后端（cas-server.xethub.hf.co）在 hf-mirror.com 镜像下会返回 401，
-# 禁用后 huggingface_hub 走传统 HTTP 下载，兼容镜像站。
-os.environ["HF_HUB_DISABLE_XET"] = "1"
 
 logger = logging.getLogger(__name__)
 
@@ -237,12 +233,59 @@ class DoclingParser:
             return self._parse_with_ocr(file_path)
 
     def _parse_with_ocr(self, file_path: str):
-        """原有逻辑：Docling + OCR。"""
+        """Docling + OCR 路径。"""
         converter = _get_converter(file_path)
         chunker = _get_chunker()
+
+        import time
+        t0 = time.perf_counter()
         result = converter.convert(file_path)
-        self.last_document = result.document
-        # ... 原有 parse_to_chunks 的剩余逻辑
+        logger.info(
+            "[dsh][docling] OCR 版面分析完成，耗时 %.1fs",
+            time.perf_counter() - t0,
+        )
+
+        # ── 后处理：推断并修正标题层级 (docling-hierarchical-pdf) ──
+        try:
+            from hierarchical.postprocessor import ResultPostprocessor
+            ResultPostprocessor(result, source=file_path).process()
+            logger.info("[dsh][docling] 层级后处理完成")
+        except Exception:
+            logger.exception("[dsh][docling] 层级后处理失败，继续使用原始层级")
+
+        doc = result.document
+        self.last_document = doc
+        chunks = list(chunker.chunk(dl_doc=doc))
+
+        # 补全 DocMeta 字段（解决 Pydantic ValueError 并回填 page_numbers）
+        for _c in chunks:
+            meta = getattr(_c, "meta", None)
+            if meta is None:
+                continue
+            
+            # 1. heading_levels 兜底
+            if getattr(meta, "heading_levels", None) is None:
+                try:
+                    meta.heading_levels = []
+                except (AttributeError, ValueError):
+                    pass
+                    
+            # 2. page_numbers 兜底：从 doc_items 提取
+            if not getattr(meta, "page_numbers", None):
+                pages = set()
+                for item in (getattr(meta, "doc_items", None) or []):
+                    prov = getattr(item, "prov", None) or []
+                    for p in prov:
+                        page_no = getattr(p, "page_no", None)
+                        if page_no is not None:
+                            pages.add(page_no)
+                try:
+                    meta.page_numbers = sorted(list(pages))
+                except (AttributeError, ValueError):
+                    pass
+
+        logger.info("[dsh][docling] OCR 切块完成: %d 个 chunk", len(chunks))
+        return chunks
 
     def _parse_with_text_layer(self, file_path: str):
         """有文本层：Docling 关闭 OCR，保留版面分析。"""
@@ -288,13 +331,45 @@ class DoclingParser:
             "[dsh][docling] 版面分析完成，耗时 %.1fs", time.perf_counter() - t0
         )
 
+        # ── 后处理：推断并修正标题层级 (docling-hierarchical-pdf) ──
+        try:
+            from hierarchical.postprocessor import ResultPostprocessor
+            ResultPostprocessor(result, source=file_path).process()
+            logger.info("[dsh][docling] 层级后处理完成")
+        except Exception:
+            logger.exception("[dsh][docling] 层级后处理失败，继续使用原始层级")
+
         doc = result.document
         self.last_document = doc
         chunker = _get_chunker()
         chunks = list(chunker.chunk(dl_doc=doc))
+
         for _c in chunks:
-            if not hasattr(_c.meta, "heading_levels"):
-                _c.meta.heading_levels = []
+            meta = getattr(_c, "meta", None)
+            if meta is None:
+                continue
+            
+            # 1. heading_levels 兜底
+            if getattr(meta, "heading_levels", None) is None:
+                try:
+                    meta.heading_levels = []
+                except (AttributeError, ValueError):
+                    pass
+                    
+            # 2. page_numbers 兜底：从 doc_items 提取
+            if not getattr(meta, "page_numbers", None):
+                pages = set()
+                for item in (getattr(meta, "doc_items", None) or []):
+                    prov = getattr(item, "prov", None) or []
+                    for p in prov:
+                        page_no = getattr(p, "page_no", None)
+                        if page_no is not None:
+                            pages.add(page_no)
+                try:
+                    meta.page_numbers = sorted(list(pages))
+                except (AttributeError, ValueError):
+                    pass
+
         logger.info("[dsh][docling] 切块完成: %d 个 chunk", len(chunks))
         return chunks
 

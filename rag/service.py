@@ -113,7 +113,15 @@ class LocalRAGService:
             if not docling_chunks:
                 return {'status': 'error', 'message': 'Docling 解析后无 chunk'}
 
-            # ── 2.1 结构解析：表格/列表 → Record ──
+            # ── 2.1 统一层级纠正（无论底层走 Docling 还是 FastPath） ──
+            try:
+                from .structure.corrector import HierarchyCorrector
+                corrector = HierarchyCorrector()
+                docling_chunks = corrector.correct_chunks(docling_chunks)
+            except Exception:
+                logger.exception("[dsh][rag] 层级纠正失败，继续使用原始层级")
+
+            # ── 2.2 结构解析：表格/列表 → Record ──
             if parser.last_document is not None:
                 records = parse_structure(
                     parser.last_document, docling_chunks, filename,
@@ -175,26 +183,31 @@ class LocalRAGService:
             for i, dc in enumerate(docling_chunks):
                 original = clean_cn_spaces(dc.text)
 
-                # Contextual Retrieval：优先用摘要+原文，否则用 heading+原文
+                headings = list(getattr(dc.meta, "headings", None) or [])
+                headings = [clean_heading(h) for h in headings]
+                heading_levels = list(getattr(dc.meta, "heading_levels", None) or [])
+                page_numbers = list(getattr(dc.meta, "page_numbers", None) or [])
+
+                # 强制构建 Breadcrumb，防止 Contextual 分支覆盖
+                breadcrumb = ""
+                if headings:
+                    breadcrumb = " > ".join(headings) + "\n"
+
                 if (
                     contextual_texts is not None
                     and i < len(contextual_texts)
                     and contextual_texts[i]
                 ):
-                    enriched = contextual_texts[i]
+                    # 摘要 + 纠正后的上下文前缀
+                    enriched = breadcrumb + contextual_texts[i]
                 else:
                     enriched = parser.get_enriched_text(dc)
+                    if breadcrumb and not enriched.startswith(headings[0]):
+                        enriched = breadcrumb + enriched
 
                 if not enriched or not enriched.strip():
                     continue
                 enriched = clean_cn_spaces(enriched)
-
-                headings = list(getattr(dc.meta, "headings", None) or [])
-                headings = [clean_heading(h) for h in headings]
-                heading_levels = list(
-                    getattr(dc.meta, "heading_levels", None) or []
-                )
-                page_numbers = list(getattr(dc.meta, "page_numbers", None) or [])
 
                 indexed_texts.append(enriched)
                 metadata.append({
