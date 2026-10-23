@@ -403,6 +403,25 @@ export function AppProvider({ children }) {
     }
   }, []);
 
+    // 页面重载后，对 running/waiting 任务重建 SSE 连接。
+  // 复用 streamAgentTask 但传空 message？不行——后端会创建新任务。
+  // 正确做法：后端需要一个"订阅已有任务"的端点，或用同一 task_id 重新 POST。
+  // 当前后端不支持订阅，先做"标记为断连"的降级：把 running 任务显示为 interrupted。
+  const markInterruptedTasks = useCallback((tasks) => {
+    for (const task of tasks) {
+      if (task.status === 'running' || task.status === 'waiting') {
+        dispatch({
+          type: 'UPDATE_TASK',
+          id: task.id,
+          patch: {
+            status: 'interrupted',
+            interruptedAt: Date.now(),
+          },
+        });
+      }
+    }
+  }, []);
+
   // activeSessionId 变化时拉取该会话的任务
   useEffect(() => {
     const sessionId = state.activeSessionId;
@@ -426,6 +445,9 @@ export function AppProvider({ children }) {
           taskCount: tasks.length,
         });
         dispatch({ type: 'HYDRATE_TASKS', sessionId, tasks });
+        // 后端已断开的 running/waiting 任务标为 interrupted，
+        // 提示用户"任务已中断，可重新发起"。
+        markInterruptedTasks(tasks);
       })
       .catch((error) => {
         console.warn('[dsh][hydrate] 拉取任务失败', { sessionId, error });

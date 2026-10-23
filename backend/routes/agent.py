@@ -3,7 +3,7 @@
 import json
 from typing import Any, Callable, Dict, List, Optional
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 
 from core.task.service import with_sse_done
@@ -33,6 +33,7 @@ def create_agent_router(
 
     @router.post('/api/agent/tasks/stream')
     async def stream_agent_task(
+        request: Request,
         message: str = Form(''),
         history: str = Form('[]'),
         mode: str = Form('plan'),
@@ -68,7 +69,7 @@ def create_agent_router(
             attachments=attachments,
         )
         return StreamingResponse(
-            with_sse_done(stream),
+            with_sse_done(stream, is_disconnected=request.is_disconnected),
             media_type='text/event-stream',
             headers={
                 'Cache-Control': 'no-cache',
@@ -79,13 +80,14 @@ def create_agent_router(
 
     @router.post('/api/agent/tasks/{task_id}/approve')
     async def approve_agent_task(
+        request: Request,
         task_id: str,
         approval_id: str = Form(...),
         action: str = Form('allow'),
     ):
         stream = task_service_provider().stream_approval(task_id, approval_id, action)
         return StreamingResponse(
-            with_sse_done(stream),
+            with_sse_done(stream, is_disconnected=request.is_disconnected),
             media_type='text/event-stream',
             headers={
                 'Cache-Control': 'no-cache',

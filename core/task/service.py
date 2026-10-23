@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import base64
 import json
 import logging
@@ -39,6 +40,7 @@ from .stream_parser import (
 
 from infra.debug_log.llm import begin_turn, end_turn
 from infra.observability import set_turn_context
+from core.task.tool_result_store import build_handle_summary
 
 logger = logging.getLogger(__name__)
 
@@ -100,22 +102,45 @@ def sse_event(event_type: str, **payload: Any) -> str:
     )
 
 
-async def with_sse_done(events: AsyncIterator[str]) -> AsyncIterator[str]:
-    """Append the conventional SSE terminator, with periodic heartbeat."""
+async def with_sse_done(
+    events: AsyncIterator[str],
+    is_disconnected: Optional[Callable[[], Any]] = None,
+) -> AsyncIterator[str]:
+    """Append the conventional SSE terminator, with periodic heartbeat.
+
+    is_disconnected: 可选，返回 bool 或 awaitable[bool] 的回调。
+                     客户端断开时停止泵出事件并取消上游生成器。
+    """
     HEARTBEAT_INTERVAL = 15.0
 
     queue: asyncio.Queue = asyncio.Queue(maxsize=100)
     _DONE = object()
+    disconnected = False
+
+    async def _check_disconnected() -> bool:
+        if is_disconnected is None:
+            return False
+        try:
+            result = is_disconnected()
+            if inspect.isawaitable(result):
+                result = await result
+            return bool(result)
+        except Exception:
+            return False
 
     async def pump():
+        nonlocal disconnected
         try:
             async for event in events:
+                if await _check_disconnected():
+                    disconnected = True
+                    logger.info("[dsh][sse] client disconnected, stop pumping")
+                    break
                 await queue.put(event)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logger.exception("[dsh][sse] upstream generator raised")
-            # 把异常作为 error 事件推给前端，避免流悬挂
             try:
                 await queue.put(sse_event(
                     "error",
@@ -138,6 +163,10 @@ async def with_sse_done(events: AsyncIterator[str]) -> AsyncIterator[str]:
                     queue.get(), timeout=HEARTBEAT_INTERVAL
                 )
             except asyncio.TimeoutError:
+                if await _check_disconnected():
+                    logger.info("[dsh][sse] client disconnected at heartbeat")
+                    disconnected = True
+                    break
                 yield ": keep-alive\n\n"
                 continue
             if item is _DONE:
@@ -151,8 +180,10 @@ async def with_sse_done(events: AsyncIterator[str]) -> AsyncIterator[str]:
             except (asyncio.CancelledError, Exception):
                 pass
 
+    if disconnected:
+        logger.info("[dsh][sse] stream ended due to client disconnect")
+        return
     yield "data: [DONE]\n\n"
-
 
 class AgentTaskService:
     """Coordinate task planning, tool execution, approvals, and persistence."""
@@ -562,6 +593,35 @@ class AgentTaskService:
             )
         return obj
 
+    @staticmethod
+    def _compact_tool_payload(payload: Any) -> str:
+        """给 LLM 的工具返回摘要：优先 structuredContent，其次 content 文本。
+
+        避免 MCP 的 content + structuredContent 双份同时进 prompt。
+        """
+        if isinstance(payload, dict):
+            sc = payload.get("structuredContent")
+            if sc is not None:
+                try:
+                    return json.dumps(sc, ensure_ascii=False, default=str)
+                except Exception:
+                    return str(sc)
+            blocks = payload.get("content")
+            if isinstance(blocks, list):
+                texts = [
+                    b.get("text") for b in blocks
+                    if isinstance(b, dict) and b.get("type") == "text" and b.get("text")
+                ]
+                if len(texts) == 1:
+                    return texts[0]
+                if texts:
+                    return "\n".join(texts)
+            try:
+                return json.dumps(payload, ensure_ascii=False, default=str)
+            except Exception:
+                return str(payload)
+        return str(payload)
+
     def _extract_resources_from_tool_result(
         self,
         result: ToolCallResult,
@@ -691,6 +751,34 @@ class AgentTaskService:
                 return _dedup_resources(resources)
 
         # ── 2. 隐式提取（fallback） ──
+
+        # 2a0. search_knowledge 风格：chunks[i].resources
+        chunks = payload.get("chunks")
+        if isinstance(chunks, list):
+            for chunk in chunks:
+                if not isinstance(chunk, dict):
+                    continue
+                chunk_resources = chunk.get("resources")
+                if not isinstance(chunk_resources, list):
+                    continue
+                for item in chunk_resources:
+                    if not isinstance(item, dict):
+                        continue
+                    rid = item.get("id")
+                    url = item.get("url")
+                    if not rid or not url:
+                        continue
+                    resources.append({
+                        "id": rid,
+                        "kind": item.get("kind") or "image",
+                        "filename": item.get("filename") or "",
+                        "mime": item.get("mime_type") or item.get("mime") or "",
+                        "url": url,
+                        "markdown": item.get("markdown") or "",
+                        "page_no": item.get("page_no"),
+                        "source": "rag",
+                        "source_tool": tool_name,
+                    })
 
         # 2a. 旧 resources 字段（已带 url）
         listed = payload.get("resources")
@@ -1041,13 +1129,27 @@ class AgentTaskService:
         if tool_execution_context is not None:
             try:
                 if result.success and result.result is not None:
-                    if isinstance(result.result, dict):
-                        payload = json.dumps(result.result, ensure_ascii=False)
-                    else:
-                        payload = str(result.result)
-                    tool_execution_context.append(
-                        f"【工具 {tool_call.tool_name} 返回】\n{payload[:8000]}"
+                    handle = build_handle_summary(
+                        task_id=task_id,
+                        step_index=0,
+                        tool_name=tool_call.tool_name,
+                        payload=result.result,
+                        max_inline_tokens=4000,
                     )
+                    if handle.get("inline"):
+                        payload_text = self._compact_tool_payload(result.result)
+                        tool_execution_context.append(
+                            f"【工具 {tool_call.tool_name} 返回】\n{payload_text[:8000]}"
+                        )
+                    else:
+                        summary_text = json.dumps(
+                            handle.get("summary") or {}, ensure_ascii=False, default=str
+                        )
+                        tool_execution_context.append(
+                            f"【工具 {tool_call.tool_name} 返回】\n"
+                            f"⚠️ 完整结果已卸载，result_id=`{handle.get('result_id')}`\n"
+                            f"调用 `read_tool_result` 按需读取。\n\n{summary_text[:4000]}"
+                        )
             except Exception:
                 logger.exception("累积工具结果失败")
 
@@ -1180,7 +1282,15 @@ class AgentTaskService:
                     session_id=session_id,
                 )
                 if found:
-                    accumulated_resources.extend(found)
+                    # 跨多次工具调用去重（同一 rid 只保留一次）
+                    existing_ids = {r.get("id") for r in accumulated_resources if r.get("id")}
+                    new_items = [r for r in found if r.get("id") and r["id"] not in existing_ids]
+                    if new_items:
+                        accumulated_resources.extend(new_items)
+                        logger.info(
+                            "[dsh][task_service] appended %d new resources (skipped %d dups)",
+                            len(new_items), len(found) - len(new_items),
+                        )
             except Exception:
                 logger.exception("提取工具资源失败")
 
@@ -1188,28 +1298,19 @@ class AgentTaskService:
             if isinstance(getattr(result, "result", None), dict):
                 result.result = self._strip_bytes(result.result)
 
+            # event["log"] 来自 agent.format_tool_result(result)，
+            # 已包含 structuredContent / content / leftover / 错误原文，
+            # 不再追加 result.result（此前会导致"原始返回 + 一模一样副本"）。
             log_parts: List[str] = []
             if event.get("log"):
                 log_parts.append(str(event["log"]))
 
-            result_payload = getattr(result, "result", None)
-            if result_payload is not None:
-                try:
-                    if isinstance(result_payload, (dict, list, tuple)):
-                        payload_text = json.dumps(
-                            result_payload, ensure_ascii=False, indent=2,
-                            default=str,     # ← bytes 转成字符串
-                        )
-                    else:
-                        payload_text = str(result_payload)
-                    if len(payload_text) > 4000:
-                        payload_text = payload_text[:4000] + "\n… (truncated)"
-                    log_parts.append("【原始返回】\n" + payload_text)
-                except Exception:
-                    logger.exception("拼接工具原始返回失败")
-
+            # 仅当 format 没覆盖到错误时补一句（避免重复）
             if not result.success and getattr(result, "error", None):
-                log_parts.append(f"【错误】{result.error}")
+                err_text = f"【错误】{result.error}"
+                head = log_parts[0] if log_parts else ""
+                if err_text not in head and str(result.error) not in head:
+                    log_parts.append(err_text)
 
             combined_log = "\n\n".join(log_parts) if log_parts else None
 
@@ -1227,23 +1328,50 @@ class AgentTaskService:
 
             if result.result is not None:
                 try:
-                    if isinstance(result.result, dict):
-                        payload = json.dumps(
-                            result.result, ensure_ascii=False,
-                            default=str,     # ← bytes 转成字符串
-                        )
-                    else:
-                        payload = str(result.result)
                     tag = "成功" if result.success else "失败"
                     err_note = (
                         f"\n错误: {result.error}"
                         if not result.success and result.error
                         else ""
                     )
-                    tool_execution_context.append(
-                        f"【工具 {tool_call.tool_name} 返回（{tag}）】"
-                        f"{err_note}\n{payload[:8000]}"
+
+                    handle = build_handle_summary(
+                        task_id=task_id,
+                        step_index=event["step"],
+                        tool_name=tool_call.tool_name,
+                        payload=result.result,
+                        max_inline_tokens=4000,
                     )
+
+                    if handle.get("inline"):
+                        # 小结果：原样内联
+                        payload_text = self._compact_tool_payload(result.result)
+                        tool_execution_context.append(
+                            f"【工具 {tool_call.tool_name} 返回（{tag}）】"
+                            f"{err_note}\n{payload_text[:8000]}"
+                        )
+                    else:
+                        # 大结果：句柄 + 摘要
+                        summary = handle.get("summary")
+                        if summary:
+                            summary_text = json.dumps(
+                                summary, ensure_ascii=False, default=str
+                            )
+                        else:
+                            summary_text = "（摘要不可用，请用 read_tool_result 读取）"
+
+                        tool_execution_context.append(
+                            f"【工具 {tool_call.tool_name} 返回（{tag}）】{err_note}\n"
+                            f"⚠️ 完整结果过大（约 {handle.get('estimated_tokens')} tokens），"
+                            f"已卸载到磁盘。\n"
+                            f"result_id: `{handle.get('result_id')}`\n"
+                            f"handle: `{handle.get('handle_path')}`\n"
+                            f"如需完整内容，调用 `read_tool_result` 工具，"
+                            f"参数 result_id=`{handle.get('result_id')}`、task_id=`{task_id}`，"
+                            f"可指定 filename 和 start_index 分页读取。\n\n"
+                            f"## 摘要（每个文档采样 {len((summary or {}).get('files', []))} 个文档）\n"
+                            f"{summary_text}"
+                        )
                 except Exception:
                     logger.exception("累积工具结果失败")
 
@@ -1574,6 +1702,20 @@ class AgentTaskService:
             except Exception:
                 logger.exception("end_mem0_task failed")
 
+            # 若任务尚未进入终态（done/failed/waiting），标记为 cancelled。
+            # 覆盖"客户端断开导致生成器被取消"的场景，避免僵尸 running。
+            try:
+                memory = self._session_provider()
+                task = memory.get_task(task_id) if hasattr(memory, "get_task") else None
+                if task and task.get("status") in {"running", "pending", None}:
+                    self._persist_task_status(task_id, "cancelled")
+                    logger.info(
+                        "[dsh][task_service] task %s marked cancelled (stream ended)",
+                        task_id,
+                    )
+            except Exception:
+                logger.exception("标记任务 cancelled 失败: %s", task_id)
+
     async def stream_approval(
         self,
         task_id: str,
@@ -1617,6 +1759,9 @@ class AgentTaskService:
         tool_call = pending.tool_call
         step_id = pending.step_id
         label = f"执行工具：{tool_call.tool_name}"
+
+        # 审批路径独立，需自己维护 accumulated_resources
+        accumulated_resources: List[Dict[str, Any]] = []
 
         yield self._emit_step(
             task_id,
@@ -1676,15 +1821,19 @@ class AgentTaskService:
                 session_id=pending.session_id,
             )
             if found:
-                accumulated_resources.extend(found)
+                # 跨多次工具调用去重（同一 rid 只保留一次）
+                existing_ids = {r.get("id") for r in accumulated_resources if r.get("id")}
+                new_items = [r for r in found if r.get("id") and r["id"] not in existing_ids]
+                if new_items:
+                    accumulated_resources.extend(new_items)
                 yield self._emit_step(
                     task_id,
                     self._step(
                         f"{task_id}:{step_id}:resources",
-                        f"工具产生 {len(found)} 个资源",
+                        f"工具产生 {len(new_items)} 个新资源",
                         "done",
                         "resource",
-                        resources=found,
+                        resources=new_items,
                     ),
                 )
         except Exception:
@@ -1694,27 +1843,18 @@ class AgentTaskService:
         if isinstance(getattr(result, "result", None), dict):
             result.result = self._strip_bytes(result.result)
 
+        # 审批路径没有 orchestrator event；log 已是 format_tool_result 的结果，
+        # 已包含 structuredContent / content / 错误原文，不再追加 result.result。
         log_parts: List[str] = []
-        # 审批路径没有 orchestrator event；log 已是 format_tool_result 的结果
         if log:
             log_parts.append(str(log))
 
-        result_payload = getattr(result, "result", None)
-        if result_payload is not None:
-            try:
-                if isinstance(result_payload, (dict, list, tuple)):
-                    payload_text = json.dumps(
-                        result_payload, ensure_ascii=False, indent=2
-                    )
-                else:
-                    payload_text = str(result_payload)
-                if len(payload_text) > 4000:
-                    payload_text = payload_text[:4000] + "\n… (truncated)"
-                log_parts.append("【原始返回】\n" + payload_text)
-            except Exception:
-                logger.exception("拼接工具原始返回失败")
         if not result.success and getattr(result, "error", None):
-            log_parts.append(f"【错误】{result.error}")
+            err_text = f"【错误】{result.error}"
+            head = log_parts[0] if log_parts else ""
+            if err_text not in head and str(result.error) not in head:
+                log_parts.append(err_text)
+
         combined_log = "\n\n".join(log_parts) if log_parts else None
 
         yield self._emit_step(

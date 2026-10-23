@@ -68,8 +68,8 @@ class ModelScopeLLM:
             model=self.model,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
-            api_key=YUNDU_API_KEY,
-            base_url=YUNDU_BASE_URL,
+            api_key=SILICONFLOW_API_KEY,
+            base_url=SILICONFLOW_BASE_URL,
         )
 
     def generate(self, messages: List[Dict[str, str]], mode: str = 'quick') -> str:

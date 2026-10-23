@@ -21,7 +21,8 @@ class LocalModelConfig:
     model_name: str
     model_path: Optional[str] = None
     device: str = "cpu"
-    max_tokens: int = 2048
+    max_tokens: int = 2048          # 输出上限（max_new_tokens）
+    max_input_tokens: int = 3072    # 输入上限（truncation max_length）
     temperature: float = 0.7
     use_modelscope: bool = True  # 是否使用ModelScope加载
 
@@ -126,15 +127,20 @@ class LocalModelService:
             # 构建prompt
             prompt = self._build_prompt(messages)
             
-            # 生成回复
-            inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
-            
+            # 生成回复（输入截断，避免长 prompt OOM）
+            inputs = self.tokenizer(
+                prompt,
+                return_tensors="pt",
+                truncation=True,
+                max_length=self.config.max_input_tokens,
+            ).to(self.model.device)
+
             outputs = self.model.generate(
                 **inputs,
                 max_new_tokens=self.config.max_tokens,
                 temperature=self.config.temperature,
                 do_sample=True,
-                pad_token_id=self.tokenizer.eos_token_id
+                pad_token_id=self.tokenizer.eos_token_id,
             )
             
             response = self.tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
@@ -145,55 +151,70 @@ class LocalModelService:
             raise
     
     def stream_generate(self, messages: List[Dict[str, str]]) -> Generator[str, None, None]:
-        """流式生成回复"""
+        """流式生成回复（TextIteratorStreamer 真流式，首 token 即出）"""
         if not self._is_loaded or not self.model or not self.tokenizer:
             raise RuntimeError("模型未加载，请先调用load_model()")
-        
+
         try:
+            from transformers import TextIteratorStreamer
+            from threading import Thread
+
             prompt = self._build_prompt(messages)
-            
-            inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
-            
-            # 注意：这是简化版本，实际的流式生成需要更复杂的实现
-            # 这里先使用同步生成，然后逐字输出
-            outputs = self.model.generate(
+
+            inputs = self.tokenizer(
+                prompt,
+                return_tensors="pt",
+                truncation=True,
+                max_length=self.config.max_input_tokens,
+            ).to(self.model.device)
+
+            streamer = TextIteratorStreamer(
+                self.tokenizer,
+                skip_prompt=True,
+                skip_special_tokens=True,
+            )
+
+            gen_kwargs = dict(
                 **inputs,
                 max_new_tokens=self.config.max_tokens,
                 temperature=self.config.temperature,
                 do_sample=True,
-                pad_token_id=self.tokenizer.eos_token_id
+                pad_token_id=self.tokenizer.eos_token_id,
+                streamer=streamer,
             )
-            
-            response = self.tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
-            
-            # 模拟流式输出
-            for char in response:
-                yield f"data: {json.dumps({'text': char}, ensure_ascii=False)}\n\n"
-            
+
+            thread = Thread(target=self.model.generate, kwargs=gen_kwargs, daemon=True)
+            thread.start()
+
+            for text in streamer:
+                if text:
+                    yield f"data: {json.dumps({'text': text}, ensure_ascii=False)}\n\n"
+
+            thread.join(timeout=5)
             yield "data: [DONE]\n\n"
-            
+
         except Exception as e:
-            print(f"流式生成失败: {str(e)}")
-            yield f"data: {json.dumps({'text': f'生成失败: {str(e)}', 'error': True}, ensure_ascii=False)}\n\n"
+            print(f"流式生成失败: {type(e).__name__}: {e}")
+            yield f"data: {json.dumps({'text': f'生成失败: {e}', 'error': True}, ensure_ascii=False)}\n\n"
             yield "data: [DONE]\n\n"
     
     def _build_prompt(self, messages: List[Dict[str, str]]) -> str:
-        """构建prompt"""
+        """构建 prompt：优先用 tokenizer 的 chat template，否则退化到手工拼接。"""
+        if self.tokenizer is not None and getattr(self.tokenizer, "chat_template", None):
+            return self.tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
         prompt_parts = []
-        
         for msg in messages:
             role = msg.get("role", "user")
             content = msg.get("content", "")
-            
             if role == "system":
                 prompt_parts.append(f"系统: {content}")
             elif role == "user":
                 prompt_parts.append(f"用户: {content}")
             elif role == "assistant":
                 prompt_parts.append(f"助手: {content}")
-        
         prompt_parts.append("助手: ")
-        
         return "\n\n".join(prompt_parts)
     
     @property

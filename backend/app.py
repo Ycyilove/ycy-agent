@@ -21,7 +21,10 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
-from typing import Any, Optional
+from typing import Any, Optional, Set
+
+from infra.offline import configure_hf_env
+configure_hf_env()
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -122,7 +125,9 @@ tool_shortlister = None
 local_rag_service = None
 llm_instance = None
 multimodal_client = None
-
+# ── capability index 重建锁 + task（串行化，避免并发写坏 records.json） ──
+_capability_index_lock: Optional[asyncio.Lock] = None
+_capability_index_task: Optional[asyncio.Task] = None
 
 # ─────────────────────────────────────────────────────────────
 # lifespan
@@ -139,10 +144,13 @@ async def app_lifespan(_app: FastAPI):
     except Exception:
         logger.exception("Langfuse 初始化失败")
 
-    # ── Mem0 初始化（后台异步，不阻塞启动） ──
-    # Mem0 加载 embedding 模型需要 30-60 秒，放后台避免阻塞服务启动。
-    # 加载完成前，memory_layer 的所有操作是 no-op。
+    # ── Mem0 初始化（后台异步，不阻塞启动；可用 MEM0_ENABLED=0 关闭） ──
+    # 关键：先让 RAG / 短列表的 SentenceTransformer 完成首次加载，
+    # mem0 的 embedder 再初始化时命中进程内 HF cache，避免并发联网校验。
     async def _init_mem0_background():
+        if os.getenv("MEM0_ENABLED", "1") == "0":
+            logger.info("[boot] mem0 disabled by MEM0_ENABLED=0")
+            return
         try:
             logger.info("[boot] initializing mem0 in background...")
             await asyncio.to_thread(init_mem0)
@@ -150,7 +158,24 @@ async def app_lifespan(_app: FastAPI):
         except Exception:
             logger.exception("Mem0 初始化失败")
 
-    asyncio.create_task(_init_mem0_background())
+    async def _warmup_embeddings_then_mem0():
+        # 1) 先同步预热 RAG embedding（触发本地加载，写进程内 cache）
+        try:
+            rag = get_local_rag_service()
+            vec_store = rag.vector_store  # LocalRAGService.__init__ 里已确认此属性名
+            if vec_store is not None:
+                await asyncio.to_thread(
+                    lambda: vec_store._generate_embeddings(["warmup"])
+                )
+                logger.info("[boot] RAG embedding warmed up")
+            else:
+                logger.warning("[boot] RAG vector_store is None, skip warmup")
+        except Exception:
+            logger.exception("[boot] RAG embedding warmup failed (non-fatal)")
+        # 2) 再起 mem0 后台线程
+        await _init_mem0_background()
+
+    asyncio.create_task(_warmup_embeddings_then_mem0())
 
     # ── 清理过期的 agent 资源 ──
     try:
@@ -179,6 +204,20 @@ async def app_lifespan(_app: FastAPI):
 
     # 启动连接（走 proxy → worker）
     if configs:
+        # stdio 命令预检：命令不存在直接跳过，不浪费 3 次重试
+        from backend.routes.mcp import _resolve_command
+        filtered = []
+        for c in configs:
+            if c.transport == "stdio":
+                if _resolve_command(c.command) is None:
+                    logger.warning(
+                        "[boot] skip MCP %s: command not found (%s)",
+                        c.name, c.command,
+                    )
+                    continue
+            filtered.append(c)
+        # 用过滤后的 configs 重建 manager（或直接跳过失败项）
+        # 简化：只对 filtered 里的 server 调 start
         try:
             await proxy.start(
                 agent.register_dynamic_tool,
@@ -227,9 +266,25 @@ async def app_lifespan(_app: FastAPI):
 
     asyncio.create_task(_warmup_shortlister())
 
+    mcp_worker = worker
+    mcp_client_manager = proxy
+
+    # ── 后台建意图索引（只覆盖已连接 server，不联网） ──
+    schedule_capability_index_rebuild(reason="lifespan_start")
+    
     try:
         yield
     finally:
+        # 取消未完成的索引重建 task，避免退出时挂起
+        if _capability_index_task is not None and not _capability_index_task.done():
+            try:
+                _capability_index_task.cancel()
+                await asyncio.wait_for(_capability_index_task, timeout=2.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+            except Exception:
+                logger.exception("取消 capability index task 失败")
+
         try:
             if worker is not None:
                 await worker.stop()
@@ -338,6 +393,87 @@ def get_multimodal_client():
         multimodal_client = MultimodalService()
     return multimodal_client
 
+# ─────────────────────────────────────────────────────────────
+# capability index 重建
+# ─────────────────────────────────────────────────────────────
+
+def _get_capability_index_lock() -> asyncio.Lock:
+    global _capability_index_lock
+    if _capability_index_lock is None:
+        _capability_index_lock = asyncio.Lock()
+    return _capability_index_lock
+
+
+async def rebuild_capability_index(
+    reason: str = "manual",
+    servers: Optional[Set[str]] = None,
+) -> None:
+    """重建 MCP 意图索引。
+
+    - servers=None：全量重建（首次启动 / 手动）
+    - servers={...}：增量（只处理指定 server）
+    """
+    if mcp_client_manager is None:
+        logger.debug(
+            "[boot] rebuild_capability_index skipped (reason=%s): "
+            "manager not ready",
+            reason,
+        )
+        return
+
+    lock = _get_capability_index_lock()
+    async with lock:
+        try:
+            from scripts.build_capability_index import (
+                build_full, build_incremental,
+            )
+            if servers:
+                await build_incremental(
+                    mcp_client_manager, get_llm(), servers,
+                )
+            else:
+                await build_full(mcp_client_manager, get_llm())
+            logger.info(
+                "[boot] capability index rebuilt (reason=%s, servers=%r)",
+                reason, servers,
+            )
+        except Exception:
+            logger.exception(
+                "[boot] capability index rebuild failed (reason=%s)", reason,
+            )
+
+def schedule_capability_index_rebuild(
+    reason: str = "manual",
+    servers: Optional[Set[str]] = None,
+) -> None:
+    """后台调度一次重建。servers=None 全量，否则增量。"""
+    global _capability_index_task
+    if mcp_client_manager is None:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        logger.debug(
+            "[boot] schedule_capability_index_rebuild: no running loop "
+            "(reason=%s)",
+            reason,
+        )
+        return
+
+    prev_task = _capability_index_task
+
+    async def _run(prev: Optional[asyncio.Task]):
+        if prev is not None and not prev.done():
+            try:
+                await prev
+            except Exception:
+                pass
+        await rebuild_capability_index(reason=reason, servers=servers)
+
+    _capability_index_task = loop.create_task(
+        _run(prev_task), name=f"capability-index-rebuild-{reason}",
+    )
+    
 # ─────────────────────────────────────────────────────────────
 # knowledge_tools RAG provider
 # ─────────────────────────────────────────────────────────────

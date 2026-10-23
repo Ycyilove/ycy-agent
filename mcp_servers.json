@@ -30,6 +30,9 @@
         "-y",
         "tavily-mcp@latest"
       ],
+      "env_from": {
+        "TAVILY_API_KEY": "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"
+      },
       "connect_timeout": 15,
       "call_timeout": 30,
       "retries": 2

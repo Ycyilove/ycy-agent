@@ -7,6 +7,8 @@ const STATUS = {
   idle: { dot: 'bg-[var(--dim)]' },
   running: { dot: 'bg-[var(--accent)] animate-pulse' },
   waiting: { dot: 'bg-[var(--warning)]' },
+  interrupted: { dot: 'bg-[var(--warning)]' },
+  cancelled: { dot: 'bg-[var(--dim)]' },
   done: { dot: 'bg-[var(--success)]' },
   failed: { dot: 'bg-[var(--danger)]' },
 };
@@ -24,7 +26,12 @@ export default function TaskList() {
     (t) => t.status === 'running' || t.status === 'waiting'
   );
   const finished = tasks.filter(
-    (t) => t.status === 'done' || t.status === 'failed' || t.status === 'idle'
+    (t) =>
+      t.status === 'done' ||
+      t.status === 'failed' ||
+      t.status === 'idle' ||
+      t.status === 'interrupted' ||
+      t.status === 'cancelled'
   );
 
   const createTask = () => {

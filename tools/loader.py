@@ -52,6 +52,7 @@ from .tools_def.mysql import (
     mysql_count
 )
 from .tools_def import knowledge as knowledge_tools  # noqa: F401
+from .tools_def.tool_result_reader import read_tool_result  # noqa: F401
 from . import mcp_discovery  # noqa: F401
 
 
@@ -89,6 +90,7 @@ __all__ = [
     'parse_html',
     'fetch_json',
     'fetch_url',
+    'read_tool_result',
     'mysql_connect',
     'mysql_query',
     'mysql_execute',

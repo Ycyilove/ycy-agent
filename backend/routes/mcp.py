@@ -223,6 +223,23 @@ def create_mcp_router(
 ) -> APIRouter:
     router = APIRouter()
 
+    def _schedule_index_rebuild(
+        reason: str,
+        servers: Optional[Set[str]] = None,
+    ) -> None:
+        """触发 capability index 后台重建。
+
+        servers=None 全量，否则只处理指定 server（增量）。
+        失败不影响请求。
+        """
+        try:
+            from backend.app import schedule_capability_index_rebuild
+            schedule_capability_index_rebuild(reason=reason, servers=servers)
+        except Exception:
+            logger.exception(
+                "[dsh][mcp] schedule index rebuild failed (reason=%s)", reason,
+            )
+
     @router.get("/api/mcp/status")
     async def mcp_status():
         manager = mcp_manager_provider()
@@ -274,6 +291,7 @@ def create_mcp_router(
         except Exception:
             logger.exception("持久化 MCP 配置失败: %s", name)
 
+        _schedule_index_rebuild(f"add_server:{name}", servers={name})
         return {"status": "success", "name": name, "saved": True}
 
     # ── 通用配置导入（新增） ──
@@ -366,6 +384,7 @@ def create_mcp_router(
             manager.statuses.setdefault(name, {}).update(
                 {"status": "disabled", "enabled": False}
             )
+            # disabled 状态：工具未注册，不触发重建
             return {
                 "status": "success",
                 "name": name,
@@ -378,6 +397,7 @@ def create_mcp_router(
             await _connect_and_discover(manager, agent, name)
         except Exception as exc:
             logger.exception("连接 MCP 失败: %s", name)
+            # 连接失败：工具未注册，不触发重建
             return {
                 "status": "partial",
                 "name": name,
@@ -386,6 +406,8 @@ def create_mcp_router(
                 "message": f"已保存配置，但连接失败: {exc}",
             }
 
+        # 连接成功：增量重建该 server
+        _schedule_index_rebuild(f"add_config:{name}", servers={name})
         return {
             "status": "success",
             "name": name,
@@ -418,6 +440,8 @@ def create_mcp_router(
         except Exception:
             logger.exception("删除 MCP 配置失败: %s", name)
 
+        # 删除：增量重建会移除该 server 的旧记录
+        _schedule_index_rebuild(f"remove:{name}", servers={name})
         return {"status": "success", "removed": True}
 
     # ── 启用/禁用 ──
@@ -451,6 +475,8 @@ def create_mcp_router(
                 set_server_enabled(name, False)
             except Exception:
                 logger.exception("写入 enabled=false 失败: %s", name)
+            # 禁用：工具已反注册，增量重建移除旧记录
+            _schedule_index_rebuild(f"toggle_off:{name}", servers={name})
             return {"status": "success", "name": name, "enabled": False}
 
         manager.statuses[name].update({"status": "configured", "enabled": True})
@@ -466,6 +492,8 @@ def create_mcp_router(
             set_server_enabled(name, True)
         except Exception:
             logger.exception("写入 enabled=true 失败: %s", name)
+        # 启用：工具已重新注册，增量重建
+        _schedule_index_rebuild(f"toggle_on:{name}", servers={name})
         return {"status": "success", "name": name, "enabled": True}
 
     # ── 重载 ──
@@ -529,6 +557,12 @@ def create_mcp_router(
             "[dsh][mcp] reload: added=%r removed=%r changed=%r",
             sorted(added), sorted(removed), sorted(changed),
         )
+
+        # 增量重建：added/changed 会重新合成，removed 会删旧记录
+        affected = added | removed | changed
+        if affected:
+            _schedule_index_rebuild("reload", servers=affected)
+
         return {
             "status": "success",
             "added": sorted(added),

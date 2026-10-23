@@ -13,6 +13,8 @@ import logging
 import threading
 from typing import Any, Dict, Optional
 
+from infra.embedding import get_encoder
+
 logger = logging.getLogger(__name__)
 
 
@@ -24,7 +26,7 @@ class ToolShortlister:
 
     def __init__(
         self,
-        model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
+        model_name: str = "BAAI/bge-small-zh-v1.5",
         top_k: int = 15,
         min_score: float = 0.10,
         min_keep: int = 3,
@@ -50,14 +52,12 @@ class ToolShortlister:
                 return True
             if self._model is None:
                 try:
-                    from langchain_huggingface import HuggingFaceEmbeddings
-                    self._model = HuggingFaceEmbeddings(
-                        model_name=self._model_name,
-                        model_kwargs={"device": "cpu"},
-                        encode_kwargs={"normalize_embeddings": True},
+                    self._model = get_encoder(
+                        self._model_name, local_files_only=True
                     )
                     logger.info(
-                        "[dsh][shortlist] model loaded: %s", self._model_name
+                        "[dsh][shortlist] model loaded: %s (via infra.embedding)",
+                        self._model_name,
                     )
                 except Exception:
                     logger.exception(
@@ -97,7 +97,13 @@ class ToolShortlister:
                 names.append(name)
 
             try:
-                vectors = self._model.embed_documents(texts)
+                # get_encoder 返回 SentenceTransformer，用 encode 替代 HuggingFaceEmbeddings
+                vectors = self._model.encode(
+                    texts,
+                    normalize_embeddings=True,
+                    show_progress_bar=False,
+                )
+                vectors = [v.tolist() for v in vectors]   # 统一成 list，下游 dot 兼容
             except Exception:
                 logger.exception("[dsh][shortlist] embed_documents failed")
                 return False
@@ -122,11 +128,15 @@ class ToolShortlister:
             return None
 
         try:
-            goal_vec = self._model.embed_query(goal)
+            goal_vec = self._model.encode(
+                [goal],
+                normalize_embeddings=True,
+                show_progress_bar=False,
+            )[0].tolist()
         except Exception:
             logger.exception("[dsh][shortlist] embed_query failed")
             return None
-
+            
         # 余弦相似度（已归一化，点积即可）
         scores = []
         for name, vec in self._tool_vectors.items():

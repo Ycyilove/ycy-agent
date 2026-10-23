@@ -27,15 +27,24 @@ _NON_IDEMPOTENT_TOOL_KEYWORDS = (
     "mkdir", "append", "overwrite",
 )
 
+# "pure"：任意重复无害，不拦截（轻量、确定性的查询）
+# 注意：不要把 search / query / fetch 放这里——它们贵且可能返回大结果，
+# 连续同参数重复应被 "conditional" 拦截。
 _PURE_IDEMPOTENT_TOOL_KEYWORDS = (
-    "get", "list", "read", "calculate", "compute", "count",
+    "get", "list", "calculate", "compute", "count",
     "check", "describe", "info", "status", "view", "show",
-    # 新增：查询类
-    "stats", "statistics", "search", "find", "query", "fetch",
+    "stats", "statistics",
 )
 
+# "conditional"：相邻相同参数可跳过（跨步不拦）
+# 检索/读取类放这里：search_knowledge 连续同 query 会被拦，
+# 但"先搜 A 再搜 B 再搜 A"仍允许。
 _CONDITIONAL_IDEMPOTENT_TOOL_KEYWORDS = (
     "preview", "scan", "poll", "watch",
+    # 检索/读取：贵、可能返回大结果、同参数重复无意义
+    "search", "find", "query", "fetch",
+    "read", "analyze",
+    "list_knowledge", "knowledge_stats",  # 显式子串，防止被 "get" 等误吞
 )
 
 

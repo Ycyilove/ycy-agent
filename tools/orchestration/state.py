@@ -44,6 +44,9 @@ class OrchestratorState:
     # 最近一次结果评估是否通过（供 _validate_done 使用）
     last_assessment_passed: bool = True
 
+    failed_capabilities: set = field(default_factory=set)
+    discovery_count: int = 0
+    
     def add_history(self, entry: str) -> None:
         self.history.append(entry)
 

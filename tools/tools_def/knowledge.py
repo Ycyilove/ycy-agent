@@ -179,8 +179,18 @@ def get_knowledge_resource(resource_id: str) -> Dict[str, Any]:
         "检索本地知识库（用户导入的 PDF / TXT / DOCX 文档）。"
         "**当用户询问文档内容、事实性问题，或任何可能已导入的知识时，优先使用这个工具**。"
         "不要用 search_content 代替——那只搜文件系统，搜不到知识库。"
-        "返回相关文本片段和关联资源（图片/附件）。"
-        "mode='record' 时优先按表格/列表记录检索，适合'某人属于某团队'这类关联问题。"
+        "返回相关文本片段和关联资源（图片/附件）。\n\n"
+        "**mode 选择规则（重要）**：\n"
+        "- `auto`（默认）：大多数情况用这个。\n"
+        "- `flat`：问「文档讲了什么」「某段内容」这类内容综述问题时用，"
+        "会返回段落级 chunk，覆盖多个文档。\n"
+        "- `record`：**仅当**问「某人属于某团队」「某表格某行的值」这类结构化关联问题时用。"
+        "record 只返回表格行，会漏掉段落内容。\n\n"
+        "**不要对「文档讲了什么」这类问题用 record**——record 只会返回表格，"
+        "且容易集中在一个文档，漏掉其他文档的正文。\n\n"
+        "**大结果处理**：如果返回结果过大（> 4000 tokens），系统会把它卸载到磁盘，"
+        "返回里会带 `result_id` 和 `handle`。此时可用 `read_tool_result` 工具"
+        "按 filename / start_index 分页读取完整 chunk，不要因为摘要里没有完整内容就认为工具失败。"
     ),
     parameters={
         "query": {"type": "str", "description": "Natural language search query"},

@@ -151,6 +151,15 @@ class SessionMemory:
                 """)
 
                 conn.commit()
+                
+                # 启动时把上次进程遗留的 running/waiting 任务标为 interrupted，
+                # 避免前端重载后看到永远"运行中"的僵尸任务。
+                cursor.execute(
+                    "UPDATE tasks SET status = 'interrupted', updated_at = ? "
+                    "WHERE status IN ('running', 'waiting')",
+                    (datetime.now().isoformat(),)
+                )
+                conn.commit()
 
     # ────────── 会话 ──────────
 

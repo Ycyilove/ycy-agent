@@ -26,9 +26,12 @@ import asyncio
 import logging
 import os
 import re
+import threading
+import time
 from typing import Any, Dict, List, Optional
 
 from backend.config import MEM0_ENABLED, MEM0_API_KEY, MEM0_CONFIG
+from infra.embedding import resolve_local_model_dir
 
 from infra.debug_log.mem0 import (
     begin_task,
@@ -44,20 +47,23 @@ _memory: Optional[Any] = None
 _enabled: bool = False
 
 # ── 初始化完成事件 ──
-# 在 init_mem0() 里 set；wait_until_ready() 里 wait。
-# 懒创建，避免模块 import 时就要求 event loop。
-_ready_event: Optional[asyncio.Event] = None
-_init_lock: Optional[asyncio.Lock] = None
+# init_mem0() 跑在线程池（asyncio.to_thread），必须用 threading.Event
+# 才能跨线程 set；主 loop 侧用 asyncio.to_thread(ev.wait, timeout) 等待。
+import threading
+
+_ready_event: Optional[threading.Event] = None
+_ready_event_lock = threading.Lock()
+_init_started_at: Optional[float] = None
+_init_error: Optional[BaseException] = None
 
 
-def _get_ready_event() -> asyncio.Event:
-    """懒创建 ready event。
-
-    必须在有 running event loop 时调用（首次）。
-    """
+def _get_ready_event() -> threading.Event:
+    """懒创建线程安全的 ready event（模块级单例）。"""
     global _ready_event
     if _ready_event is None:
-        _ready_event = asyncio.Event()
+        with _ready_event_lock:
+            if _ready_event is None:
+                _ready_event = threading.Event()
     return _ready_event
 
 
@@ -158,6 +164,18 @@ def _dedup(paths: List[str]) -> List[str]:
 # 初始化
 # ─────────────────────────────────────────────────────────────
 
+def _resolve_local_snapshot(models_dir: str, model_name: str) -> Optional[str]:
+    import glob
+    hf_dir = os.path.join(models_dir, f"models--{model_name.replace('/', '--')}")
+    if not os.path.isdir(hf_dir):
+        return None
+    snaps = sorted(glob.glob(os.path.join(hf_dir, "snapshots", "*")),
+                   key=os.path.getmtime, reverse=True)
+    for s in snaps:
+        if os.path.isfile(os.path.join(s, "config.json")):
+            return s
+    return None
+    
 def _build_config() -> Dict[str, Any]:
     """构造 Mem0 config。
 
@@ -166,6 +184,8 @@ def _build_config() -> Dict[str, Any]:
     project_root = os.path.dirname(
         os.path.dirname(os.path.dirname(__file__))
     )
+    _mini_name = "sentence-transformers/all-MiniLM-L6-v2"
+    _local_snap = resolve_local_model_dir(_mini_name) or _mini_name
     hf_cache = os.path.join(project_root, "models")
     qdrant_path = os.path.join(project_root, "data", "mem0_qdrant")
 
@@ -181,8 +201,8 @@ def _build_config() -> Dict[str, Any]:
         "embedder": {
             "provider": "huggingface",
             "config": {
-                "model": "sentence-transformers/all-MiniLM-L6-v2",
-                "embedding_dims": 384,          # ← 也加上
+                "model": _local_snap,
+                "embedding_dims": 384,
                 "model_kwargs": {
                     "device": "cpu",
                     "cache_folder": hf_cache,
@@ -201,25 +221,40 @@ def _build_config() -> Dict[str, Any]:
 
 
 def init_mem0() -> bool:
-    """启动时调用。未启用 / 依赖缺失时静默返回 False。
+    """启动时调用（在线程池里跑）。未启用 / 依赖缺失时静默返回 False。
 
     无论成功失败，都会 set ready event，让 wait_until_ready() 不再阻塞。
     """
-    global _memory, _enabled
+    global _memory, _enabled, _init_started_at, _init_error
+
+    _init_started_at = time.time()
+
+    def _finish(ok: bool) -> bool:
+        _get_ready_event().set()
+        elapsed = time.time() - (_init_started_at or time.time())
+        if ok:
+            logger.info("[mem0] init done in %.1fs (enabled=True)", elapsed)
+        else:
+            logger.info("[mem0] init done in %.1fs (enabled=False)", elapsed)
+        return ok
 
     if not MEM0_ENABLED:
         logger.info("[mem0] MEM0_ENABLED=false，结构化记忆关闭")
         _enabled = False
-        _get_ready_event().set()
-        return False
+        return _finish(False)
 
     try:
         from mem0 import Memory  # noqa: F401
     except ImportError:
         logger.info("[mem0] 未安装 mem0ai，结构化记忆关闭")
         _enabled = False
-        _get_ready_event().set()
-        return False
+        return _finish(False)
+
+    # ── 关键：Mem0 的 embedder 走 HF，先强制离线，避免联网校验卡 30s+ ──
+    _offline_keys = ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")
+    _backup = {k: os.environ.get(k) for k in _offline_keys}
+    for k in _offline_keys:
+        os.environ[k] = "1"
 
     try:
         config = _build_config()
@@ -227,32 +262,41 @@ def init_mem0() -> bool:
         _memory = Memory.from_config(config)
         _enabled = True
         logger.info("[mem0] 已启用 (backend=local, embed=hf, store=qdrant)")
-        return True
-    except Exception:
+        return _finish(True)
+    except Exception as exc:
+        _init_error = exc
         logger.exception("[mem0] 初始化失败，结构化记忆关闭")
         _memory = None
         _enabled = False
-        return False
+        return _finish(False)
     finally:
-        _get_ready_event().set()
+        for k, v in _backup.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
-async def wait_until_ready(timeout: float = 30.0) -> bool:
+async def wait_until_ready(timeout: float = 60.0) -> bool:
     """等 mem0 初始化完成。返回是否 enabled。
 
     - 已 ready → 立即返回
-    - 未 ready → 最多等 timeout 秒
+    - 未 ready → 最多等 timeout 秒（默认从 30 提到 60，给首次 Qdrant 建库留余量）
     - 超时 → 返回 False，不抛异常
     """
     ev = _get_ready_event()
     if ev.is_set():
         return _enabled
-    try:
-        await asyncio.wait_for(ev.wait(), timeout=timeout)
-    except asyncio.TimeoutError:
+
+    start = time.time()
+    # threading.Event.wait 是阻塞的，用 to_thread 包，不阻塞主 loop
+    ok = await asyncio.to_thread(ev.wait, timeout)
+    if not ok:
+        elapsed = time.time() - (_init_started_at or start)
+        err = f"，init_error={_init_error!r}" if _init_error else ""
         logger.warning(
-            "[mem0] wait_until_ready 超时 (%.1fs)，本任务将无 mem0",
-            timeout,
+            "[mem0] wait_until_ready 超时 (%.1fs)，后台已运行 %.1fs%s，本任务将无 mem0",
+            timeout, elapsed, err,
         )
         return False
     return _enabled

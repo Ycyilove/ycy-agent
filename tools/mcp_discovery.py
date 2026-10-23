@@ -141,6 +141,47 @@ def _expand_keywords(keywords: List[str]) -> List[str]:
 
     return expanded[:8]
 
+# ── 自动关键词生成（capability 为空时的兜底） ──
+
+_AUTO_KW_PROMPT = """把用户问题转换成 2~4 个英文搜索关键词，用于 MCP Registry 搜索。
+
+规则：
+- 只输出英文关键词，逗号分隔
+- 用 MCP 作者会在包名里用的通用词根，不要逐字翻译
+- 从最具体到最宽泛排序
+- 只输出关键词，不要解释
+
+用户问题：{query}
+
+关键词："""
+
+
+def _auto_generate_keywords(user_query: str) -> List[str]:
+    """用 LLM 把 user_query 转成英文关键词。失败返回空列表。"""
+    if _llm_provider is None:
+        return []
+    try:
+        raw = _llm_provider().generate(
+            [{"role": "user", "content": _AUTO_KW_PROMPT.format(query=user_query)}],
+            mode="quick",
+        )
+        raw = (raw or "").strip().strip("`").strip()
+        if "\n" in raw:
+            raw = raw.split("\n")[0].strip()
+        tokens = [
+            t.strip().lower()
+            for t in raw.replace("，", ",").split(",")
+            if t.strip()
+        ]
+        # 只保留 ASCII token（Registry 只接受英文）
+        tokens = [
+            t for t in tokens
+            if all(c.isascii() for c in t) and len(t) >= 2
+        ]
+        return tokens[:4]
+    except Exception:
+        logger.exception("[dsh][discovery] auto keyword generation failed")
+        return []
 
 def _score_candidate(
     candidate: Dict[str, Any],
@@ -306,7 +347,7 @@ async def _rank_candidates(
         "**优先级 3：功能匹配。**\n\n"
         "**优先级 4：无需认证优先。**\n\n"
         "只返回最相关的那一个服务器的序号（纯数字）。\n"
-        "如果**所有候选的领域都和用户需求不符**，返回 0。"
+        "如果所有候选**领域不符或都需要认证**，返回 0"
     )
 
     try:
@@ -362,49 +403,41 @@ def _format_tools_for_message(tools: List[str]) -> str:
         "capability, connect to it, and return the tools it exposes. "
         "Use this when the user needs external data or actions you cannot do "
         "with existing tools.\n\n"
-        "**The capability parameter MUST contain only English keywords**, "
-        "separated by commas, ordered from most specific to most general. "
-        "Use **generic word roots** that MCP authors would put in package "
-        "names — not literal translations of the user's wording. "
-        "The system will try each keyword in order until it finds results. "
-        "**NEVER pass Chinese text.**\n\n"
-        "**Key rules for keyword choice (CRITICAL)**:\n"
-        "- Use **common English words** that MCP server authors would actually "
-        "use in their package names. Do NOT translate the user's wording "
-        "literally word-by-word.\n"
-        "- Start with **generic roots**, then optionally add **qualifiers**.\n"
-        "- Example of the pattern (not a domain hint): "
-        "'<generic-root>-<qualifier>,<generic-root>'.\n\n"
+        "**CRITICAL — `user_query` is REQUIRED and must be the user's "
+        "ORIGINAL wording in their own language (Chinese is fine), "
+        "verbatim, not translated, not summarized.** "
+        "The local intent index matches against `user_query` first; "
+        "if it is missing or paraphrased, discovery degrades badly.\n\n"
+        "**`capability` is a FALLBACK**: only used when the local intent "
+        "index has no hit. Must be English keywords, comma-separated, "
+        "ordered from most specific to most general. Use generic word roots "
+        "that MCP authors put in package names — not literal translations. "
+        "**NEVER pass Chinese in `capability`.**\n\n"
         "**IMPORTANT: Each call picks a DIFFERENT candidate.** "
         "Servers already connected in this session are excluded from future "
         "searches. If the currently connected server does NOT match the "
-        "user's needs (wrong geographic coverage, missing features, etc.), "
-        "**call this tool again with a broader keyword** to get a different "
-        "server.\n\n"
-        "**If the call fails**: try again with **different keywords** — "
-        "not the same ones, and not just a slight variation. "
-        "Give it 2-3 attempts with genuinely different keyword sets.\n\n"
-        "**After 3 failed attempts with different keywords**: stop retrying "
-        "this tool. Consider alternative approaches "
-        "(use http_get for known public APIs, or tell the user you couldn't "
-        "find a suitable external service).\n\n"
+        "user's needs, **call this tool again with a broader capability**.\n\n"
         "**After connecting**: read the returned `description` field and "
-        "verify the server is in the **same domain** as the user's request. "
-        "If the description shows a different domain (keyword matched but "
-        "business area unrelated), call this tool again with more specific "
-        "keywords.\n\n"
+        "verify the server is in the **same domain** as the user's request.\n\n"
         "**After this tool returns, use the exact tool names from the "
         "`tools` list. Do NOT construct or guess tool names.**"
     ),
     parameters={
+        "user_query": {
+            "type": "str",
+            "description": (
+                "**必填**。用户的**原始问题原文**，保持用户的语言（中文可以），"
+                "逐字照抄，不要翻译、不要改写、不要总结。"
+                "例：用户说'实时查询维尼斯当前状态以及外界评价'，"
+                "就填'实时查询维尼斯当前状态以及外界评价'。"
+            ),
+        },
         "capability": {
             "type": "str",
             "description": (
-                "能力关键词，**只允许英文**，用逗号分隔多个候选。"
+                "**可选**。英文能力关键词，逗号分隔多个候选。"
+                "只在 user_query 本地索引无命中时作为回退使用。"
                 "**禁止传中文**。"
-                "系统会依次尝试每个关键词。"
-                "**每次调用会排除已连接过的服务器**——"
-                "如果需要换一个服务器，用更宽的关键词再调一次。"
             ),
         },
         "limit": {
@@ -413,33 +446,145 @@ def _format_tools_for_message(tools: List[str]) -> str:
         },
     },
     examples=[
-        "search_and_connect_mcp(capability='search')",
-        "search_and_connect_mcp(capability='filesystem,file')",
+        "search_and_connect_mcp(user_query='实时查询维尼斯当前状态以及外界评价', capability='news,realtime')",
+        "search_and_connect_mcp(user_query='帮我找一下最新的 AI 新闻', capability='news,search')",
     ],
     category="mcp",
     danger_level="safe",
 )
 async def search_and_connect_mcp(
-    capability: str,
+    user_query: str = "",
+    capability: str = "",
     limit: int = 100,
 ) -> Dict[str, Any]:
-    """Search registry, rank, connect, return exposed tools."""
+    """Search local intent index first, then registry, rank, connect."""
     from mcp_client.registry_client import (
         search_configs_multi,
         config_for_entry,
     )
 
+    # ── 0. 本地意图索引优先 ──
+    local_hits: List[Dict[str, Any]] = []
+    if user_query and user_query.strip():
+        try:
+            from .mcp_intent_index import search_intents
+            from tools.intent_frame.normalizer import IntentNormalizer
+            _frame = IntentNormalizer().normalize(user_query.strip())
+            local_hits = search_intents(
+                user_query.strip(), top_k=10, frame=_frame,
+            )
+            logger.info(
+                "[dsh][discovery] intent index hits: %d servers "
+                "(frame domain=%s, action=%s)",
+                len(local_hits), _frame.domain, _frame.action,
+            )
+            logger.info(
+                "[dsh][discovery] intent index hits: %d servers (%r)",
+                len(local_hits),
+                [h["server_name"] for h in local_hits[:3]],
+            )
+        except Exception:
+            logger.exception("[dsh][discovery] intent index search failed")
+
+    manager = _get_manager()
+
+    # ── 1. 本地命中且已配置 → 直接连 ──
+    if local_hits:
+        for hit in local_hits:
+            srv = hit["server_name"]
+            if srv in manager.configs:
+                local_name = srv
+                if local_name in manager.connections:
+                    tools = [
+                        spec.public_name
+                        for spec in manager.tools.values()
+                        if spec.server_name == local_name
+                    ]
+                    return {
+                        "success": True,
+                        "server": srv,
+                        "description": "(local intent index hit)",
+                        "transport": manager.configs[srv].transport,
+                        "url": manager.configs[srv].url,
+                        "tools": tools,
+                        "message": _format_tools_for_message(tools),
+                        "source": "intent_index_already_connected",
+                    }
+                try:
+                    logger.info(
+                        "[dsh][discovery] connecting local-intent server: %s",
+                        srv,
+                    )
+                    await manager.connect(local_name)
+                    await manager.discover(
+                        local_name, _register_tool, _unregister_tool,
+                    )
+                    _mark_tried(srv)
+                    tools = [
+                        spec.public_name
+                        for spec in manager.tools.values()
+                        if spec.server_name == local_name
+                    ]
+                    # 连接成功后异步建意图索引（不阻塞返回）
+                    _schedule_intent_index_refresh()
+                    return {
+                        "success": True,
+                        "server": srv,
+                        "description": "(local intent index hit)",
+                        "transport": manager.configs[srv].transport,
+                        "url": manager.configs[srv].url,
+                        "tools": tools,
+                        "message": _format_tools_for_message(tools),
+                        "source": "intent_index",
+                        "score": hit.get("top_score"),
+                    }
+                except Exception as error:
+                    logger.warning(
+                        "[dsh][discovery] local-intent connect failed: %s: %s",
+                        srv, error,
+                    )
+                    _mark_tried(srv)
+                    continue
+
+        # 本地命中但未配置 → 把 server 名作为关键词去 registry 找
+        extra_keywords = [h["server_name"] for h in local_hits[:3]]
+    else:
+        extra_keywords = []
+
+    # ── 2. 回退到英文关键词 + Registry 搜索 ──
     raw_keywords = [
         kw.strip() for kw in capability.split(",")
         if kw.strip()
-    ]
+    ] if capability else []
+    raw_keywords = extra_keywords + raw_keywords
+
+    # ── 2b. capability 为空时，自动从 user_query 生成英文关键词 ──
+    # 这样 LLM 只传 user_query 也能工作，capability 真正可选。
+    if not raw_keywords and user_query and user_query.strip():
+        auto_kw = _auto_generate_keywords(user_query.strip())
+        if auto_kw:
+            raw_keywords = auto_kw
+            logger.info(
+                "[dsh][discovery] auto-generated keywords from user_query: %r",
+                auto_kw,
+            )
+
     seen = set()
     raw_keywords = [kw for kw in raw_keywords if not (kw in seen or seen.add(kw))]
 
     if not raw_keywords:
-        return {"success": False, "error": "capability 不能为空"}
+        return {
+            "success": False,
+            "error": (
+                f"无法为 {user_query!r} 生成有效的英文关键词。\n"
+                "**下一步建议**：\n"
+                "1. 如果这个需求可以用已连接的工具解决，直接用那些工具，不要再调 discovery。\n"
+                "2. 如果确实需要新服务，用更通用的英文词根作为 capability 重试，"
+                "例如 'news,search' 或 'web,fetch'。\n"
+                "3. 如果连续 3 次失败，告诉用户你找不到合适的外部服务。"
+            ),
+        }
 
-    # 扩展关键词：剥离结构后缀 + 截短多段词
     keywords = _expand_keywords(raw_keywords)
     logger.info(
         "[dsh][discovery] keyword expansion: %r → %r",
@@ -478,19 +623,12 @@ async def search_and_connect_mcp(
     ]
 
     if not fresh_candidates:
-        # 不再自动 reset——那会导致同一个服务器被反复尝试。
-        # 直接返回，让 LLM 换关键词。
-        logger.info(
-            "[dsh][discovery] all %d candidates already tried in this task",
-            len(candidates),
-        )
         return {
             "success": False,
             "error": (
                 f"关键词 {keywords!r} 找到的 {len(candidates)} 个候选"
                 f"都已在本任务中尝试过。"
                 f"**不要再用相同的关键词**——换一组全新的关键词。"
-                f"可以：更宽泛（如更通用的词根）或更具体（加限定词）。"
             ),
             "tried_candidates": [c["registry_name"] for c in candidates],
         }
@@ -500,22 +638,40 @@ async def search_and_connect_mcp(
         len(fresh_candidates), len(candidates) - len(fresh_candidates),
     )
 
-    # 先启发式排序，拿到完整候选列表（不只 top 1）
-    ranked_all = _heuristic_rank(capability, fresh_candidates)
+    ranked_all = _heuristic_rank(
+        user_query or capability, fresh_candidates,
+    )
     if not ranked_all:
+        return {"success": False, "error": "候选列表为空"}
+
+    # ── LLM 领域判断：只连领域匹配的候选 ──
+    chosen_first = await _rank_candidates(
+        user_query or capability, ranked_all,
+    )
+    if chosen_first is None:
+        logger.info(
+            "[dsh][discovery] LLM rejected all %d candidates",
+            len(ranked_all),
+        )
         return {
             "success": False,
-            "error": "候选列表为空",
+            "error": (
+                f"候选 {len(ranked_all)} 个，但 LLM 判断没有一个领域匹配。\n"
+                "**下一步**：换更具体的 capability（如 'sports news'），"
+                "或直接用已连接的工具。"
+            ),
+            "candidates": [c["registry_name"] for c in ranked_all[:10]],
         }
+    # 把 LLM 选的排到最前
+    ranked_all = [chosen_first] + [
+        c for c in ranked_all if c is not chosen_first
+    ]
 
-    manager = _get_manager()
     connection_errors: List[str] = []
 
-    # 最多尝试 5 个候选
     for attempt_idx, chosen in enumerate(ranked_all[:5]):
         local_name = chosen["local_name"]
 
-        # 已连接过 → 直接返回
         if manager.has_server(local_name) and local_name in manager.connections:
             tools = [
                 spec.public_name
@@ -533,7 +689,7 @@ async def search_and_connect_mcp(
                 "matched_keyword": meta.get("matched_keyword"),
                 "note": (
                     "这是之前已连接的服务器。如果它的工具无法满足需求，"
-                    "请再次调用 search_and_connect_mcp 用更宽的关键词，"
+                    "请再次调用 search_and_connect_mcp 用更宽的 capability，"
                     "系统会选一个不同的候选。"
                 ),
             }
@@ -556,7 +712,6 @@ async def search_and_connect_mcp(
             await manager.discover(local_name, _register_tool, _unregister_tool)
         except Exception as error:
             err_str = str(error)
-            # 检测认证错误
             is_auth = any(
                 k in err_str.lower()
                 for k in ("401", "unauthorized", "authentication",
@@ -573,13 +728,46 @@ async def search_and_connect_mcp(
                 pass
             continue
 
-        # 连接成功
+        # 连接成功 → 认证预检
+        needs_auth = False
+        if chosen.get("headers"):
+            try:
+                from mcp_client.registry_client import config_for_entry as _cfe
+                cfg = await _cfe(chosen)
+                if cfg and cfg.header_env:
+                    missing_env = [
+                        env for env in cfg.header_env.values()
+                        if not os.getenv(env)
+                    ]
+                    if missing_env:
+                        needs_auth = True
+                        logger.warning(
+                            "[dsh][discovery] %s needs auth, missing: %r",
+                            chosen["registry_name"], missing_env,
+                        )
+            except Exception:
+                logger.exception("auth precheck failed")
+
+        if needs_auth:
+            _mark_tried(chosen["registry_name"])
+            try:
+                manager.unregister_config(local_name)
+            except Exception:
+                pass
+            connection_errors.append(
+                f"{chosen['registry_name']}[需要认证]: "
+                f"缺少环境变量 {missing_env}"
+            )
+            continue
+
+        # 认证通过 → 注册成功
         _mark_tried(chosen["registry_name"])
         tools = [
             spec.public_name
             for spec in manager.tools.values()
             if spec.server_name == local_name
         ]
+        _schedule_intent_index_refresh()
         return {
             "success": True,
             "server": chosen["registry_name"],
@@ -592,7 +780,6 @@ async def search_and_connect_mcp(
             "attempts": attempt_idx + 1,
         }
 
-    # 全部候选都失败
     return {
         "success": False,
         "error": (
@@ -602,8 +789,51 @@ async def search_and_connect_mcp(
             + "\n\n**下一步建议**：\n"
             + "  1. 如果有服务器标记为 [需要认证]，说明它需要 API key —— "
             + "请用户提供凭证或换一个关键词\n"
-            + "  2. 换更宽泛的关键词再试一次"
+            + "  2. 换更宽泛的 capability 再试一次"
         ),
         "candidates": [c["registry_name"] for c in ranked_all[:10]],
         "errors": connection_errors,
     }
+
+
+# ── 异步意图索引刷新（不阻塞 discovery 返回） ──
+
+_intent_index_refresh_lock: Optional[asyncio.Lock] = None
+
+
+def _schedule_intent_index_refresh() -> None:
+    """连接成功后，后台为新 server 建意图索引。
+
+    不阻塞当前协程；用 to_thread 把 LLM 合成 + 向量化放到线程池。
+    失败只记日志，不影响 discovery 结果。
+    """
+    global _intent_index_refresh_lock
+    if _intent_index_refresh_lock is None:
+        _intent_index_refresh_lock = asyncio.Lock()
+
+    async def _do_refresh():
+        async with _intent_index_refresh_lock:
+            try:
+                from .mcp_intent_index import build_index
+                from mcp_client.dynamic_store import load_all_servers
+                manager = _get_manager()
+                llm = _llm_provider() if _llm_provider else None
+                if llm is None:
+                    logger.info(
+                        "[dsh][discovery] no LLM, skip intent index refresh",
+                    )
+                    return
+                await asyncio.to_thread(
+                    build_index, load_all_servers(), manager, llm,
+                )
+                logger.info("[dsh][discovery] intent index refreshed")
+            except Exception:
+                logger.exception(
+                    "[dsh][discovery] intent index refresh failed",
+                )
+
+    try:
+        asyncio.create_task(_do_refresh())
+    except RuntimeError:
+        # 没有 running loop（同步上下文）→ 跳过
+        logger.debug("[dsh][discovery] no running loop, skip index refresh")

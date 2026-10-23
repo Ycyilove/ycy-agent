@@ -4,10 +4,8 @@ FAISS向量存储模块
 """
 import os
 
-# ── HuggingFace 离线配置 ──
-os.environ.setdefault('HF_ENDPOINT', 'https://hf-mirror.com')
-os.environ.setdefault('HF_HOME', os.path.join(os.path.dirname(os.path.dirname(__file__)), 'models'))
-os.environ.setdefault('HUGGINGFACE_HUB_CACHE', os.environ['HF_HOME'])
+from infra.offline import configure_hf_env
+configure_hf_env()
 
 import json
 import logging
@@ -50,48 +48,13 @@ class FAISSVectorStore:
     # ────────── 内部：加载 / 保存 / 嵌入 ──────────
 
     def _init_embeddings(self):
-        from sentence_transformers import SentenceTransformer
-        import shutil
-
-        _offline_keys = ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")
-        _backup = {k: os.environ.get(k) for k in _offline_keys}
-
-        def _restore_env():
-            for k in _offline_keys:
-                if _backup[k] is None:
-                    os.environ.pop(k, None)
-                else:
-                    os.environ[k] = _backup[k]
-
-        os.environ["HF_HUB_OFFLINE"] = "1"
-        os.environ["TRANSFORMERS_OFFLINE"] = "1"
-
-        try:
-            try:
-                LOCAL_MODEL_PATH = r"D:\Projects\111\LLM\LLM\models\bge-small-zh-v1.5"
-                self.embeddings = SentenceTransformer(LOCAL_MODEL_PATH, local_files_only=True)
-                self.embedding_dimension = self.embeddings.get_sentence_embedding_dimension()
-                print("[模型加载] ✅ 本地缓存加载成功！")
-                return
-            except FileNotFoundError:
-                print("[模型加载] 本地无缓存，联网下载")
-            except OSError as e:
-                print(f"[模型加载] 本地缓存损坏（{e}），清理后重新下载")
-                cache_dir = os.path.join(
-                    os.environ.get("HF_HOME", ""),
-                    f"models--{self.embedding_model.replace('/', '--')}",
-                )
-                if os.path.isdir(cache_dir):
-                    shutil.rmtree(cache_dir, ignore_errors=True)
-            except Exception as e:
-                print(f"[模型加载] 本地加载失败（{type(e).__name__}: {e}），联网下载")
-
-            _restore_env()
-            self.embeddings = SentenceTransformer(self.embedding_model)
-            self.embedding_dimension = self.embeddings.get_sentence_embedding_dimension()
-            print("[模型加载] ✅ 下载并加载成功！")
-        finally:
-            _restore_env()
+        from infra.embedding import get_encoder
+        self.embeddings = get_encoder(self.embedding_model, local_files_only=True)
+        self.embedding_dimension = self.embeddings.get_sentence_embedding_dimension()
+        logger.info(
+            "[faiss] embedding ready: model=%s dim=%d",
+            self.embedding_model, self.embedding_dimension,
+        )
 
     def _load_index(self):
         real_dir = os.path.dirname(self.index_path)

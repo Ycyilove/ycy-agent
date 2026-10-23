@@ -273,13 +273,24 @@ class MCPClientManager:
             raw = tool.model_dump(by_alias=True)
             annotations = raw.get("annotations") or {}
             public_name = f"mcp__{server_name}__{tool.name}"
+            _read_only = bool(annotations.get("readOnlyHint", False))
+            # 兜底：名字含 search/extract/crawl/research/fetch/map 的工具
+            # 默认视为只读。很多 MCP server（如 tavily）不标 readOnlyHint，
+            # 导致这些工具 danger_level="high"，被 allowed_danger_levels
+            # ={'safe'} 过滤掉，LLM 选了就报"不存在"。
+            _remote_lower = (tool.name or "").lower()
+            if not _read_only and any(
+                kw in _remote_lower
+                for kw in ("search", "extract", "crawl", "research", "fetch", "map")
+            ):
+                _read_only = True
             spec = MCPToolSpec(
                 public_name=public_name,
                 server_name=server_name,
                 remote_name=tool.name,
                 description=tool.description or "MCP 外部工具",
                 input_schema=raw.get("inputSchema", {}),
-                read_only_hint=bool(annotations.get("readOnlyHint", False)),
+                read_only_hint=_read_only,
                 idempotent_hint=bool(annotations.get("idempotentHint", False)),
             )
             self.tools[public_name] = spec
@@ -547,7 +558,39 @@ class MCPClientManager:
     async def disconnect(self, server_name: str) -> None:
         connection = self.connections.pop(server_name, None)
         if connection is not None:
-            await connection.stack.aclose()
+            # 已知 mcp SDK 的 streamable_http_client 在 aclose 时可能抛
+            # "Attempted to exit a cancel scope that isn't the current
+            # tasks's current cancel scope"（anyio task group 归属 bug）。
+            # 这里做结构化降级：
+            #   - 5s 硬超时，防止 aclose hang 住 worker task
+            #   - RuntimeError / BaseExceptionGroup 一律吞掉，只记日志
+            #   - 连接已从 self.connections 移除，后续 call_tool 会
+            #     因为 "MCP 服务未连接" 而快速失败，不会用死连接
+            try:
+                await asyncio.wait_for(
+                    connection.stack.aclose(), timeout=5.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "[dsh][mcp] disconnect %s: aclose timed out (5s), "
+                    "mark as closed (zombie task may remain)",
+                    server_name,
+                )
+            except RuntimeError as error:
+                logger.warning(
+                    "[dsh][mcp] disconnect %s: aclose skipped (%s: %s)",
+                    server_name, type(error).__name__, error,
+                )
+            except BaseExceptionGroup as eg:
+                logger.warning(
+                    "[dsh][mcp] disconnect %s: taskgroup close error: %s",
+                    server_name, eg,
+                )
+            except Exception:
+                logger.exception(
+                    "[dsh][mcp] disconnect %s: unexpected close error",
+                    server_name,
+                )
         self.statuses.get(server_name, {}).update({"status": "disconnected"})
 
     async def close(self) -> None:

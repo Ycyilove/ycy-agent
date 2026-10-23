@@ -108,7 +108,43 @@ def record_search(
                         "conf": 0.70,
                     })
 
-    records = list(expanded.values())[:top_k]
+    # ── 按文件名均衡：避免 BM25 高频文档（如伯克希尔目录页）挤掉其他文档 ──
+    # 规则：每个 source_filename 最多 ceil(top_k / 文件数) 条，剩余按原序补齐。
+    all_records = list(expanded.values())
+    if all_records:
+        by_file: Dict[str, List[Record]] = {}
+        for r in all_records:
+            fn = getattr(r, "source_filename", None) or "_unknown"
+            by_file.setdefault(fn, []).append(r)
+
+        file_count = len(by_file)
+        if file_count > 1:
+            per_file_quota = max(1, top_k // file_count + (1 if top_k % file_count else 0))
+            balanced: List[Record] = []
+            seen_ids = set()
+            for fn, items in by_file.items():
+                for r in items[:per_file_quota]:
+                    if r.record_id not in seen_ids:
+                        balanced.append(r)
+                        seen_ids.add(r.record_id)
+            # 补齐到 top_k（从剩余里按原序取）
+            if len(balanced) < top_k:
+                for r in all_records:
+                    if len(balanced) >= top_k:
+                        break
+                    if r.record_id not in seen_ids:
+                        balanced.append(r)
+                        seen_ids.add(r.record_id)
+            records = balanced[:top_k]
+            logger.info(
+                "[dsh][record] 均衡采样: %d 个文件 → 每文件配额 %d，返回 %d 条",
+                file_count, per_file_quota, len(records),
+            )
+        else:
+            records = all_records[:top_k]
+    else:
+        records = []
+
     if not records:
         warnings.append({"type": "no_record_hit", "query": query})
 
