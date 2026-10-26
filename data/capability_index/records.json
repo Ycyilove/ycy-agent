@@ -19,7 +19,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_file",
     "kind": "synthetic_intent",
-    "text": "看看这个文件里有什么内容",
+    "text": "帮我看看这个文件里有什么内容吧",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -34,7 +34,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_file",
     "kind": "synthetic_intent",
-    "text": "帮我打开文件看看",
+    "text": "把文件里的内容全部读出来",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -49,7 +49,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_file",
     "kind": "synthetic_intent",
-    "text": "文件内容读出来",
+    "text": "这个文件能不能直接打开看看",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -64,7 +64,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_file",
     "kind": "synthetic_intent",
-    "text": "把文件内容展示一下",
+    "text": "文件内容读取不了怎么办",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -79,7 +79,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_file",
     "kind": "synthetic_intent",
-    "text": "读取文件里的文字",
+    "text": "读取文件的时候提示错误怎么处理",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -94,7 +94,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_file",
     "kind": "synthetic_intent",
-    "text": "查看文件的全部内容",
+    "text": "需要检查文件编码问题，能帮忙吗？",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -109,7 +109,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_file",
     "kind": "synthetic_intent",
-    "text": "文件内容给我看看",
+    "text": "文件太大读不完是不是正常现象",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -124,7 +124,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_file",
     "kind": "synthetic_intent",
-    "text": "读取这个文件的数据",
+    "text": "能不能把文件内容复制给我",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -154,7 +154,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_text_file",
     "kind": "synthetic_intent",
-    "text": "读取文本文件内容",
+    "text": "读取文件内容的时候遇到乱码怎么处理？",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -169,7 +169,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_text_file",
     "kind": "synthetic_intent",
-    "text": "查看文件的前几行",
+    "text": "需要检查文件编码问题，能帮忙吗？",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -184,7 +184,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_text_file",
     "kind": "synthetic_intent",
-    "text": "处理编码问题的文件",
+    "text": "能不能把文件内容按正确格式显示出来",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -199,7 +199,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_text_file",
     "kind": "synthetic_intent",
-    "text": "把文件内容读出来",
+    "text": "文件读取失败了，详细错误信息在哪看",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -214,7 +214,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_text_file",
     "kind": "synthetic_intent",
-    "text": "读取指定行数的文本",
+    "text": "这个文本文件的编码类型是什么？",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -229,7 +229,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_text_file",
     "kind": "synthetic_intent",
-    "text": "获取文件的详细信息",
+    "text": "读取某个路径下的文本文件内容",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -244,7 +244,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_text_file",
     "kind": "synthetic_intent",
-    "text": "分析文本文件数据",
+    "text": "如何获取文件的详细元数据信息",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -259,7 +259,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_text_file",
     "kind": "synthetic_intent",
-    "text": "读取并检查文件编码",
+    "text": "能不能只读取文件前几行内容",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -276,7 +276,7 @@
     "kind": "tool_desc",
     "text": "read_media_file Read a file and return it as a base64-encoded content block with its MIME type. Image and audio files are returned as image/audio content; any other file type is returned as an embedded resource. Only works within allowed directories.",
     "intent_features": {
-      "domain": "unknown",
+      "domain": "file",
       "action": "read",
       "freshness": "any"
     },
@@ -289,9 +289,9 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_media_file",
     "kind": "synthetic_intent",
-    "text": "获取图片的base64编码",
+    "text": "把图片文件转成base64格式给我",
     "intent_features": {
-      "domain": "unknown",
+      "domain": "file",
       "action": "read",
       "freshness": "any"
     },
@@ -304,9 +304,9 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_media_file",
     "kind": "synthetic_intent",
-    "text": "把音频文件转成base64",
+    "text": "需要获取音频文件的MIME类型",
     "intent_features": {
-      "domain": "unknown",
+      "domain": "file",
       "action": "read",
       "freshness": "any"
     },
@@ -319,9 +319,9 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_media_file",
     "kind": "synthetic_intent",
-    "text": "读取媒体文件内容",
+    "text": "这个视频文件怎么处理成资源块？",
     "intent_features": {
-      "domain": "unknown",
+      "domain": "file",
       "action": "read",
       "freshness": "any"
     },
@@ -334,9 +334,9 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_media_file",
     "kind": "synthetic_intent",
-    "text": "返回文件的MIME类型",
+    "text": "读取媒体文件的时候提示类型错误",
     "intent_features": {
-      "domain": "unknown",
+      "domain": "file",
       "action": "read",
       "freshness": "any"
     },
@@ -349,9 +349,9 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_media_file",
     "kind": "synthetic_intent",
-    "text": "处理图片资源文件",
+    "text": "能不能把文件内容以二进制形式返回",
     "intent_features": {
-      "domain": "unknown",
+      "domain": "file",
       "action": "read",
       "freshness": "any"
     },
@@ -364,9 +364,9 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_media_file",
     "kind": "synthetic_intent",
-    "text": "读取视频文件数据",
+    "text": "如何识别文件中的媒体类型",
     "intent_features": {
-      "domain": "unknown",
+      "domain": "file",
       "action": "read",
       "freshness": "any"
     },
@@ -379,9 +379,9 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_media_file",
     "kind": "synthetic_intent",
-    "text": "获取嵌入式资源内容",
+    "text": "媒体文件读取失败了怎么办",
     "intent_features": {
-      "domain": "unknown",
+      "domain": "file",
       "action": "read",
       "freshness": "any"
     },
@@ -394,9 +394,9 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_media_file",
     "kind": "synthetic_intent",
-    "text": "读取媒体文件的二进制数据",
+    "text": "需要同时获取文件内容和类型信息",
     "intent_features": {
-      "domain": "unknown",
+      "domain": "file",
       "action": "read",
       "freshness": "any"
     },
@@ -424,7 +424,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_multiple_files",
     "kind": "synthetic_intent",
-    "text": "同时读取多个文件内容",
+    "text": "我有多个文件需要一起分析，怎么操作？",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -439,7 +439,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_multiple_files",
     "kind": "synthetic_intent",
-    "text": "批量查看文件数据",
+    "text": "能不能同时读取几个文件的内容？",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -454,7 +454,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_multiple_files",
     "kind": "synthetic_intent",
-    "text": "比较几个文件的内容",
+    "text": "需要对比多个文件的数据，有啥好方法",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -469,7 +469,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_multiple_files",
     "kind": "synthetic_intent",
-    "text": "一起分析多个文件",
+    "text": "批量处理文件的时候遇到错误怎么解决",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -484,7 +484,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_multiple_files",
     "kind": "synthetic_intent",
-    "text": "读取多个文件并显示路径",
+    "text": "多个文件路径一起传进去能读吗？",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -499,7 +499,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_multiple_files",
     "kind": "synthetic_intent",
-    "text": "同时获取多个文件信息",
+    "text": "读取目录下所有文件内容",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -514,7 +514,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_multiple_files",
     "kind": "synthetic_intent",
-    "text": "并行读取文件内容",
+    "text": "如何高效处理多个文件的数据",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -529,7 +529,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_multiple_files",
     "kind": "synthetic_intent",
-    "text": "处理多个文件的数据",
+    "text": "需要同时获取多个文件的引用路径",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -559,7 +559,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__write_file",
     "kind": "synthetic_intent",
-    "text": "把内容保存到文件",
+    "text": "把内容保存到指定文件里",
     "intent_features": {
       "domain": "file",
       "action": "write",
@@ -574,7 +574,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__write_file",
     "kind": "synthetic_intent",
-    "text": "覆盖现有文件数据",
+    "text": "需要覆盖现有文件的内容",
     "intent_features": {
       "domain": "file",
       "action": "write",
@@ -589,7 +589,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__write_file",
     "kind": "synthetic_intent",
-    "text": "写入文本到文件",
+    "text": "创建新文件并写入数据",
     "intent_features": {
       "domain": "file",
       "action": "write",
@@ -604,7 +604,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__write_file",
     "kind": "synthetic_intent",
-    "text": "创建新文件并保存",
+    "text": "写入文件的时候编码不对怎么办",
     "intent_features": {
       "domain": "file",
       "action": "write",
@@ -619,7 +619,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__write_file",
     "kind": "synthetic_intent",
-    "text": "将信息存入文件",
+    "text": "如何确保文件正确保存",
     "intent_features": {
       "domain": "file",
       "action": "write",
@@ -634,7 +634,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__write_file",
     "kind": "synthetic_intent",
-    "text": "修改文件内容",
+    "text": "把处理结果输出到文件",
     "intent_features": {
       "domain": "file",
       "action": "write",
@@ -649,7 +649,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__write_file",
     "kind": "synthetic_intent",
-    "text": "用正确编码写文件",
+    "text": "文件写入失败了怎么排查",
     "intent_features": {
       "domain": "file",
       "action": "write",
@@ -664,7 +664,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__write_file",
     "kind": "synthetic_intent",
-    "text": "把结果输出到文件",
+    "text": "需要生成一个带编码的文本文件",
     "intent_features": {
       "domain": "file",
       "action": "write",
@@ -694,7 +694,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__edit_file",
     "kind": "synthetic_intent",
-    "text": "帮我改一下这个文件里的某一行",
+    "text": "帮我把文件里的某一行改成新的内容",
     "intent_features": {
       "domain": "file",
       "action": "write",
@@ -709,7 +709,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__edit_file",
     "kind": "synthetic_intent",
-    "text": "把文件里的内容替换成新的",
+    "text": "把文件中指定的段落替换成其他文字",
     "intent_features": {
       "domain": "file",
       "action": "write",
@@ -724,7 +724,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__edit_file",
     "kind": "synthetic_intent",
-    "text": "调整文本文件中的特定行",
+    "text": "修改这个文件的某几行，按行替换",
     "intent_features": {
       "domain": "file",
       "action": "write",
@@ -739,7 +739,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__edit_file",
     "kind": "synthetic_intent",
-    "text": "生成文件修改的diff对比",
+    "text": "调整文件中的某些行，生成差异对比",
     "intent_features": {
       "domain": "file",
       "action": "write",
@@ -754,7 +754,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__edit_file",
     "kind": "synthetic_intent",
-    "text": "修改指定路径下的文件内容",
+    "text": "把文件中的特定行内容更新一下",
     "intent_features": {
       "domain": "file",
       "action": "write",
@@ -769,7 +769,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__edit_file",
     "kind": "synthetic_intent",
-    "text": "按行更新文件数据",
+    "text": "替换文件里某个位置的几行文字",
     "intent_features": {
       "domain": "file",
       "action": "write",
@@ -784,7 +784,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__edit_file",
     "kind": "synthetic_intent",
-    "text": "替换文件中某个段落",
+    "text": "根据我的指示修改文件内容并显示改动",
     "intent_features": {
       "domain": "file",
       "action": "write",
@@ -799,7 +799,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__edit_file",
     "kind": "synthetic_intent",
-    "text": "查看文件修改后的差异",
+    "text": "让我看看文件修改后的差异",
     "intent_features": {
       "domain": "file",
       "action": "write",
@@ -829,7 +829,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__create_directory",
     "kind": "synthetic_intent",
-    "text": "新建一个文件夹",
+    "text": "新建一个文件夹，路径是xxx",
     "intent_features": {
       "domain": "file",
       "action": "write",
@@ -844,7 +844,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__create_directory",
     "kind": "synthetic_intent",
-    "text": "确保路径存在",
+    "text": "确保这个目录存在，如果不存在就创建",
     "intent_features": {
       "domain": "file",
       "action": "write",
@@ -859,7 +859,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__create_directory",
     "kind": "synthetic_intent",
-    "text": "生成多级目录结构",
+    "text": "帮我创建一套项目需要的目录结构",
     "intent_features": {
       "domain": "file",
       "action": "write",
@@ -874,7 +874,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__create_directory",
     "kind": "synthetic_intent",
-    "text": "创建项目所需的文件夹",
+    "text": "生成多个嵌套目录，比如a/b/c",
     "intent_features": {
       "domain": "file",
       "action": "write",
@@ -889,7 +889,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__create_directory",
     "kind": "synthetic_intent",
-    "text": "在指定位置建立文件夹",
+    "text": "如果目录不存在就创建，否则就跳过",
     "intent_features": {
       "domain": "file",
       "action": "write",
@@ -904,7 +904,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__create_directory",
     "kind": "synthetic_intent",
-    "text": "批量生成嵌套文件夹",
+    "text": "建立一个存放数据的文件夹",
     "intent_features": {
       "domain": "file",
       "action": "write",
@@ -919,7 +919,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__create_directory",
     "kind": "synthetic_intent",
-    "text": "初始化目录框架",
+    "text": "创建一个新文件夹并设置权限",
     "intent_features": {
       "domain": "file",
       "action": "write",
@@ -934,7 +934,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__create_directory",
     "kind": "synthetic_intent",
-    "text": "添加新的文件夹层级",
+    "text": "批量生成几个子目录",
     "intent_features": {
       "domain": "file",
       "action": "write",
@@ -964,7 +964,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_directory",
     "kind": "synthetic_intent",
-    "text": "查看当前文件夹内容",
+    "text": "查看这个文件夹里有什么内容",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -979,7 +979,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_directory",
     "kind": "synthetic_intent",
-    "text": "列举目录下的所有文件",
+    "text": "列举目录下的所有文件和子文件夹",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -994,7 +994,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_directory",
     "kind": "synthetic_intent",
-    "text": "确认某个文件是否存在",
+    "text": "确认某个文件是否在当前目录里",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -1009,7 +1009,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_directory",
     "kind": "synthetic_intent",
-    "text": "扫描目录结构",
+    "text": "让我看看目录里的文件列表",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -1024,7 +1024,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_directory",
     "kind": "synthetic_intent",
-    "text": "获取文件和文件夹列表",
+    "text": "查找目录中是否有遗漏的文件",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -1039,7 +1039,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_directory",
     "kind": "synthetic_intent",
-    "text": "查找特定文件位置",
+    "text": "显示目录结构，区分文件和文件夹",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -1054,7 +1054,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_directory",
     "kind": "synthetic_intent",
-    "text": "浏览文件夹内物品",
+    "text": "列出当前路径下的所有项目文件",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -1069,7 +1069,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_directory",
     "kind": "synthetic_intent",
-    "text": "显示目录下文件详情",
+    "text": "扫描目录看看有哪些文件需要处理",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -1099,7 +1099,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_directory_with_sizes",
     "kind": "synthetic_intent",
-    "text": "查看文件夹内文件大小",
+    "text": "查看文件夹内每个文件的大小",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -1114,7 +1114,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_directory_with_sizes",
     "kind": "synthetic_intent",
-    "text": "获取带容量的目录列表",
+    "text": "列出目录下文件和文件夹的占用情况",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -1129,7 +1129,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_directory_with_sizes",
     "kind": "synthetic_intent",
-    "text": "统计目录下文件占用空间",
+    "text": "统计这个目录里文件的总大小",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -1144,7 +1144,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_directory_with_sizes",
     "kind": "synthetic_intent",
-    "text": "按大小筛选文件",
+    "text": "显示所有文件的字节数和目录层级",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -1159,7 +1159,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_directory_with_sizes",
     "kind": "synthetic_intent",
-    "text": "显示文件和文件夹的体积",
+    "text": "检查文件是否过大需要清理",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -1174,7 +1174,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_directory_with_sizes",
     "kind": "synthetic_intent",
-    "text": "列出所有文件及它们的尺寸",
+    "text": "查看文件夹结构和文件体积",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -1189,7 +1189,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_directory_with_sizes",
     "kind": "synthetic_intent",
-    "text": "确认某个文件的存储量",
+    "text": "确认某个文件占用多少存储空间",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -1204,7 +1204,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_directory_with_sizes",
     "kind": "synthetic_intent",
-    "text": "查看目录结构和文件体积",
+    "text": "显示目录中每个项目的存储大小",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -1234,7 +1234,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__directory_tree",
     "kind": "synthetic_intent",
-    "text": "生成目录树结构",
+    "text": "生成当前目录的树状结构图",
     "intent_features": {
       "domain": "file",
       "action": "browse",
@@ -1249,7 +1249,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__directory_tree",
     "kind": "synthetic_intent",
-    "text": "获取文件夹层级视图",
+    "text": "导出文件夹的层级关系JSON",
     "intent_features": {
       "domain": "file",
       "action": "browse",
@@ -1264,7 +1264,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__directory_tree",
     "kind": "synthetic_intent",
-    "text": "以JSON形式展示目录",
+    "text": "以结构化方式展示所有文件和文件夹",
     "intent_features": {
       "domain": "file",
       "action": "browse",
@@ -1279,7 +1279,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__directory_tree",
     "kind": "synthetic_intent",
-    "text": "分析文件夹嵌套关系",
+    "text": "查看文件的嵌套关系",
     "intent_features": {
       "domain": "file",
       "action": "browse",
@@ -1294,7 +1294,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__directory_tree",
     "kind": "synthetic_intent",
-    "text": "查看完整目录架构",
+    "text": "分析目录组织结构",
     "intent_features": {
       "domain": "file",
       "action": "browse",
@@ -1309,7 +1309,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__directory_tree",
     "kind": "synthetic_intent",
-    "text": "导出目录树数据",
+    "text": "输出文件夹的层级视图",
     "intent_features": {
       "domain": "file",
       "action": "browse",
@@ -1324,7 +1324,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__directory_tree",
     "kind": "synthetic_intent",
-    "text": "可视化文件夹结构",
+    "text": "获取文件系统树形数据",
     "intent_features": {
       "domain": "file",
       "action": "browse",
@@ -1339,7 +1339,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__directory_tree",
     "kind": "synthetic_intent",
-    "text": "获取递归目录信息",
+    "text": "绘制目录结构的可视化图表",
     "intent_features": {
       "domain": "file",
       "action": "browse",
@@ -1369,7 +1369,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__move_file",
     "kind": "synthetic_intent",
-    "text": "把文件从一个文件夹移到另一个",
+    "text": "把文件从这里移到另一个文件夹",
     "intent_features": {
       "domain": "file",
       "action": "write",
@@ -1384,7 +1384,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__move_file",
     "kind": "synthetic_intent",
-    "text": "改个文件名顺便移动位置",
+    "text": "改个文件名然后放到指定位置",
     "intent_features": {
       "domain": "file",
       "action": "write",
@@ -1399,7 +1399,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__move_file",
     "kind": "synthetic_intent",
-    "text": "把多余的照片移到备份目录",
+    "text": "把某个文件挪到上级目录",
     "intent_features": {
       "domain": "file",
       "action": "write",
@@ -1414,7 +1414,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__move_file",
     "kind": "synthetic_intent",
-    "text": "这个文件太乱了，帮我整理下位置",
+    "text": "移动文件并重命名",
     "intent_features": {
       "domain": "file",
       "action": "write",
@@ -1429,7 +1429,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__move_file",
     "kind": "synthetic_intent",
-    "text": "把报告文件换个名字再移动过去",
+    "text": "把下载的文件放到工作目录里",
     "intent_features": {
       "domain": "file",
       "action": "write",
@@ -1444,7 +1444,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__move_file",
     "kind": "synthetic_intent",
-    "text": "移动一下这些资料到项目文件夹",
+    "text": "把文件从C盘传到D盘",
     "intent_features": {
       "domain": "file",
       "action": "write",
@@ -1459,7 +1459,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__move_file",
     "kind": "synthetic_intent",
-    "text": "文件路径不对，帮我调整一下",
+    "text": "重命名这个文件并移动",
     "intent_features": {
       "domain": "file",
       "action": "write",
@@ -1474,7 +1474,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__move_file",
     "kind": "synthetic_intent",
-    "text": "把旧数据文件移到历史记录目录",
+    "text": "转移文件到新路径",
     "intent_features": {
       "domain": "file",
       "action": "write",
@@ -1504,7 +1504,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__search_files",
     "kind": "synthetic_intent",
-    "text": "找找看有没有*.log文件",
+    "text": "找找有没有这种格式的文件",
     "intent_features": {
       "domain": "file",
       "action": "search",
@@ -1519,7 +1519,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__search_files",
     "kind": "synthetic_intent",
-    "text": "子目录里有没有临时文件",
+    "text": "在所有子目录里搜一下",
     "intent_features": {
       "domain": "file",
       "action": "search",
@@ -1534,7 +1534,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__search_files",
     "kind": "synthetic_intent",
-    "text": "帮我找所有图片文件",
+    "text": "这个文件名通配符怎么用",
     "intent_features": {
       "domain": "file",
       "action": "search",
@@ -1549,7 +1549,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__search_files",
     "kind": "synthetic_intent",
-    "text": "这个格式的文件在哪存的",
+    "text": "帮我找找这个文件在哪",
     "intent_features": {
       "domain": "file",
       "action": "search",
@@ -1564,7 +1564,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__search_files",
     "kind": "synthetic_intent",
-    "text": "搜索一下项目文档的位置",
+    "text": "用模式匹配查找资料",
     "intent_features": {
       "domain": "file",
       "action": "search",
@@ -1579,7 +1579,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__search_files",
     "kind": "synthetic_intent",
-    "text": "找找有没有重复的文件名",
+    "text": "递归搜索指定类型的文件",
     "intent_features": {
       "domain": "file",
       "action": "search",
@@ -1594,7 +1594,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__search_files",
     "kind": "synthetic_intent",
-    "text": "最近修改过的文件在哪",
+    "text": "查找包含某关键词的文件",
     "intent_features": {
       "domain": "file",
       "action": "search",
@@ -1609,7 +1609,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__search_files",
     "kind": "synthetic_intent",
-    "text": "帮我找所有带'2023'的文件",
+    "text": "扫一遍目录找目标文件",
     "intent_features": {
       "domain": "file",
       "action": "search",
@@ -1639,7 +1639,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__get_file_info",
     "kind": "synthetic_intent",
-    "text": "看看这个文件多大",
+    "text": "看看这个文件的属性",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -1669,7 +1669,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__get_file_info",
     "kind": "synthetic_intent",
-    "text": "权限设置有问题吗",
+    "text": "获取文件详细信息",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -1684,7 +1684,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__get_file_info",
     "kind": "synthetic_intent",
-    "text": "文件类型对不对",
+    "text": "文件有多大啊",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -1699,7 +1699,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__get_file_info",
     "kind": "synthetic_intent",
-    "text": "显示文件的详细属性",
+    "text": "查看文件权限设置",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -1714,7 +1714,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__get_file_info",
     "kind": "synthetic_intent",
-    "text": "查查文件的创建时间",
+    "text": "文件类型是啥",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -1729,7 +1729,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__get_file_info",
     "kind": "synthetic_intent",
-    "text": "这个文件的大小多少",
+    "text": "显示文件创建时间",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -1744,7 +1744,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__get_file_info",
     "kind": "synthetic_intent",
-    "text": "文件的最后修改时间是什么",
+    "text": "文件存储位置在哪",
     "intent_features": {
       "domain": "file",
       "action": "read",
@@ -1774,7 +1774,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_allowed_directories",
     "kind": "synthetic_intent",
-    "text": "能访问哪些文件夹",
+    "text": "哪些目录能访问啊",
     "intent_features": {
       "domain": "file",
       "action": "browse",
@@ -1789,7 +1789,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_allowed_directories",
     "kind": "synthetic_intent",
-    "text": "服务器允许操作的目录有哪些",
+    "text": "服务器允许哪些路径",
     "intent_features": {
       "domain": "file",
       "action": "browse",
@@ -1804,7 +1804,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_allowed_directories",
     "kind": "synthetic_intent",
-    "text": "这些目录里还能进子文件夹吗",
+    "text": "能操作哪些文件夹",
     "intent_features": {
       "domain": "file",
       "action": "browse",
@@ -1819,7 +1819,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_allowed_directories",
     "kind": "synthetic_intent",
-    "text": "确认可访问的路径范围",
+    "text": "查看可访问目录列表",
     "intent_features": {
       "domain": "file",
       "action": "browse",
@@ -1834,7 +1834,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_allowed_directories",
     "kind": "synthetic_intent",
-    "text": "哪些目录可以随便查",
+    "text": "确认可用目录范围",
     "intent_features": {
       "domain": "file",
       "action": "browse",
@@ -1849,7 +1849,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_allowed_directories",
     "kind": "synthetic_intent",
-    "text": "权限范围具体说说",
+    "text": "哪些文件夹是受限制的",
     "intent_features": {
       "domain": "file",
       "action": "browse",
@@ -1864,7 +1864,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_allowed_directories",
     "kind": "synthetic_intent",
-    "text": "允许访问的文件夹清单",
+    "text": "允许访问的路径有哪些",
     "intent_features": {
       "domain": "file",
       "action": "browse",
@@ -1879,7 +1879,7 @@
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_allowed_directories",
     "kind": "synthetic_intent",
-    "text": "能查看哪些路径下的文件",
+    "text": "当前可浏览的目录范围",
     "intent_features": {
       "domain": "file",
       "action": "browse",
@@ -1909,7 +1909,7 @@
     "server_name": "fetch",
     "tool_name": "mcp__fetch__fetch",
     "kind": "synthetic_intent",
-    "text": "抓取这个链接的内容",
+    "text": "抓取这个网页内容",
     "intent_features": {
       "domain": "web",
       "action": "fetch",
@@ -1924,7 +1924,7 @@
     "server_name": "fetch",
     "tool_name": "mcp__fetch__fetch",
     "kind": "synthetic_intent",
-    "text": "把网页转成markdown",
+    "text": "下载链接里的数据",
     "intent_features": {
       "domain": "web",
       "action": "fetch",
@@ -1939,7 +1939,7 @@
     "server_name": "fetch",
     "tool_name": "mcp__fetch__fetch",
     "kind": "synthetic_intent",
-    "text": "下载最新的技术文档",
+    "text": "把网址内容转成markdown",
     "intent_features": {
       "domain": "web",
       "action": "fetch",
@@ -1954,7 +1954,7 @@
     "server_name": "fetch",
     "tool_name": "mcp__fetch__fetch",
     "kind": "synthetic_intent",
-    "text": "获取实时数据报告",
+    "text": "获取最新网页信息",
     "intent_features": {
       "domain": "web",
       "action": "fetch",
@@ -1969,7 +1969,7 @@
     "server_name": "fetch",
     "tool_name": "mcp__fetch__fetch",
     "kind": "synthetic_intent",
-    "text": "这个网址的最新内容是什么",
+    "text": "从互联网上拉取资料",
     "intent_features": {
       "domain": "web",
       "action": "fetch",
@@ -1984,7 +1984,7 @@
     "server_name": "fetch",
     "tool_name": "mcp__fetch__fetch",
     "kind": "synthetic_intent",
-    "text": "保存网页为文本格式",
+    "text": "解析这个链接的文本",
     "intent_features": {
       "domain": "web",
       "action": "fetch",
@@ -1999,7 +1999,7 @@
     "server_name": "fetch",
     "tool_name": "mcp__fetch__fetch",
     "kind": "synthetic_intent",
-    "text": "从互联网上拉取资料",
+    "text": "下载并提取网页内容",
     "intent_features": {
       "domain": "web",
       "action": "fetch",
@@ -2014,7 +2014,7 @@
     "server_name": "fetch",
     "tool_name": "mcp__fetch__fetch",
     "kind": "synthetic_intent",
-    "text": "把链接里的信息整理出来",
+    "text": "获取实时网络数据",
     "intent_features": {
       "domain": "web",
       "action": "fetch",
@@ -2031,7 +2031,7 @@
     "kind": "tool_desc",
     "text": "tavily_search Search the web for current information on any topic. Use for news, facts, or data beyond your knowledge cutoff. Returns snippets and source URLs.",
     "intent_features": {
-      "domain": "news|knowledge|unknown",
+      "domain": "unknown",
       "action": "search",
       "freshness": "realtime"
     },
@@ -2044,9 +2044,9 @@
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_search",
     "kind": "synthetic_intent",
-    "text": "最近有什么新闻吗？",
+    "text": "找找最近的新闻",
     "intent_features": {
-      "domain": "news|knowledge|unknown",
+      "domain": "unknown",
       "action": "search",
       "freshness": "realtime"
     },
@@ -2059,9 +2059,9 @@
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_search",
     "kind": "synthetic_intent",
-    "text": "帮我查一下最新的数据",
+    "text": "有什么关于XXX的最新动态吗？",
     "intent_features": {
-      "domain": "news|knowledge|unknown",
+      "domain": "unknown",
       "action": "search",
       "freshness": "realtime"
     },
@@ -2074,9 +2074,9 @@
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_search",
     "kind": "synthetic_intent",
-    "text": "这个事情现在怎么样了？",
+    "text": "查一下这个事现在咋样了",
     "intent_features": {
-      "domain": "news|knowledge|unknown",
+      "domain": "unknown",
       "action": "search",
       "freshness": "realtime"
     },
@@ -2089,9 +2089,9 @@
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_search",
     "kind": "synthetic_intent",
-    "text": "找找看有没有相关的最新资料",
+    "text": "网上对XXX的最新讨论是什么",
     "intent_features": {
-      "domain": "news|knowledge|unknown",
+      "domain": "unknown",
       "action": "search",
       "freshness": "realtime"
     },
@@ -2104,9 +2104,9 @@
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_search",
     "kind": "synthetic_intent",
-    "text": "今天有什么热点事件？",
+    "text": "这个数据现在更新了吗？",
     "intent_features": {
-      "domain": "news|knowledge|unknown",
+      "domain": "unknown",
       "action": "search",
       "freshness": "realtime"
     },
@@ -2119,9 +2119,9 @@
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_search",
     "kind": "synthetic_intent",
-    "text": "搜索一下最近的科技动态",
+    "text": "帮我搜搜XXX的实时信息",
     "intent_features": {
-      "domain": "news|knowledge|unknown",
+      "domain": "unknown",
       "action": "search",
       "freshness": "realtime"
     },
@@ -2134,9 +2134,9 @@
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_search",
     "kind": "synthetic_intent",
-    "text": "查一下这个政策的最新进展",
+    "text": "最近XXX有什么变化？",
     "intent_features": {
-      "domain": "news|knowledge|unknown",
+      "domain": "unknown",
       "action": "search",
       "freshness": "realtime"
     },
@@ -2149,9 +2149,9 @@
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_search",
     "kind": "synthetic_intent",
-    "text": "有没有这个话题的最新报道？",
+    "text": "网上关于XXX的最新消息",
     "intent_features": {
-      "domain": "news|knowledge|unknown",
+      "domain": "unknown",
       "action": "search",
       "freshness": "realtime"
     },
@@ -2166,7 +2166,7 @@
     "kind": "tool_desc",
     "text": "tavily_extract Extract content from URLs. Returns raw page content in markdown or text format.",
     "intent_features": {
-      "domain": "knowledge|file",
+      "domain": "knowledge",
       "action": "read",
       "freshness": "any"
     },
@@ -2179,9 +2179,9 @@
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_extract",
     "kind": "synthetic_intent",
-    "text": "把网页内容给我复制一下",
+    "text": "从链接里提取具体内容",
     "intent_features": {
-      "domain": "knowledge|file",
+      "domain": "knowledge",
       "action": "read",
       "freshness": "any"
     },
@@ -2194,9 +2194,9 @@
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_extract",
     "kind": "synthetic_intent",
-    "text": "提取这个链接里的信息",
+    "text": "把网页内容复制下来",
     "intent_features": {
-      "domain": "knowledge|file",
+      "domain": "knowledge",
       "action": "read",
       "freshness": "any"
     },
@@ -2209,9 +2209,9 @@
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_extract",
     "kind": "synthetic_intent",
-    "text": "帮我把文章内容整理出来",
+    "text": "抓取这个网页的关键信息",
     "intent_features": {
-      "domain": "knowledge|file",
+      "domain": "knowledge",
       "action": "read",
       "freshness": "any"
     },
@@ -2224,9 +2224,9 @@
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_extract",
     "kind": "synthetic_intent",
-    "text": "从这个网址抓取文本内容",
+    "text": "提取一下这个链接的文本",
     "intent_features": {
-      "domain": "knowledge|file",
+      "domain": "knowledge",
       "action": "read",
       "freshness": "any"
     },
@@ -2239,9 +2239,9 @@
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_extract",
     "kind": "synthetic_intent",
-    "text": "把网页里的关键数据拿过来",
+    "text": "网页里有什么重要数据？",
     "intent_features": {
-      "domain": "knowledge|file",
+      "domain": "knowledge",
       "action": "read",
       "freshness": "any"
     },
@@ -2254,9 +2254,9 @@
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_extract",
     "kind": "synthetic_intent",
-    "text": "提取一下这篇资料的内容",
+    "text": "帮我把链接里的内容整理出来",
     "intent_features": {
-      "domain": "knowledge|file",
+      "domain": "knowledge",
       "action": "read",
       "freshness": "any"
     },
@@ -2269,9 +2269,9 @@
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_extract",
     "kind": "synthetic_intent",
-    "text": "把网页内容转成文本格式",
+    "text": "下载网页的纯文本内容",
     "intent_features": {
-      "domain": "knowledge|file",
+      "domain": "knowledge",
       "action": "read",
       "freshness": "any"
     },
@@ -2284,9 +2284,9 @@
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_extract",
     "kind": "synthetic_intent",
-    "text": "抓取这个页面的详细信息",
+    "text": "提取这个文档的摘要",
     "intent_features": {
-      "domain": "knowledge|file",
+      "domain": "knowledge",
       "action": "read",
       "freshness": "any"
     },
@@ -2314,7 +2314,7 @@
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_crawl",
     "kind": "synthetic_intent",
-    "text": "爬取整个网站的内容",
+    "text": "爬取整个网站的页面",
     "intent_features": {
       "domain": "web",
       "action": "browse",
@@ -2329,7 +2329,7 @@
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_crawl",
     "kind": "synthetic_intent",
-    "text": "从这个网址开始抓取相关页面",
+    "text": "获取网站下所有链接",
     "intent_features": {
       "domain": "web",
       "action": "browse",
@@ -2344,7 +2344,7 @@
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_crawl",
     "kind": "synthetic_intent",
-    "text": "帮我把网站所有页面列出来",
+    "text": "扫一遍这个站点的结构",
     "intent_features": {
       "domain": "web",
       "action": "browse",
@@ -2359,7 +2359,7 @@
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_crawl",
     "kind": "synthetic_intent",
-    "text": "爬一下这个网站的结构",
+    "text": "从主页开始抓取内容",
     "intent_features": {
       "domain": "web",
       "action": "browse",
@@ -2374,7 +2374,7 @@
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_crawl",
     "kind": "synthetic_intent",
-    "text": "抓取这个站点的多级页面",
+    "text": "网站有多少子页面？",
     "intent_features": {
       "domain": "web",
       "action": "browse",
@@ -2389,7 +2389,7 @@
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_crawl",
     "kind": "synthetic_intent",
-    "text": "爬虫爬取指定网址的深层内容",
+    "text": "帮我爬取XXX网站的数据",
     "intent_features": {
       "domain": "web",
       "action": "browse",
@@ -2404,7 +2404,7 @@
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_crawl",
     "kind": "synthetic_intent",
-    "text": "把网站内容全部下载下来",
+    "text": "爬虫抓取这个域名下的内容",
     "intent_features": {
       "domain": "web",
       "action": "browse",
@@ -2419,7 +2419,7 @@
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_crawl",
     "kind": "synthetic_intent",
-    "text": "爬取这个网页的子页面内容",
+    "text": "爬取网站并保存结构",
     "intent_features": {
       "domain": "web",
       "action": "browse",
@@ -2449,7 +2449,7 @@
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_map",
     "kind": "synthetic_intent",
-    "text": "帮我列一下这个网站的所有页面",
+    "text": "画个网站的结构图",
     "intent_features": {
       "domain": "web",
       "action": "browse",
@@ -2464,7 +2464,7 @@
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_map",
     "kind": "synthetic_intent",
-    "text": "查看网站的结构图",
+    "text": "列出这个站点的所有页面链接",
     "intent_features": {
       "domain": "web",
       "action": "browse",
@@ -2479,7 +2479,7 @@
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_map",
     "kind": "synthetic_intent",
-    "text": "这个站点有哪些子页面？",
+    "text": "扫描网站目录结构",
     "intent_features": {
       "domain": "web",
       "action": "browse",
@@ -2494,7 +2494,7 @@
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_map",
     "kind": "synthetic_intent",
-    "text": "生成网站的导航地图",
+    "text": "生成网站导航地图",
     "intent_features": {
       "domain": "web",
       "action": "browse",
@@ -2509,7 +2509,7 @@
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_map",
     "kind": "synthetic_intent",
-    "text": "爬取网站的目录结构",
+    "text": "这个网站有多少个子页面？",
     "intent_features": {
       "domain": "web",
       "action": "browse",
@@ -2524,7 +2524,7 @@
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_map",
     "kind": "synthetic_intent",
-    "text": "把网站结构整理成列表",
+    "text": "帮我整理一下网站的链接结构",
     "intent_features": {
       "domain": "web",
       "action": "browse",
@@ -2539,7 +2539,7 @@
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_map",
     "kind": "synthetic_intent",
-    "text": "展示这个网页的链接关系",
+    "text": "网站架构是怎样的？",
     "intent_features": {
       "domain": "web",
       "action": "browse",
@@ -2554,7 +2554,7 @@
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_map",
     "kind": "synthetic_intent",
-    "text": "分析网站的页面分布情况",
+    "text": "爬取网站并展示链接关系",
     "intent_features": {
       "domain": "web",
       "action": "browse",
@@ -2571,7 +2571,7 @@
     "kind": "tool_desc",
     "text": "tavily_research Perform comprehensive research on a given topic or question. Use this tool when you need to gather information from multiple sources to answer a question or complete a task. Returns a detailed response based on the research findings. Rate limit: 20 requests per minute.",
     "intent_features": {
-      "domain": "knowledge|unknown",
+      "domain": "knowledge",
       "action": "research",
       "freshness": "recent"
     },
@@ -2584,9 +2584,9 @@
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_research",
     "kind": "synthetic_intent",
-    "text": "调研一下这个话题",
+    "text": "做一下全面的研究",
     "intent_features": {
-      "domain": "knowledge|unknown",
+      "domain": "knowledge",
       "action": "research",
       "freshness": "recent"
     },
@@ -2599,9 +2599,9 @@
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_research",
     "kind": "synthetic_intent",
-    "text": "收集多个来源的信息回答问题",
+    "text": "收集多个来源的数据",
     "intent_features": {
-      "domain": "knowledge|unknown",
+      "domain": "knowledge",
       "action": "research",
       "freshness": "recent"
     },
@@ -2614,9 +2614,9 @@
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_research",
     "kind": "synthetic_intent",
-    "text": "帮我查一下这个事情的详细资料",
+    "text": "深入分析这个话题",
     "intent_features": {
-      "domain": "knowledge|unknown",
+      "domain": "knowledge",
       "action": "research",
       "freshness": "recent"
     },
@@ -2629,9 +2629,9 @@
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_research",
     "kind": "synthetic_intent",
-    "text": "综合分析一下这个问题",
+    "text": "整理关于XXX的详细资料",
     "intent_features": {
-      "domain": "knowledge|unknown",
+      "domain": "knowledge",
       "action": "research",
       "freshness": "recent"
     },
@@ -2644,9 +2644,9 @@
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_research",
     "kind": "synthetic_intent",
-    "text": "从不同网站汇总相关信息",
+    "text": "综合各个平台的信息",
     "intent_features": {
-      "domain": "knowledge|unknown",
+      "domain": "knowledge",
       "action": "research",
       "freshness": "recent"
     },
@@ -2659,9 +2659,9 @@
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_research",
     "kind": "synthetic_intent",
-    "text": "深入研究一下这个课题",
+    "text": "帮我查一下XXX的详细情况",
     "intent_features": {
-      "domain": "knowledge|unknown",
+      "domain": "knowledge",
       "action": "research",
       "freshness": "recent"
     },
@@ -2674,9 +2674,9 @@
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_research",
     "kind": "synthetic_intent",
-    "text": "整理一下这个领域的最新进展",
+    "text": "需要更深入的资料分析",
     "intent_features": {
-      "domain": "knowledge|unknown",
+      "domain": "knowledge",
       "action": "research",
       "freshness": "recent"
     },
@@ -2689,9 +2689,9 @@
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_research",
     "kind": "synthetic_intent",
-    "text": "多角度查证这个事实",
+    "text": "收集并分析相关数据",
     "intent_features": {
-      "domain": "knowledge|unknown",
+      "domain": "knowledge",
       "action": "research",
       "freshness": "recent"
     },

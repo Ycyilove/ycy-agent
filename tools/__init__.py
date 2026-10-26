@@ -4,21 +4,79 @@
 
 使用示例:
     from tools import tool, get_registry
-    
-    @tool(name="my_tool", description="我的工具")
+
+    @tool(name="my_tool", description="我的工具", required=["param"])
     def my_tool(param: str) -> str:
         return param
-    
-    # 获取工具列表
-    registry = get_registry()
-    tools = registry.list_tools()
 """
 
 import json
 import re
+import inspect
 from typing import Dict, List, Callable, Any, Optional
 from dataclasses import dataclass, field
 from functools import wraps
+
+
+# ── Python 类型名 → JSON Schema 类型名 ──
+_PY_TYPE_MAP = {
+    "str": "string", "string": "string",
+    "int": "integer", "integer": "integer",
+    "float": "number", "number": "number",
+    "bool": "boolean", "boolean": "boolean",
+    "list": "array", "array": "array",
+    "dict": "object", "object": "object",
+}
+
+
+def _normalize_type(t: Any) -> str:
+    """把 'str' / "<class 'str'>" / 'typing.List[str]' 等归一成 JSON Schema 类型名。"""
+    if t is None:
+        return "string"
+    s = str(t).strip().lower()
+    if "class '" in s:
+        s = s.split("class '")[-1].split("'")[0].strip()
+    if s.startswith("typing."):
+        s = s[len("typing."):]
+    if s.startswith("list["):
+        return "array"
+    if s.startswith("dict["):
+        return "object"
+    if s.startswith("optional["):
+        inner = s[len("optional["):-1]
+        return _normalize_type(inner)
+    return _PY_TYPE_MAP.get(s, s if s in _PY_TYPE_MAP.values() else "string")
+
+
+def _normalize_property(pinfo: Any) -> Dict[str, Any]:
+    """把单个字段定义归一成标准 JSON Schema property。"""
+    if not isinstance(pinfo, dict):
+        return {"type": "string"}
+    out = dict(pinfo)
+    out["type"] = _normalize_type(out.get("type"))
+    return out
+
+
+def _build_input_schema(
+    parameters: Dict[str, Any],
+    required: Optional[List[str]] = None,
+) -> Optional[Dict[str, Any]]:
+    """把扁平 parameters 规范化为标准 JSON Schema。
+
+    - 扁平形态 {field: {...}} → {"type":"object","properties":{...},"required":[...]}
+    - 已是标准形态 {"properties":{...}} → 原样返回（幂等）
+    """
+    if not parameters:
+        return None
+    if "properties" in parameters and "type" in parameters:
+        # 已是标准 JSON Schema，幂等返回
+        return parameters
+    props = {k: _normalize_property(v) for k, v in parameters.items()}
+    return {
+        "type": "object",
+        "properties": props,
+        "required": list(required or []),
+    }
 
 
 @dataclass
@@ -33,8 +91,6 @@ class ToolMetadata:
     input_schema: Optional[Dict[str, Any]] = None
     origin: str = "builtin"
     idempotent: bool = False
-    # 资源声明：工具可能产出哪些资源 kind
-    # 空 = 未声明，走隐式提取；非空 = 显式契约
     resource_kinds: List[str] = field(default_factory=list)
 
 
@@ -52,31 +108,51 @@ class ToolRegistry:
             cls._metadata = {}
         return cls._instance
 
-    def register(self, name: str = None, description: str = "", parameters: Dict = None,
-                 examples: List[str] = None, category: str = "general",
-                 danger_level: str = "safe", resource_kinds: List[str] = None):
-        """工具注册装饰器"""
+    def register(self, name: str = None, description: str = "",
+                 parameters: Dict = None, examples: List[str] = None,
+                 category: str = "general", danger_level: str = "safe",
+                 resource_kinds: List[str] = None,
+                 required: List[str] = None):
+        """工具注册装饰器（支持 required 显式声明）"""
         def decorator(func: Callable):
             tool_name = name or func.__name__
             tool_description = description or func.__doc__ or ""
 
-            tool_params = parameters or {}
+            tool_params = dict(parameters or {})   # 拷一份，避免副作用
+            inferred_required: List[str] = []
+
             if not tool_params and func.__annotations__:
+                try:
+                    sig = inspect.signature(func)
+                except (ValueError, TypeError):
+                    sig = None
                 for param_name, param_type in func.__annotations__.items():
-                    if param_name != 'return':
-                        tool_params[param_name] = {
-                            "type": str(param_type).__replace("typing.", ""),
-                            "description": f"参数 {param_name}"
-                        }
+                    if param_name == 'return':
+                        continue
+                    tool_params[param_name] = {
+                        "type": _normalize_type(param_type),
+                        "description": f"参数 {param_name}",
+                    }
+                    if sig is not None:
+                        p = sig.parameters.get(param_name)
+                        if p is not None and p.default is inspect.Parameter.empty:
+                            inferred_required.append(param_name)
+
+            # required 优先级：显式传入 > 注解推断
+            final_required = list(required) if required is not None else inferred_required
+
+            # 产出标准 input_schema（幂等）
+            input_schema = _build_input_schema(tool_params, final_required)
 
             self.register_callable(
                 func,
                 name=tool_name,
                 description=tool_description,
-                parameters=tool_params,
+                parameters=tool_params,      # 保留扁平形态，向后兼容
                 examples=examples,
                 category=category,
                 danger_level=danger_level,
+                input_schema=input_schema,   # 新增：标准 JSON Schema
                 resource_kinds=resource_kinds,
             )
 
@@ -86,9 +162,7 @@ class ToolRegistry:
 
             wrapper.tool_name = tool_name
             wrapper.tool_metadata = self._metadata[tool_name]
-
             return wrapper
-
         return decorator
 
     def register_callable(
@@ -104,8 +178,13 @@ class ToolRegistry:
         origin: str = "builtin",
         idempotent: bool = False,
         resource_kinds: List[str] = None,
+        required: List[str] = None,
     ) -> Callable:
         """Register a runtime callable, including async MCP handlers."""
+        # 未显式提供 input_schema 时，用 parameters + required 构造
+        if input_schema is None and parameters:
+            input_schema = _build_input_schema(parameters, required)
+
         self._tools[name] = func
         self._metadata[name] = ToolMetadata(
             name=name,
@@ -120,38 +199,31 @@ class ToolRegistry:
             resource_kinds=list(resource_kinds or []),
         )
         return func
-
+        
     def get_tool(self, name: str) -> Optional[Callable]:
-        """获取工具函数"""
         return self._tools.get(name)
 
     def unregister(self, name: str) -> bool:
-        """Remove a runtime tool and its metadata."""
         existed = name in self._tools or name in self._metadata
         self._tools.pop(name, None)
         self._metadata.pop(name, None)
         return existed
 
     def get_all_tools(self) -> Dict[str, Callable]:
-        """获取所有工具"""
         return self._tools.copy()
 
     def get_metadata(self, name: str) -> Optional[ToolMetadata]:
-        """获取工具元数据"""
         return self._metadata.get(name)
 
     def get_all_metadata(self) -> Dict[str, ToolMetadata]:
-        """获取所有工具元数据"""
         return self._metadata.copy()
 
     def list_tools(self, category: str = None) -> List[str]:
-        """列出工具名称"""
         if category:
             return [name for name, meta in self._metadata.items() if meta.category == category]
         return list(self._tools.keys())
 
     def get_tool_descriptions(self) -> List[Dict]:
-        """生成工具描述清单（用于LLM）"""
         descriptions = []
         for name, meta in self._metadata.items():
             descriptions.append({
@@ -165,7 +237,6 @@ class ToolRegistry:
         return descriptions
 
     def generate_tools_prompt(self) -> str:
-        """生成工具说明提示词"""
         prompt_parts = ["可用工具：\n"]
         for name, meta in self._metadata.items():
             prompt_parts.append(f"\n## {name} ({meta.category})")
@@ -184,7 +255,6 @@ class ToolRegistry:
         return "\n".join(prompt_parts)
 
     def clear(self):
-        """清空注册表（主要用于测试）"""
         self._tools.clear()
         self._metadata.clear()
 
@@ -192,13 +262,14 @@ class ToolRegistry:
 registry = ToolRegistry()
 
 
-def tool(name: str = None, description: str = "", parameters: Dict = None,
-         examples: List[str] = None, category: str = "general",
-         danger_level: str = "safe", resource_kinds: List[str] = None):
+def tool(name: str = None, description: str = "",
+         parameters: Dict = None, examples: List[str] = None,
+         category: str = "general", danger_level: str = "safe",
+         resource_kinds: List[str] = None,
+         required: List[str] = None):
     """工具注册装饰器（简写）
 
-    resource_kinds 可选声明该工具会产出哪些资源（image/pdf/excel/...），
-    用于让上层预知资源类型。不声明则走隐式提取。
+    required: 显式声明必填参数名列表。为空时用函数注解推断（无默认值者）。
     """
     return registry.register(
         name=name,
@@ -208,9 +279,9 @@ def tool(name: str = None, description: str = "", parameters: Dict = None,
         category=category,
         danger_level=danger_level,
         resource_kinds=resource_kinds,
+        required=required,
     )
 
 
 def get_registry() -> ToolRegistry:
-    """获取工具注册中心实例"""
     return registry

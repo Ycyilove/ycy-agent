@@ -289,6 +289,7 @@ class ExecutionResult:
         "code": {"type": "str", "description": "要执行的Python代码"},
         "timeout": {"type": "int", "description": "执行超时时间（秒），默认10秒"}
     },
+    required=["code"],
     examples=[
         "run_python_code(code='print(1+2+3)')",
         "run_python_code(code='result = [x**2 for x in range(10)]; print(sum(result))')"

@@ -244,6 +244,7 @@ def is_safe_path(path: str, base_dir: str = None) -> bool:
         "pattern": {"type": "str", "description": "文件过滤模式（可选）"},
         "include_subdirs": {"type": "bool", "description": "是否包含子目录，默认False"}
     },
+    required=["directory"],
     examples=[
         "list_files(directory='.')",
         "list_files(directory='./data', pattern='*.csv')"
@@ -340,6 +341,7 @@ def format_file_size(size: int) -> str:
         "old_path": {"type": "str", "description": "原文件路径"},
         "new_name": {"type": "str", "description": "新文件名（不含路径）或新路径"}
     },
+    required=["old_path", "new_name"],
     examples=[
         "rename_file(old_path='old.txt', new_name='new.txt')",
         "rename_file(old_path='./data/file.csv', new_name='./backup/file.csv')"
@@ -391,6 +393,7 @@ def rename_file(old_path: str, new_name: str) -> Dict[str, Any]:
         "target_format": {"type": "str", "description": "目标格式（如 txt, json, csv）"},
         "output_path": {"type": "str", "description": "输出文件路径（可选）"}
     },
+    required=["file_path", "target_format"],
     examples=[
         "convert_file_format(file_path='data.txt', target_format='json')",
         "convert_file_format(file_path='data.csv', target_format='json', output_path='data.json')"
@@ -481,6 +484,7 @@ def convert_file_format(file_path: str, target_format: str, output_path: str = N
         "file_path": {"type": "str", "description": "文件路径"},
         "compute_hash": {"type": "bool", "description": "是否计算哈希值，默认False"}
     },
+    required=["file_path"],
     examples=[
         "get_file_info(file_path='data.csv')",
         "get_file_info(file_path='data.csv', compute_hash=True)"
@@ -544,6 +548,7 @@ _BINARY_WRITE_HINTS = {
         "content": {"type": "str", "description": "要写入的文本内容（必填）"},
         "encoding": {"type": "str", "description": "编码，默认 utf-8"},
     },
+    required=["file_path", "content"],
     examples=[
         "write_file(file_path='D:/data/notes.txt', content='hello')",
     ],
@@ -596,6 +601,7 @@ def write_file(file_path: str, content: str, encoding: str = "utf-8") -> Dict[st
         "old_text": {"type": "str", "description": "要替换的旧文本（必填）"},
         "new_text": {"type": "str", "description": "替换后的新文本（必填）"},
     },
+    required=["file_path", "old_text", "new_text"],
     examples=[
         "edit_file(file_path='notes.txt', old_text='test', new_text='production')",
     ],
@@ -657,6 +663,7 @@ def edit_file(file_path: str, old_text: str, new_text: str) -> Dict[str, Any]:
     parameters={
         "directory": {"type": "str", "description": "目录路径（必填）"},
     },
+    required=["directory"],
     examples=["create_directory(directory='D:/data/new_folder')"],
     category="file",
     danger_level="safe",
@@ -688,6 +695,7 @@ def create_directory(directory: str) -> Dict[str, Any]:
         "source": {"type": "str", "description": "源文件路径（必填）"},
         "destination": {"type": "str", "description": "目标路径（必填）"},
     },
+    required=["source", "destination"],
     examples=["move_file(source='a.txt', destination='subdir/a.txt')"],
     category="file",
     danger_level="medium",
@@ -722,6 +730,7 @@ def move_file(source: str, destination: str) -> Dict[str, Any]:
     parameters={
         "file_path": {"type": "str", "description": "要删除的文件路径（必填）"},
     },
+    required=["file_path"],
     examples=["delete_file(file_path='D:/data/old.txt')"],
     category="file",
     danger_level="medium",
@@ -750,6 +759,7 @@ def delete_file(file_path: str) -> Dict[str, Any]:
     parameters={
         "trash_id": {"type": "str", "description": "回收站条目的 ID（必填）"},
     },
+    required=["trash_id"],
     examples=["restore_file(trash_id='abc12345')"],
     category="file",
     danger_level="medium",
@@ -765,6 +775,7 @@ def restore_file(trash_id: str) -> Dict[str, Any]:
         "file_path": {"type": "str", "description": "文件路径（必填）"},
         "encoding": {"type": "str", "description": "编码，默认 utf-8"},
     },
+    required=["file_path"],
     examples=["read_text_file(file_path='notes.txt')"],
     category="file",
     danger_level="safe",

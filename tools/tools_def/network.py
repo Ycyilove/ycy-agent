@@ -132,6 +132,7 @@ def make_request(method: str, url: str, headers: Dict[str, str] = None,
         "headers": {"type": "dict", "description": "请求头（可选）"},
         "timeout": {"type": "int", "description": "超时时间（秒），默认30秒"}
     },
+    required=["url"],
     examples=[
         "http_get(url='https://api.github.com/users/octocat')",
         "http_get(url='https://httpbin.org/get', timeout=10)"
@@ -153,6 +154,7 @@ def http_get(url: str, headers: Dict[str, str] = None, timeout: int = 30) -> Dic
         "headers": {"type": "dict", "description": "请求头（可选）"},
         "timeout": {"type": "int", "description": "超时时间（秒），默认30秒"}
     },
+    required=["url", "data"],
     examples=[
         "http_post(url='https://httpbin.org/post', data={'key': 'value'})",
         "http_post(url='https://api.example.com/submit', data={'name': 'test', 'age': 20})"
@@ -174,6 +176,7 @@ def http_post(url: str, data: Any, headers: Dict[str, str] = None, timeout: int 
         "headers": {"type": "dict", "description": "请求头（可选）"},
         "timeout": {"type": "int", "description": "超时时间（秒）"}
     },
+    required=["url", "data"],
     examples=[
         "http_put(url='https://api.example.com/resource/1', data={'name': 'updated'})"
     ],
@@ -193,6 +196,7 @@ def http_put(url: str, data: Any, headers: Dict[str, str] = None, timeout: int =
         "headers": {"type": "dict", "description": "请求头（可选）"},
         "timeout": {"type": "int", "description": "超时时间（秒）"}
     },
+    required=["url"],
     examples=[
         "http_delete(url='https://api.example.com/resource/1')"
     ],
@@ -210,6 +214,7 @@ def http_delete(url: str, headers: Dict[str, str] = None, timeout: int = 30) -> 
     parameters={
         "url": {"type": "str", "description": "要检查的URL"}
     },
+    required=["url"],
     examples=[
         "check_url_status(url='https://www.baidu.com')"
     ],
@@ -274,6 +279,7 @@ def check_url_status(url: str) -> Dict[str, Any]:
         "html": {"type": "str", "description": "HTML内容"},
         "extract": {"type": "str", "description": "提取类型（links/title/text/all），默认all"}
     },
+    required=["html"],
     examples=[
         "parse_html(html='<html><body><a href=\"http://example.com\">Link</a></body></html>', extract='links')"
     ],
@@ -338,6 +344,7 @@ def parse_html(html: str, extract: str = "all") -> Dict[str, Any]:
         "url": {"type": "str", "description": "JSON API URL"},
         "key_path": {"type": "str", "description": "JSON键路径（可选，如 data.users.0.name）"}
     },
+    required=["url"],
     examples=[
         "fetch_json(url='https://api.github.com/users/octocat')",
         "fetch_json(url='https://api.example.com/data', key_path='data.0.id')"

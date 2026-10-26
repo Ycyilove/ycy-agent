@@ -136,6 +136,7 @@ def _guess_filename(url: str, mime: str) -> str:
             "description": "可选：覆盖默认文件名",
         },
     },
+    required=["url"],
     examples=[
         "fetch_url(url='https://www.baidu.com/favicon.ico')",
         "fetch_url(url='https://example.com/report.pdf')",

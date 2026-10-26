@@ -445,6 +445,7 @@ def _format_tools_for_message(tools: List[str]) -> str:
             "description": "每个关键词的搜索候选条数上限，默认 100",
         },
     },
+    required=["user_query"],
     examples=[
         "search_and_connect_mcp(user_query='实时查询维尼斯当前状态以及外界评价', capability='news,realtime')",
         "search_and_connect_mcp(user_query='帮我找一下最新的 AI 新闻', capability='news,search')",

@@ -108,6 +108,7 @@ def list_knowledge_sources() -> Dict[str, Any]:
         "kind": {"type": "str", "description": "Optional resource kind: image / chart / attachment"},
         "limit": {"type": "int", "description": "Max number of resources to return, default 20"},
     },
+    required=[],
     examples=[
         "list_knowledge_resources()",
         "list_knowledge_resources(kind='image', limit=5)",
@@ -154,6 +155,7 @@ def list_knowledge_resources(
     parameters={
         "resource_id": {"type": "str", "description": "Resource id returned by list_knowledge_resources"},
     },
+    required=["resource_id"],
     examples=["get_knowledge_resource(resource_id='abc123')"],
     category="knowledge",
     danger_level="safe",
@@ -200,6 +202,7 @@ def get_knowledge_resource(resource_id: str) -> Dict[str, Any]:
             "description": "flat / record / auto，默认 auto",
         },
     },
+    required=["query"],
     examples=[
         "search_knowledge(query='summary of the design doc', top_k=15)",
         "search_knowledge(query='杨灿垣所在团队的奖项', mode='record')",

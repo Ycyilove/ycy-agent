@@ -115,6 +115,7 @@ def parse_relative_time(date_str: str, base_date: datetime = None) -> Optional[d
         "end_time": {"type": "str", "description": "结束时间"},
         "unit": {"type": "str", "description": "输出单位（auto/seconds/minutes/hours/days/weeks），默认auto"}
     },
+    required=["start_time", "end_time"],
     examples=[
         "calculate_time_difference(start_time='2024-01-01', end_time='2024-01-02')",
         "calculate_time_difference(start_time='2024-01-01 10:00:00', end_time='2024-01-01 11:30:00', unit='minutes')"
@@ -180,6 +181,7 @@ def calculate_time_difference(start_time: str, end_time: str, unit: str = "auto"
         "value": {"type": "int", "description": "要增加/减少的数值"},
         "unit": {"type": "str", "description": "时间单位（seconds/minutes/hours/days/weeks/months/years）"}
     },
+    required=[],
     examples=[
         "add_time(base_time='2024-01-01', value=10, unit='days')",
         "add_time(value=2, unit='weeks')"
@@ -242,6 +244,7 @@ def add_time(base_time: str = None, value: int = 0, unit: str = "days") -> Dict[
         "timezone": {"type": "str", "description": "时区（如 Asia/Shanghai, UTC, US/Eastern），默认本地时间"},
         "format": {"type": "str", "description": "输出格式（如 %Y-%m-%d %H:%M:%S）"}
     },
+    required=[],
     examples=[
         "get_current_time()",
         "get_current_time(timezone='UTC')",
@@ -297,6 +300,7 @@ def get_current_time(timezone: str = None, format: str = None) -> Dict[str, Any]
         "input_value": {"type": "str", "description": "输入值（时间戳或日期字符串）"},
         "output_format": {"type": "str", "description": "输出格式（如 %Y-%m-%d %H:%M:%S）"}
     },
+    required=["input_value"],
     examples=[
         "format_timestamp(input_value='2024-01-01', output_format='%Y年%m月%d日')",
         "format_timestamp(input_value='1704067200', output_format='%Y-%m-%d')"
@@ -346,6 +350,7 @@ def format_timestamp(input_value: str, output_format: str = "%Y-%m-%d %H:%M:%S")
         "birth_date": {"type": "str", "description": "出生日期（如 1990-01-01）"},
         "reference_date": {"type": "str", "description": "参考日期（默认当前日期）"}
     },
+    required=["birth_date"],
     examples=[
         "calculate_age(birth_date='1990-01-01')",
         "calculate_age(birth_date='2000-06-15', reference_date='2024-01-01')"

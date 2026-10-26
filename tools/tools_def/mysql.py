@@ -152,6 +152,7 @@ def close_all_connections():
         "password": {"type": "str", "description": "密码（当 config 为空时使用）"},
         "database": {"type": "str", "description": "数据库名（当 config 为空时使用）"}
     },
+    required=[],
     examples=[
         'mysql_connect(config=\'{"host":"localhost","user":"root","password":"123456","database":"mydb"}\')',
         'mysql_connect(config="主机localhost，用户root，密码123456，数据库test")',
@@ -214,6 +215,7 @@ def mysql_connect(
         "config": {"type": "str", "description": "数据库配置，支持自然语言或JSON，留空使用环境变量"},
         "limit": {"type": "int", "description": "结果条数限制，默认 100"}
     },
+    required=["sql"],
     examples=[
         'mysql_query(sql="SELECT * FROM users LIMIT 10")',
         'mysql_query(sql="SELECT name, email FROM users WHERE age > 18", config="数据库test，用户root，密码123")',
@@ -281,6 +283,7 @@ def mysql_query(
         "sql": {"type": "str", "description": "SQL 写操作语句"},
         "config": {"type": "str", "description": "数据库配置，支持自然语言或JSON，留空使用环境变量"}
     },
+    required=["sql"],
     examples=[
         'mysql_execute(sql="INSERT INTO users (name, email) VALUES (\'张三\', \'zhangsan@example.com\')")',
         'mysql_execute(sql="UPDATE users SET age=20 WHERE id=1", config=\'{"database":"mydb"}\')'
@@ -329,6 +332,7 @@ def mysql_execute(
     parameters={
         "config": {"type": "str", "description": "数据库配置，支持自然语言或JSON"}
     },
+    required=[],
     examples=[
         'mysql_show_tables(config=\'{"database":"mydb"}\')',
         'mysql_show_tables(config="数据库mydb")'
@@ -372,6 +376,7 @@ def mysql_show_tables(config: str = "") -> Dict[str, Any]:
         "table": {"type": "str", "description": "表名"},
         "config": {"type": "str", "description": "数据库配置，支持自然语言或JSON"}
     },
+    required=["table"],
     examples=[
         'mysql_describe_table(table="users")',
         'mysql_describe_table(table="orders", config=\'{"database":"shop"}\')'
@@ -423,6 +428,7 @@ def mysql_describe_table(
     parameters={
         "config": {"type": "str", "description": "数据库配置，支持自然语言或JSON"}
     },
+    required=[],
     examples=[
         'mysql_show_databases()',
         'mysql_show_databases(config=\'{"host":"192.168.1.100","user":"admin","password":"pass"}\')'
@@ -465,6 +471,7 @@ def mysql_show_databases(config: str = "") -> Dict[str, Any]:
         "where": {"type": "str", "description": "WHERE 条件（可选）"},
         "config": {"type": "str", "description": "数据库配置，支持自然语言或JSON"}
     },
+    required=["table"],
     examples=[
         'mysql_count(table="users")',
         'mysql_count(table="orders", where="status=\'completed\'")'

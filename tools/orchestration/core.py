@@ -230,14 +230,8 @@ class AgentOrchestrator:
 
         包括嵌套结构、enum、默认值、必填标记。
         """
-        schema = getattr(meta, "input_schema", None) or {}
-        properties = (
-            schema.get("properties")
-            or getattr(meta, "parameters", None)
-            or {}
-        )
-        required = set(schema.get("required") or [])
-
+        properties, required_list = self._read_tool_schema(meta)
+        required = set(required_list)
         if not properties:
             return "(该工具无参数)"
 
@@ -824,6 +818,12 @@ class AgentOrchestrator:
                 return True
         return False
 
+    @staticmethod
+    def _read_tool_schema(meta: Any) -> tuple[Dict[str, Any], List[str]]:
+        """统一读取工具 schema（委托 tools.schema_utils，与 ToolAgent 共用口径）。"""
+        from tools.schema_utils import read_tool_schema
+        return read_tool_schema(meta)
+         
     async def _fill_params(
         self,
         goal: str,
@@ -844,9 +844,7 @@ class AgentOrchestrator:
             return {}
 
         # ── 零参数工具：直接返回空 dict，不让 LLM 编字段 ──
-        _schema = getattr(meta, "input_schema", None) or {}
-        _props = _schema.get("properties") or {}
-        _required = _schema.get("required") or []
+        _props, _required = self._read_tool_schema(meta)
         _is_mcp = tool_name.startswith("mcp__")
         _is_discovery = tool_name in self._MCP_DISCOVERY_TOOLS
 

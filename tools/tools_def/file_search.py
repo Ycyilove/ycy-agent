@@ -128,6 +128,7 @@ def _read_lines(path: Path) -> Optional[List[str]]:
         "is_regex": {"type": "bool", "description": "pattern 是否为正则，默认 True"},
         "max_results": {"type": "int", "description": "最多返回多少条匹配，默认 50"},
     },
+    required=["pattern"],
     examples=[
         "search_content(pattern='def run_python_code', path='D:/ycy/LLM/LLM', file_glob='*.py')",
         "search_content(pattern='import os', path='./tools', is_regex=False)",
@@ -229,6 +230,7 @@ def search_content(
         "path": {"type": "str", "description": "搜索根目录，默认当前目录"},
         "max_results": {"type": "int", "description": "最多返回多少个文件，默认 100"},
     },
+    required=["pattern"],
     examples=[
         "search_files(pattern='*.py', path='D:/ycy/LLM/LLM/tools')",
         "search_files(pattern='test_*.py', path='.')",
@@ -297,6 +299,7 @@ def search_files(
         "start_line": {"type": "int", "description": "起始行号（从 1 开始），默认 1"},
         "end_line": {"type": "int", "description": "结束行号（含），默认 500"},
     },
+    required=["file_path"],
     examples=[
         "read_file_range(file_path='D:/a/big.log', start_line=1, end_line=100)",
         "read_file_range(file_path='D:/a/big.log', start_line=101, end_line=200)",

@@ -8,9 +8,9 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import List, Optional
-import re
 
 logger = logging.getLogger(__name__)
 
@@ -22,81 +22,13 @@ class FastChunk:
     headings: List[str] = field(default_factory=list)
     heading_levels: List[int] = field(default_factory=list)
     page_no: Optional[int] = None
+    # ── P0 新增：chunk 实际覆盖的页范围（跨页时 >1 个）──
+    page_numbers: List[int] = field(default_factory=list)
     font_size: float = 0.0
     is_bold: bool = False
 
 
-# ── 标题层级推断：编号优先，字号兜底 ──
-
-_NUM_HEADING = re.compile(r"^(\d+(?:\.\d+)*)\.?\s+\S")
-
-# 页眉/页脚/水印噪声：arXiv 编号、孤立页码、"Page N"、"第N页"
-_NOISE_PATTERNS = (
-    re.compile(r"^arxiv:\s*\d{4}\.\d{4,5}", re.I),
-    re.compile(r"^page\s+\d+(\s*of\s*\d+)?$", re.I),
-    re.compile(r"^第?\s*\d+\s*页$"),
-    re.compile(r"^\d{1,4}$"),
-)
-
-
-def _is_noise_line(text: str) -> bool:
-    t = text.strip()
-    if len(t) <= 2:
-        return True
-    return any(p.match(t) for p in _NOISE_PATTERNS)
-
-
-_LETTER_HEADING = re.compile(r"^[A-Z]\s+\S")
-
-_TOP_SECTIONS = {
-    "abstract", "摘要", "introduction", "引言",
-    "references", "参考文献", "acknowledgments", "致谢",
-    "appendix", "appendices", "附录",
-}
-
-def _infer_heading_level(text: str, ratio: float) -> int:
-    t = text.strip()
-    if t.lower() in _TOP_SECTIONS:
-        return 1
-    m = _NUM_HEADING.match(t)
-    if m:
-        return m.group(1).count(".") + 1
-    if _LETTER_HEADING.match(t):
-        return 1
-    if ratio >= 1.5:
-        return 1
-    if ratio >= 1.3:
-        return 2
-    return 3
-
-
-def has_text_layer(pdf_path: str, min_chars_per_page: int = 50) -> bool:
-    """判断 PDF 是否有文本层。
-
-    逐页统计字符数，平均每页低于阈值视为扫描件。
-    """
-    import fitz
-
-    doc = fitz.open(pdf_path)
-    try:
-        total_pages = len(doc)
-        if total_pages == 0:
-            return False
-
-        total_chars = 0
-        for page in doc:
-            total_chars += len(page.get_text().strip())
-
-        avg = total_chars / total_pages
-        logger.info(
-            "[dsh][fastpdf] 文本层检查: %d 页, 平均 %.0f 字符/页 → %s",
-            total_pages, avg, "有文本层" if avg >= min_chars_per_page else "扫描件",
-        )
-        return avg >= min_chars_per_page
-    finally:
-        doc.close()
-
-import re
+# ── P2：删掉上半部重复定义，全文件只保留这一份 ──
 
 # 页眉/页脚/水印噪声：arXiv 编号、孤立页码、"Page N"、"第N页"、"K-12"
 _NOISE_PATTERNS = (
@@ -142,9 +74,11 @@ def _infer_heading_level(text: str, ratio: float) -> int:
         return 2
     return 3
 
+
 def _is_bold(flags: int) -> bool:
     """PyMuPDF span flags 的 bit 4 表示粗体。"""
     return bool(flags & (1 << 4))
+
 
 def is_standalone_line(line_text: str, prev_line: str, next_line: str) -> bool:
     """判断一行是否单独成段。
@@ -154,6 +88,7 @@ def is_standalone_line(line_text: str, prev_line: str, next_line: str) -> bool:
         - 前后行与它字号/缩进不同（这里退化为：前后行为空）
     """
     return (not prev_line.strip()) or (not next_line.strip())
+
 
 def _looks_like_heading(
     text: str,
@@ -187,11 +122,45 @@ def _looks_like_heading(
             return False
         return True
 
-    # 全大写短行（年报小标题常见）
-    if text.isupper() and 5 <= len(text) <= 80:
+    # ── P1 修复：全大写短行只对"含 ASCII 字母"的行生效 ──
+    # 原 `text.isupper()` 对中文单字（"睿"、"钰"）返回 True，
+    # 导致名单里每个单字行都被判成 heading。
+    if (
+        any(c.isascii() and c.isalpha() for c in text)
+        and text.isupper()
+        and 5 <= len(text) <= 80
+    ):
         return True
 
     return False
+
+
+def has_text_layer(pdf_path: str, min_chars_per_page: int = 50) -> bool:
+    """判断 PDF 是否有文本层。
+
+    逐页统计字符数，平均每页低于阈值视为扫描件。
+    """
+    import fitz
+
+    doc = fitz.open(pdf_path)
+    try:
+        total_pages = len(doc)
+        if total_pages == 0:
+            return False
+
+        total_chars = 0
+        for page in doc:
+            total_chars += len(page.get_text().strip())
+
+        avg = total_chars / total_pages
+        logger.info(
+            "[dsh][fastpdf] 文本层检查: %d 页, 平均 %.0f 字符/页 → %s",
+            total_pages, avg, "有文本层" if avg >= min_chars_per_page else "扫描件",
+        )
+        return avg >= min_chars_per_page
+    finally:
+        doc.close()
+
 
 def extract_tables(pdf_path: str) -> List[dict]:
     """用 PyMuPDF 的 find_tables() 识别表格。
@@ -225,16 +194,22 @@ def extract_tables(pdf_path: str) -> List[dict]:
     finally:
         doc.close()
     return out
-    
+
+
 def parse_fast(
     pdf_path: str,
     max_chars_per_chunk: int = 800,
     detect_headings: bool = True,
+    page_boundary: bool = False,   # ── P3 可选：按页强制断开，默认关闭 ──
 ) -> List[FastChunk]:
     """快速解析 PDF，返回带 headings 的 chunk 列表。
 
     detect_headings=False 时不做 heading 识别，只按 max_chars_per_chunk 切正文，
     用于版面复杂（年报/杂志）且 Docling 失败时的安全降级。
+
+    page_boundary=True 时每页末尾强制 flush，保证 chunk 不跨页。
+    对名单/表格类"页间无强语义连续"的文档有益；对论文/年报会切断跨页段落，
+    故默认 False，由调用方按文档类型决定。
     """
     import fitz
     from collections import Counter
@@ -274,18 +249,20 @@ def parse_fast(
         chunks: List[FastChunk] = []
         heading_stack: List[tuple] = []
         buffer_lines: List[str] = []
-        buffer_chars = 0                    # 新增：buffer 当前字符数
+        buffer_chars = 0
+        buffer_pages: List[int] = []        # ── P0：buffer 覆盖的页 ──
         current_page = None
         page_font_size = body_font_size
 
         def flush_buffer():
-            nonlocal buffer_chars
+            nonlocal buffer_chars, buffer_pages
             if not buffer_lines:
                 return
             text = "\n".join(buffer_lines).strip()
             if not text:
                 buffer_lines.clear()
                 buffer_chars = 0
+                buffer_pages = []
                 return
             # 去重相邻重复 heading，并截断过深栈（>10 层视为异常）
             raw_headings = [h for h, _ in heading_stack][:10]
@@ -295,15 +272,20 @@ def parse_fast(
                 if not dedup_h or dedup_h[-1] != h:
                     dedup_h.append(h)
                     dedup_lv.append(lv)
+            pages = sorted(set(buffer_pages)) if buffer_pages else (
+                [current_page] if current_page is not None else []
+            )
             chunks.append(FastChunk(
                 text=text,
                 headings=dedup_h,
                 heading_levels=dedup_lv,
-                page_no=current_page,
+                page_no=pages[0] if pages else None,
+                page_numbers=pages,          # ── P0 ──
                 font_size=page_font_size,
             ))
             buffer_lines.clear()
             buffer_chars = 0
+            buffer_pages = []
 
         for page_no, page in enumerate(doc, start=1):
             current_page = page_no
@@ -332,32 +314,7 @@ def parse_fast(
                     })
 
             # ── 合并“编号行 + 标题行”：PyMuPDF 常把 "2.1\nModels" 拆成两行 ──
-            merged: List[dict] = []
-            j = 0
-            while j < len(lines):
-                cur = lines[j]
-                nxt = lines[j + 1] if j + 1 < len(lines) else None
-                is_num_only = bool(re.fullmatch(r"\d+(?:\.\d+)*", cur["text"]))
-                is_letter_only = bool(re.fullmatch(r"[A-Z]", cur["text"]))
-                if (
-                    nxt is not None
-                    and (is_num_only or is_letter_only)
-                    and not re.match(r"^\d+(?:\.\d+)*\s+\S", nxt["text"])
-                    and len(nxt["text"]) <= 80
-                    and (nxt["bold"] or nxt["size"] >= body_font_size * 1.05)
-                ):
-                    merged.append({
-                        "text": f"{cur['text']} {nxt['text']}",
-                        "size": max(cur["size"], nxt["size"]),
-                        "bold": cur["bold"] or nxt["bold"],
-                    })
-                    j += 2
-                else:
-                    merged.append(cur)
-                    j += 1
-            lines = merged
-
-            # ── 合并"编号行 + 标题行"：PyMuPDF 常把 "2.1\nModels" 拆成两行 ──
+            # ── P2：原文件这段 while 循环完整重复了两遍，删掉第二遍 ──
             merged: List[dict] = []
             j = 0
             while j < len(lines):
@@ -418,6 +375,13 @@ def parse_fast(
                 page_font_size = line_size
                 buffer_lines.append(line_text)
                 buffer_chars += len(line_text)
+                # ── P0：记录本行所在页 ──
+                if current_page not in buffer_pages:
+                    buffer_pages.append(current_page)
+
+            # ── P3 可选：每页末尾强制 flush，保证 chunk 不跨页 ──
+            if page_boundary:
+                flush_buffer()
 
         flush_buffer()
 

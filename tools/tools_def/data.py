@@ -36,6 +36,7 @@ def detect_delimiter(content: str) -> str:
         "encoding": {"type": "str", "description": "文件编码，默认utf-8"},
         "max_rows": {"type": "int", "description": "最大读取行数，默认100行用于预览"}
     },
+    required=["file_path"],
     examples=[
         "read_csv(file_path='data.csv')",
         "read_csv(file_path='data.csv', max_rows=10)"
@@ -110,6 +111,7 @@ def read_csv(file_path: str, encoding: str = "utf-8", max_rows: int = 100) -> Di
         "file_path": {"type": "str", "description": "CSV文件路径"},
         "encoding": {"type": "str", "description": "文件编码，默认utf-8"}
     },
+    required=["file_path"],
     examples=[
         "analyze_csv(file_path='data.csv')"
     ],
@@ -209,6 +211,7 @@ def analyze_csv(file_path: str, encoding: str = "utf-8") -> Dict[str, Any]:
         "sheet_name": {"type": "str", "description": "Sheet名称，默认第一个sheet"},
         "max_rows": {"type": "int", "description": "最大读取行数，默认50行"}
     },
+    required=["file_path"],
     examples=[
         "read_excel(file_path='data.xlsx')",
         "read_excel(file_path='data.xlsx', sheet_name='Sheet2', max_rows=20)"
@@ -299,6 +302,7 @@ def read_excel(file_path: str, sheet_name: str = None, max_rows: int = 50) -> Di
         "file_path": {"type": "str", "description": "输出CSV文件路径"},
         "columns": {"type": "list", "description": "列名列表"}
     },
+    required=["data"],
     examples=[
         "export_to_csv(data=[{'name': 'Tom', 'age': 20}], file_path='output.csv', columns=['name', 'age'])"
     ],

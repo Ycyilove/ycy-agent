@@ -243,6 +243,31 @@ class ToolAgent:
                 parameters=params,
             )
 
+        # ── 修复 D：内置工具必填参数预校验（MCP 工具豁免） ──
+        if not self._is_mcp_tool_name(tool_name):
+            from .schema_utils import read_tool_schema
+            meta = self.registry.get_metadata(tool_name)
+            if meta is not None:
+                _props, _required = read_tool_schema(meta)
+                if _required:
+                    missing = [k for k in _required if k not in params]
+                    if missing:
+                        accepted = list(_props.keys()) or list(_required)
+                        logger.warning(
+                            "[dsh][agent] %s missing required params %r "
+                            "(accepted=%r)", tool_name, missing, accepted,
+                        )
+                        return ToolCallResult(
+                            tool_name=tool_name, success=False,
+                            error=(
+                                f"缺少必填参数: {missing}。"
+                                f"工具 `{tool_name}` 接受的关键字：{accepted}\n"
+                                f"请补齐后重试。"
+                            ),
+                            execution_time=time.time() - start_time,
+                            parameters=params,
+                        )
+
         try:
             result = tool_func(**params)
             if inspect.isawaitable(result):

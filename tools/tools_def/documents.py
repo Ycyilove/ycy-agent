@@ -69,6 +69,7 @@ def _human_size(size: int) -> str:
         "end_page": {"type": "int", "description": "结束页码（含），默认读全部"},
         "max_chars": {"type": "int", "description": "单次返回最大字符数，默认 50000"},
     },
+    required=["file_path"],
     examples=[
         "read_pdf_text(file_path='D:/a/paper.pdf')",
         "read_pdf_text(file_path='D:/a/paper.pdf', start_page=3, end_page=5)",
@@ -155,6 +156,7 @@ def read_pdf_text(
     parameters={
         "file_path": {"type": "str", "description": "PDF 文件路径（必填）"},
     },
+    required=["file_path"],
     examples=["read_pdf_metadata(file_path='D:/a/paper.pdf')"],
     category="document",
     danger_level="safe",
@@ -195,6 +197,7 @@ def read_pdf_metadata(file_path: str) -> Dict[str, Any]:
         "pdf_paths": {"type": "list", "description": "PDF 路径列表（按顺序合并）"},
         "output_path": {"type": "str", "description": "输出路径（必填）"},
     },
+    required=["pdf_paths", "output_path"],
     examples=[
         "merge_pdfs(pdf_paths=['a.pdf', 'b.pdf'], output_path='merged.pdf')",
     ],
@@ -251,6 +254,7 @@ def merge_pdfs(pdf_paths: List[str], output_path: str) -> Dict[str, Any]:
         "output_dir": {"type": "str", "description": "输出目录（必填）"},
         "pages_per_file": {"type": "int", "description": "每个文件多少页，默认 1"},
     },
+    required=["file_path", "output_dir"],
     examples=[
         "split_pdf(file_path='big.pdf', output_dir='D:/out', pages_per_file=1)",
     ],
@@ -319,6 +323,7 @@ def split_pdf(
         "从 list[dict] 数据生成 Excel 文件（.xlsx）。"
         "如果文件已存在则新建 sheet 或覆盖。"
     ),
+    required=["data", "file_path"],
     parameters={
         "data": {"type": "list", "description": "数据（list[dict] 或 list[list]）"},
         "file_path": {"type": "str", "description": "输出 .xlsx 路径（必填）"},
@@ -400,6 +405,7 @@ def write_excel(
         "file_path": {"type": "str", "description": "Excel 路径（必填）"},
         "edits": {"type": "list", "description": "编辑列表（必填）"},
     },
+    required=["file_path", "edits"],
     examples=[
         "edit_excel(file_path='a.xlsx', edits=[{'sheet':'Sheet1','cell':'B2','value':100}])",
     ],
@@ -458,6 +464,7 @@ def edit_excel(file_path: str, edits: List[Dict[str, Any]]) -> Dict[str, Any]:
         "sheet_name": {"type": "str", "description": "新 sheet 名（必填）"},
         "data": {"type": "list", "description": "数据（list[dict] 或 list[list]）"},
     },
+    required=["file_path", "sheet_name", "data"],
     examples=[
         "add_excel_sheet(file_path='a.xlsx', sheet_name='Q2', data=[{'x':1}])",
     ],
@@ -519,6 +526,7 @@ def add_excel_sheet(
         "file_path": {"type": "str", "description": "Word 路径（必填）"},
         "max_chars": {"type": "int", "description": "最大字符数，默认 50000"},
     },
+    required=["file_path"],
     examples=["read_docx_text(file_path='D:/a/report.docx')"],
     category="document",
     danger_level="safe",
@@ -560,6 +568,7 @@ def read_docx_text(file_path: str, max_chars: int = 50000) -> Dict[str, Any]:
     parameters={
         "file_path": {"type": "str", "description": "Word 路径（必填）"},
     },
+    required=["file_path"],
     examples=["read_docx_tables(file_path='D:/a/report.docx')"],
     category="document",
     danger_level="safe",
@@ -602,6 +611,7 @@ def read_docx_tables(file_path: str) -> Dict[str, Any]:
         "file_path": {"type": "str", "description": "输出路径（必填）"},
         "title": {"type": "str", "description": "文档标题（可选）"},
     },
+    required=["paragraphs", "file_path"],
     examples=[
         "write_docx(paragraphs=['第一段', '第二段'], file_path='out.docx', title='报告')",
     ],
@@ -653,6 +663,7 @@ def write_docx(
         "find": {"type": "str", "description": "要查找的文本（必填）"},
         "replace": {"type": "str", "description": "替换为（必填）"},
     },
+    required=["file_path", "find", "replace"],
     examples=[
         "edit_docx(file_path='a.docx', find='旧', replace='新')",
     ],

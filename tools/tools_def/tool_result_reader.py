@@ -111,6 +111,7 @@ get_registry().register_callable(
         "- 想看完整 JSON 时，用 offset/limit 分页。\n"
     ),
     parameters=READ_TOOL_RESULT_PARAMETERS,
+    required=["result_id", "task_id"],
     category="knowledge_read",
     danger_level="safe",
     idempotent=True,

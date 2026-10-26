@@ -1,13 +1,13 @@
-"""把指定文档的 chunk 和 Contextual 摘要 dump 到 JSONL。
+"""把指定文档的 chunk dump 到 JSONL（不生成 Contextual 摘要）。
 
 自动分流：
     - 有文本层的 PDF → PyMuPDF 快路径（秒级）
     - 无文本层的 PDF → Docling + OCR
 
 用法：
-    python -m tools.dump_chunks "path/to/xxx.pdf"
-    python -m tools.dump_chunks "path/to/xxx.pdf" --no-ctx
-    python -m tools.dump_chunks "path/to/xxx.pdf" --out out/chunks.jsonl
+    python -m scripts.dump_chunks 'path/to/xxx.pdf'
+    python -m scripts.dump_chunks 'path/to/xxx.pdf' --out out/chunks.jsonl
+    python -m scripts.dump_chunks 'path/to/xxx.pdf' --with-ctx   # 需要摘要时才加
 """
 
 from __future__ import annotations
@@ -40,8 +40,14 @@ logger = logging.getLogger("dump_chunks")
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("pdf", help="PDF 文件路径")
-    parser.add_argument("--out", default=None, help="输出 JSONL 路径")
-    parser.add_argument("--no-ctx", action="store_true", help="跳过 Contextual 摘要")
+    parser.add_argument(
+        "--out", default=None,
+        help="输出 JSONL 路径（默认写到项目根目录，文件名 <pdf名>.chunks.jsonl）",
+    )
+    parser.add_argument(
+        "--with-ctx", action="store_true",
+        help="生成 Contextual 摘要（默认不生成）",
+    )
     args = parser.parse_args()
 
     pdf_path = Path(args.pdf).resolve()
@@ -49,10 +55,11 @@ def main():
         print(f"[✗] PDF 不存在: {pdf_path}")
         sys.exit(1)
 
+    # ── 默认输出到项目根目录 ──
     out_path = (
         Path(args.out).resolve()
         if args.out
-        else pdf_path.with_suffix(".chunks.jsonl")
+        else _PROJECT_ROOT / f"{pdf_path.stem}.chunks.jsonl"
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -81,11 +88,11 @@ def main():
         headings_list.append(h_list)
         pages_list.append(list(getattr(dc.meta, "page_numbers", None) or []))
 
-    # ── 3. Contextual 摘要（可选）──
+    # ── 3. Contextual 摘要（默认跳过；--with-ctx 才生成）──
     summaries = [""] * len(docling_chunks)
     enriched_list = [None] * len(docling_chunks)
 
-    if not args.no_ctx:
+    if args.with_ctx:
         print(f"[2] Contextual 摘要生成")
         try:
             from backend.config import (
@@ -113,7 +120,7 @@ def main():
         except Exception:
             logger.exception("Contextual 摘要生成失败，跳过")
     else:
-        print("[2] 跳过 Contextual 摘要（--no-ctx）")
+        print("[2] 跳过 Contextual 摘要（默认；需要时加 --with-ctx）")
 
     # ── 4. 落盘 ──
     print(f"[3] 写入: {out_path}")
