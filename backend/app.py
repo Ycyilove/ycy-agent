@@ -446,7 +446,16 @@ def schedule_capability_index_rebuild(
     reason: str = "manual",
     servers: Optional[Set[str]] = None,
 ) -> None:
-    """后台调度一次重建。servers=None 全量，否则增量。"""
+    """后台调度一次重建。servers=None 全量，否则增量。
+
+    默认关闭（CAPABILITY_INDEX_ENABLED!=1 时直接返回），
+    避免启动 / MCP 变更时批量调 LLM 抢占主链路配额。
+    """
+    if os.getenv("CAPABILITY_INDEX_ENABLED", "0") != "1":
+        logger.debug(
+            "[boot] capability index rebuild disabled (reason=%s)", reason,
+        )
+        return
     global _capability_index_task
     if mcp_client_manager is None:
         return

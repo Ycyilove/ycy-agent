@@ -24,10 +24,10 @@ RAG_EMBEDDING_MODEL = os.getenv(
     'BAAI/bge-small-zh-v1.5',
 )
 
-# 工具筛选器的 embedding 模型（保持英文模型，工具名/描述主要是英文）
+# 工具筛选器的 embedding 模型
 SHORTLIST_EMBEDDING_MODEL = os.getenv(
     'SHORTLIST_EMBEDDING_MODEL',
-    'sentence-transformers/all-MiniLM-L6-v2',
+    'BAAI/bge-small-zh-v1.5',
 )
 
 # 检索混合策略

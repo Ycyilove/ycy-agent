@@ -619,6 +619,8 @@ class AgentOrchestrator:
                 asyncio.to_thread(
                     self._llm_provider().generate,
                     [{"role": "user", "content": prompt}],
+                    mode="quick",
+                    timeout=110.0,
                 ),
                 timeout=120.0,
             )
@@ -1039,6 +1041,8 @@ class AgentOrchestrator:
                 asyncio.to_thread(
                     self._llm_provider().generate,
                     [{"role": "user", "content": prompt}],
+                    mode="quick",
+                    timeout=110.0,
                 ),
                 timeout=120.0,
             )
@@ -1392,6 +1396,8 @@ class AgentOrchestrator:
                 asyncio.to_thread(
                     self._llm_provider().generate,
                     [{"role": "user", "content": prompt}],
+                    mode="quick",
+                    timeout=55.0,
                 ),
                 timeout=60.0,
             )

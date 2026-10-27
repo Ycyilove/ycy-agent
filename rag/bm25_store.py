@@ -5,21 +5,51 @@
     - 中文分词用 jieba
     - 结果与向量检索用 RRF 融合
     - 懒加载 + 缓存；FAISS 索引变化时通过 reset() 失效
+    - 持久化：tokenized docs 落盘，命中缓存时跳过 jieba 分词
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import os
 import threading
 from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+# 缓存目录：默认项目根下 data/bm25_cache，可用 RAG_BM25_CACHE_DIR 覆盖
+_DEFAULT_CACHE_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "data", "bm25_cache")
+)
+
+
+def _cache_dir() -> str:
+    path = os.getenv("RAG_BM25_CACHE_DIR", _DEFAULT_CACHE_DIR)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _normalize_text(text: str) -> str:
+    """NFKC 规范化：把兼容字符（如 ⼯ U+2F47）映射回标准汉字（工 U+5DE5）。
+
+    同时统一全角/半角、组合字符，避免同一语义在分词和 BM25 匹配时被当成不同词项。
+    """
+    if not text:
+        return ""
+    try:
+        import unicodedata
+        return unicodedata.normalize("NFKC", text)
+    except Exception:
+        return text
 
 
 def _tokenize(text: str) -> List[str]:
     """中文分词。失败时降级为字符切分。"""
     if not text:
         return []
+    text = _normalize_text(text)
     try:
         import jieba
         return [t for t in jieba.lcut(text) if t.strip()]
@@ -27,10 +57,74 @@ def _tokenize(text: str) -> List[str]:
         return list(text)
 
 
+def _docs_fingerprint(metadata: List[Dict]) -> str:
+    """对 docs 的 text + filename 做指纹，用于缓存命名和失效判断。"""
+    h = hashlib.md5()
+    for d in metadata:
+        h.update((d.get("text") or "").encode("utf-8", "ignore"))
+        h.update(b"\x00")
+        h.update((d.get("filename") or "").encode("utf-8", "ignore"))
+        h.update(b"\x01")
+    return h.hexdigest()
+
+
+def _cache_paths(fingerprint: str) -> Tuple[str, str]:
+    base = _cache_dir()
+    return (
+        os.path.join(base, f"bm25_{fingerprint}.tokens.json"),
+        os.path.join(base, f"bm25_{fingerprint}.meta.json"),
+    )
+
+
+def save_bm25_cache(metadata: List[Dict]) -> str:
+    """把 tokenized docs + 精简 metadata 落盘。返回 fingerprint。"""
+    fp = _docs_fingerprint(metadata)
+    tok_path, meta_path = _cache_paths(fp)
+    tokenized = [_tokenize(d.get("text", "")) for d in metadata]
+
+    slim: List[Dict] = []
+    for d in metadata:
+        meta = d.get("metadata") if isinstance(d.get("metadata"), dict) else {}
+        slim.append({
+            "text": d.get("text", ""),
+            "filename": d.get("filename", "unknown"),
+            "chunk_id": meta.get("chunk_id"),
+        })
+
+    with open(tok_path, "w", encoding="utf-8") as f:
+        json.dump(tokenized, f, ensure_ascii=False)
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(slim, f, ensure_ascii=False)
+    return fp
+
+
+def load_bm25_cache(
+    fingerprint: str,
+) -> Optional[Tuple[List[List[str]], List[Dict]]]:
+    """读缓存。缺失 / 损坏 / 长度不一致时返回 None。"""
+    tok_path, meta_path = _cache_paths(fingerprint)
+    if not (os.path.exists(tok_path) and os.path.exists(meta_path)):
+        return None
+    try:
+        with open(tok_path, "r", encoding="utf-8") as f:
+            tokenized = json.load(f)
+        with open(meta_path, "r", encoding="utf-8") as f:
+            docs = json.load(f)
+        if not isinstance(tokenized, list) or not isinstance(docs, list):
+            return None
+        if len(tokenized) != len(docs) or not docs:
+            return None
+        return tokenized, docs
+    except Exception:
+        logger.exception("[dsh][bm25] load cache failed: %s", fingerprint)
+        return None
+
+
 class BM25Store:
     """BM25 索引 + 检索。
 
     从 metadata 列表构建（不依赖 FAISS）。
+    命中磁盘缓存时跳过 jieba 分词，直接构造 BM25Okapi。
     """
 
     def __init__(self):
@@ -59,14 +153,31 @@ class BM25Store:
             self._build(metadata)
 
     def _build(self, metadata: List[Dict]) -> None:
-        """从 metadata 构建 BM25 索引。"""
+        """从 metadata 构建 BM25 索引（优先命中磁盘缓存）。"""
         from rank_bm25 import BM25Okapi
+
+        fp = _docs_fingerprint(metadata)
+        cached = load_bm25_cache(fp)
+        if cached:
+            tokenized, docs = cached
+            self._docs = docs
+            self._bm25 = BM25Okapi(tokenized)
+            logger.info(
+                "[dsh][bm25] index loaded from cache: %d docs (fp=%s)",
+                len(self._docs), fp[:8],
+            )
+            return
 
         self._docs = list(metadata)
         tokenized = [_tokenize(doc.get("text", "")) for doc in self._docs]
         self._bm25 = BM25Okapi(tokenized)
+        try:
+            save_bm25_cache(metadata)
+        except Exception:
+            logger.exception("[dsh][bm25] save cache failed")
         logger.info(
-            "[dsh][bm25] index built: %d docs", len(self._docs)
+            "[dsh][bm25] index built: %d docs (fp=%s)",
+            len(self._docs), fp[:8],
         )
 
     def search(
@@ -75,16 +186,7 @@ class BM25Store:
         top_k: int,
         metadata_provider,
     ) -> List[Dict]:
-        """BM25 检索。
-
-        Args:
-            query: 查询文本
-            top_k: 返回数量
-            metadata_provider: 返回当前 metadata 列表的 callable
-
-        Returns:
-            与 FAISS search 相同结构的列表
-        """
+        """BM25 检索。"""
         if not query or not query.strip():
             return []
 
@@ -109,7 +211,6 @@ class BM25Store:
                 return []
 
             scores = self._bm25.get_scores(query_tokens)
-            # 取 top_k
             indexed = list(enumerate(scores))
             indexed.sort(key=lambda x: -x[1])
             top = indexed[:top_k]
@@ -129,6 +230,7 @@ class BM25Store:
                 })
             return results
 
+
 def rrf_fuse(*result_lists, k=60, limit=10, weights=None):
     if weights is None:
         weights = [1.0] * len(result_lists)
@@ -136,12 +238,9 @@ def rrf_fuse(*result_lists, k=60, limit=10, weights=None):
         raise ValueError("weights 数量必须与 result_lists 一致")
 
     def _key(item: dict):
-        # 优先用 chunk_id：不同 chunk 的前 200 字可能相同
-        # （表格重复行、模板文头），用 text[:200] 会误合并。
         cid = (item.get("metadata") or {}).get("chunk_id")
         if cid:
             return ("chunk", cid)
-        # 兜底：filename + 完整 text 的 hash
         import hashlib
         text = item.get("text", "")
         digest = hashlib.md5(text.encode("utf-8", "ignore")).hexdigest()

@@ -25,7 +25,7 @@ class MCPWorker:
 
     def __init__(self, manager: Any):
         self.manager = manager
-        self._queue: asyncio.Queue = asyncio.Queue()
+        self._queue: asyncio.Queue = asyncio.Queue(maxsize=100)
         self._task: asyncio.Task | None = None
         self._ready = asyncio.Event()
 
@@ -50,7 +50,10 @@ class MCPWorker:
                 return
             try:
                 method = getattr(self.manager, op)
-                result = await method(*args, **kwargs)
+                result = await asyncio.wait_for(
+                    method(*args, **kwargs),
+                    timeout=30.0,
+                )
                 if not future.done():
                     future.set_result(result)
             except Exception as e:
@@ -62,7 +65,13 @@ class MCPWorker:
             raise RuntimeError("MCP worker 未运行")
         loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
-        await self._queue.put((op, args, kwargs, future))
+        try:
+            await asyncio.wait_for(
+                self._queue.put((op, args, kwargs, future)),
+                timeout=5.0,
+            )
+        except asyncio.TimeoutError:
+            raise RuntimeError("MCP worker 队列已满，请稍后重试")
         return await future
 
     async def stop(self) -> None:

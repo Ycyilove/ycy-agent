@@ -385,13 +385,16 @@ async def _rank_candidates(
 def _format_tools_for_message(tools: List[str]) -> str:
     if not tools:
         return "（该服务器没有暴露任何工具）"
-    lines = ["**以下是你下一步必须使用到的确切工具名**（不要自己构造）："]
+    lines = [
+        "**发现以下可用工具（候选，请根据用户目标判断是否使用）**："
+    ]
     for t in tools:
         lines.append(f"  - {t}")
     lines.append("")
     lines.append(
         "**调用时请使用上面的完整工具名**，格式为 mcp__<server>__<tool>。"
-        "**绝对不要简化工具名**。"
+        "**不要自己构造或简化工具名**。"
+        "如果这些工具与当前目标明显不符，可以忽略它们并选择其他更合适的工具。"
     )
     return "\n".join(lines)
 

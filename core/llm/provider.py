@@ -72,7 +72,12 @@ class ModelScopeLLM:
             base_url=SILICONFLOW_BASE_URL,
         )
 
-    def generate(self, messages: List[Dict[str, str]], mode: str = 'quick') -> str:
+    def generate(
+        self,
+        messages: List[Dict[str, str]],
+        mode: str = 'quick',
+        timeout: float | None = None,
+    ) -> str:
         processed_messages = self._add_mode_prompt(messages, mode)
         if self.use_local:
             if not self.local_service or not self.local_service.is_loaded:
@@ -82,10 +87,10 @@ class ModelScopeLLM:
         self._ensure_llm()
         return self.llm.invoke(
             self._convert_to_langchain(processed_messages),
-            config=self._langchain_config(),
+            config=self._langchain_config(timeout=timeout),
         ).content
 
-    def stream_generate(self, messages: List[Dict[str, str]], mode: str = 'quick'):
+    def stream_generate(self, messages: List[Dict[str, str]], mode: str = 'quick', timeout: float | None = None,):
         processed_messages = self._add_mode_prompt(messages, mode)
         if self.use_local:
             if not self.local_service or not self.local_service.is_loaded:
@@ -99,7 +104,7 @@ class ModelScopeLLM:
         try:
             for chunk in self.llm.stream(
                 self._convert_to_langchain(processed_messages),
-                config=self._langchain_config(),
+                config=self._langchain_config(timeout=timeout),
             ):
                 if chunk.content:
                     yield f"data: {json.dumps({'text': chunk.content}, ensure_ascii=False)}\n\n"
@@ -113,19 +118,29 @@ class ModelScopeLLM:
         return [{'role': 'system', 'content': system_prompt}, *messages]
 
     @staticmethod
-    def _langchain_config():
-        """从 observability 拿 per-turn callback handler。
+    def _langchain_config(timeout: float | None = None):
+        """构造 langchain 调用配置。
 
-        未启用 Langfuse 时返回 None，langchain 会忽略。
+        - callbacks：从 observability 拿 per-turn handler（未启用时忽略）
+        - timeout：透传给底层 OpenAI 客户端；超时后 httpx 会中断连接，
+          线程池里的调用会真正返回，而不是一直挂着。
         """
+        cfg: dict = {}
+
         try:
             from infra.observability import get_callback_handler
+            handler = get_callback_handler()
+            if handler is not None:
+                cfg["callbacks"] = [handler]
         except ImportError:
-            return None
-        handler = get_callback_handler()
-        if handler is None:
-            return None
-        return {"callbacks": [handler]}
+            pass
+        except Exception:
+            pass
+
+        if timeout is not None:
+            cfg["timeout"] = float(timeout)
+
+        return cfg or None
 
     @staticmethod
     def _convert_to_langchain(messages: List[Dict[str, str]]):

@@ -327,7 +327,13 @@ class LocalRAGService:
             # 先 reset（清掉旧索引），再 build（构建新索引）
             self.bm25_store.reset()
             # 注意：不在这里 build，让 search() 惰性构建（P2-1 已应用）
-            # 若你还没应用 P2-1，保留 self.bm25_store.build(...)
+            
+            # 主动预热：入库后立即构建一次并写缓存，
+            # 下次 search() 命中缓存，跳过 jieba 分词。
+            try:
+                self.bm25_store.build(self.vector_store.metadata)
+            except Exception:
+                logger.exception("[dsh][rag] BM25 预热失败（非致命）")
 
             # 批量版：一次性收集所有 (chunk_id, rids)，调一次 link_chunks
             links_map: Dict[str, List[str]] = {}
@@ -393,6 +399,12 @@ class LocalRAGService:
             - "record" ：记录级检索（表格/列表优先）
             - "auto"   ：有记录且命中记录 BM25 时走 record，否则 flat
         """
+        # NFKC：把兼容字符（如 ⼯）映射回标准汉字，避免分词/BM25 对不上
+        try:
+            import unicodedata
+            query = unicodedata.normalize("NFKC", query or "")
+        except Exception:
+            pass
         query = clean_cn_spaces(query)
 
         fallback_warning = None
@@ -522,19 +534,36 @@ class LocalRAGService:
             len(vector_results), len(bm25_results), len(fused),
         )
 
-        # ── 返回前：从 metadata 取 headings ──
-        # 关键：返回 index 里实际存的文本（enriched / contextual），
-        # 而不是 original_text。否则会出现：
-        #   向量/BM25 命中 enriched，但返回给用户的是 original，
-        #   用户搜的词在返回文本里找不到。
+        # ── 返回前：从 vector_store.metadata 按 chunk_id 回填完整 metadata ──
+        # BM25 缓存版 metadata 只有 text/filename/chunk_id，
+        # headings/page_numbers 等需要从 vector_store.metadata 取回。
+        chunk_meta_map: Dict[str, Dict] = {}
+        try:
+            for m in self.vector_store.metadata:
+                cid = m.get("chunk_id")
+                if cid:
+                    chunk_meta_map[cid] = m
+        except Exception:
+            logger.exception("[dsh][rag] build chunk_meta_map failed")
+
         enriched = []
         for item in fused:
-            meta = item.get("metadata", {})
-            headings = meta.get("headings", [])
-            indexed_text = item.get("text", "")
+            meta = item.get("metadata", {}) or {}
+            cid = meta.get("chunk_id")
+            full_meta = chunk_meta_map.get(cid) if cid else None
+            if full_meta:
+                # 用完整 metadata 覆盖，保留 BM25 的 score / rrf_score
+                merged_meta = dict(full_meta)
+                merged_meta.update({
+                    k: v for k, v in meta.items()
+                    if k not in merged_meta
+                })
+                item["metadata"] = merged_meta
+                meta = merged_meta
 
-            # indexed_text 通常已带 heading 前缀（add_file 里 parser.get_enriched_text 产出），
-            # 只有缺失时才补一次，避免重复前缀。
+            headings = meta.get("headings", []) or []
+            indexed_text = item.get("text", "") or ""
+
             if headings and not indexed_text.startswith(headings[0]):
                 prefix = " > ".join(headings) + "\n"
                 item["text"] = prefix + indexed_text
@@ -542,8 +571,8 @@ class LocalRAGService:
                 item["text"] = indexed_text
 
             item["headings"] = headings
-            item["heading_levels"] = meta.get("heading_levels", [])
-            item["page_numbers"] = meta.get("page_numbers", [])
+            item["heading_levels"] = meta.get("heading_levels", []) or []
+            item["page_numbers"] = meta.get("page_numbers", []) or []
             item["has_contextual"] = meta.get("has_contextual", False)
             enriched.append(item)
 
@@ -563,11 +592,12 @@ class LocalRAGService:
         return enriched
 
     def _bm25_queries_for(self, text: str) -> List[str]:
-        """返回 [实体串, 全句]，两路分别检索后 RRF。
-
-        与旧 _bm25_query_for 的区别：不再"二选一"，
-        实体和意图词都保留在检索里。
-        """
+        """返回 [实体串, 全句]，两路分别检索后 RRF。"""
+        try:
+            import unicodedata
+            text = unicodedata.normalize("NFKC", text or "")
+        except Exception:
+            pass
         ents = [m.surface for m in self._extractor.extract(text)]
         queries: List[str] = []
         if ents:

@@ -20,6 +20,21 @@ from rag.text_utils import clean_cn_spaces
 from rag.entity.extractor import EntityExtractor
 from rag.entity.normalizer import normalize_entity
 
+def _nfkc(text: str) -> str:
+    """NFKC 归一化：把兼容字符（如 ⼯ U+2F47）映射回标准汉字（工 U+5DE5）。
+
+    query_rewriter 里三处独立入口（rewrite 入口、_normalize_for_match、
+    entities_preserved 的匹配归一化）都必须过这一层，否则同一语义在
+    不同环节会被当成不同字符串。
+    """
+    if not text:
+        return ""
+    try:
+        import unicodedata
+        return unicodedata.normalize("NFKC", text)
+    except Exception:
+        return text
+
 logger = logging.getLogger(__name__)
 
 _default_extractor = EntityExtractor()
@@ -51,11 +66,13 @@ def extract_entities(text: str) -> List[str]:
     """
     if not text or not text.strip():
         return []
+    text = _nfkc(text)
     return [m.surface for m in _default_extractor.extract(text)]
 
 
 def _normalize_for_match(text: str) -> str:
-    """归一化：去掉空格和标点，用于实体子串匹配。"""
+    """归一化：NFKC + 去掉空格和标点，用于实体子串匹配。"""
+    text = _nfkc(text)
     return re.sub(r'[\s，。！？、；：（）【】《》""\'`]', '', text)
 
 
@@ -65,6 +82,9 @@ def entities_preserved(original: str, rewritten: str) -> bool:
     与旧实现的区别：不再做"逐字包含"的宽松匹配，
     实体必须作为连续子串出现，防止实体被拆散/同字替换后误判通过。
     """
+    original = _nfkc(original)
+    rewritten = _nfkc(rewritten)
+
     mentions = _default_extractor.extract(original)
     if not mentions:
         return True
@@ -117,6 +137,7 @@ class QueryRewriter:
             - 归一化后长度 <= PURE_ENTITY_MAX_LEN
             - 且能被 jieba 切成 1-2 个实体，无其他词
         """
+        query = _nfkc(query)
         stripped = _normalize_for_match(query)
         if not stripped or len(stripped) > self.PURE_ENTITY_MAX_LEN:
             return False
@@ -137,6 +158,9 @@ class QueryRewriter:
         """改写 query。失败或实体丢失时返回原 query。"""
         if not query or not query.strip():
             return query
+
+        # ── NFKC：把兼容字符（如 ⼯）映射回标准汉字 ──
+        query = _nfkc(query)
 
         # ── 清洗 query 里的中文间空格 ──
         query = clean_cn_spaces(query)

@@ -6,49 +6,49 @@
     "kind": "description"
   },
   {
-    "text": "我想看看这个文件里的内容，能帮我读一下吗？",
+    "text": "我想查看这个文件里的内容",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_file",
     "kind": "intent"
   },
   {
-    "text": "能不能帮我把文件里的文字内容读出来？",
+    "text": "帮我读一下这个文件的内容",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_file",
     "kind": "intent"
   },
   {
-    "text": "你能实时看看这个文件的内容吗？",
+    "text": "能不能把文件内容给我看看",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_file",
     "kind": "intent"
   },
   {
-    "text": "我需要读取这个文件的全部文本，怎么操作？",
+    "text": "有没有办法读取一下这个文件",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_file",
     "kind": "intent"
   },
   {
-    "text": "帮我读一下这个文件，把里面的内容显示出来。",
+    "text": "这个文件的内容能读出来吗",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_file",
     "kind": "intent"
   },
   {
-    "text": "这个文件的内容怎么才能全部读取到？",
+    "text": "帮我把文件里的文字内容提取出来",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_file",
     "kind": "intent"
   },
   {
-    "text": "我想读取文件里的文本，能直接展示吗？",
+    "text": "能不能直接读取文件里的全部文本",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_file",
     "kind": "intent"
   },
   {
-    "text": "用read_file工具能不能把文件内容全部读出来？",
+    "text": "有没有方法可以获取文件的完整内容",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_file",
     "kind": "intent"
@@ -60,49 +60,49 @@
     "kind": "description"
   },
   {
-    "text": "我想看看这个文件里的内容，能帮我读一下吗？",
+    "text": "我想看看这个文件里的内容",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_text_file",
     "kind": "intent"
   },
   {
-    "text": "能不能帮我读取一下文件系统的这个文本文件？",
+    "text": "帮我读一下这个文件的内容",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_text_file",
     "kind": "intent"
   },
   {
-    "text": "这个文件能不能用不同的编码格式打开？比如UTF-8或者GBK。",
+    "text": "能不能读取一下文件路径是/data/log.txt的文件",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_text_file",
     "kind": "intent"
   },
   {
-    "text": "有没有办法只看文件的前几行？比如前10行。",
+    "text": "有没有办法获取文件末尾的50行内容",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_text_file",
     "kind": "intent"
   },
   {
-    "text": "文件读取失败了，能详细说说是什么问题吗？",
+    "text": "这个文件打不开，能不能帮我看看是什么问题",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_text_file",
     "kind": "intent"
   },
   {
-    "text": "用read_text_file工具读取文件的时候，能不能指定路径？比如只在某个目录下操作。",
+    "text": "有没有办法读取指定目录下的文件",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_text_file",
     "kind": "intent"
   },
   {
-    "text": "我需要检查一个日志文件的最后几行，有这个功能吗？",
+    "text": "能不能只读前10行的文件内容",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_text_file",
     "kind": "intent"
   },
   {
-    "text": "我想查看文件的末尾内容，可以只读取最后N行吗？",
+    "text": "这个文件是utf-8编码的，能读吗",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_text_file",
     "kind": "intent"
@@ -114,49 +114,49 @@
     "kind": "description"
   },
   {
-    "text": "我想上传这张图片，能转成base64吗？",
+    "text": "我想读取这个图片文件的内容，能返回base64编码吗？",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_media_file",
     "kind": "intent"
   },
   {
-    "text": "帮我把音频文件转成base64编码",
+    "text": "帮我把音频文件转换成base64格式，可以吗？",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_media_file",
     "kind": "intent"
   },
   {
-    "text": "能不能读取PDF文件并返回编码内容？",
+    "text": "能不能把指定目录下的文件以base64形式读出来？",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_media_file",
     "kind": "intent"
   },
   {
-    "text": "其他格式的文件怎么处理？",
+    "text": "有没有办法获取某个文件的base64编码内容？",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_media_file",
     "kind": "intent"
   },
   {
-    "text": "实时看看这个图片的base64数据",
+    "text": "这个工具支持读取其他类型的文件吗？比如文档。",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_media_file",
     "kind": "intent"
   },
   {
-    "text": "如何读取指定目录下的媒体文件？",
+    "text": "请返回该文件的MIME类型和base64编码。",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_media_file",
     "kind": "intent"
   },
   {
-    "text": "把图片转成base64编码，同时保留MIME类型",
+    "text": "我需要将图片文件嵌入到资源中，怎么操作？",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_media_file",
     "kind": "intent"
   },
   {
-    "text": "音频文件转base64，能直接用吗？",
+    "text": "能否在允许的目录里读取并编码文件内容？",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_media_file",
     "kind": "intent"
@@ -168,49 +168,49 @@
     "kind": "description"
   },
   {
-    "text": "我想同时看看这几个文件的内容，可以吗？",
+    "text": "我想同时读几个文件的内容，方便对比分析",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_multiple_files",
     "kind": "intent"
   },
   {
-    "text": "帮我分析一下多个文件的数据差异吧",
+    "text": "帮我读取多个文件的数据，每个文件的路径也显示一下",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_multiple_files",
     "kind": "intent"
   },
   {
-    "text": "能不能一次性读取多个文件并显示路径？",
+    "text": "能不能一起读这些文件，即使有的文件打不开也继续",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_multiple_files",
     "kind": "intent"
   },
   {
-    "text": "这些文件路径对吗？能一起读取吗？",
+    "text": "有没有办法批量读取文件，不需要一个一个来",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_multiple_files",
     "kind": "intent"
   },
   {
-    "text": "有没有办法批量读取文件并保留路径信息？",
+    "text": "我需要读取多个文件的内容，但不确定路径是否正确",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_multiple_files",
     "kind": "intent"
   },
   {
-    "text": "需要逐个读取文件吗？还是可以一起处理？",
+    "text": "能不能把这几个文件的内容都读出来，然后汇总",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_multiple_files",
     "kind": "intent"
   },
   {
-    "text": "想对比几个配置文件的内容，怎么操作？",
+    "text": "我想检查多个文件是否损坏，同时读取内容看看",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_multiple_files",
     "kind": "intent"
   },
   {
-    "text": "读取子目录下的多个文件会不会出问题？",
+    "text": "有没有工具可以读取多个文件，而且只在指定目录里找",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__read_multiple_files",
     "kind": "intent"
@@ -222,49 +222,49 @@
     "kind": "description"
   },
   {
-    "text": "我想新建一个文本文件",
+    "text": "我想在项目文件夹里新建一个日志文件",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__write_file",
     "kind": "intent"
   },
   {
-    "text": "帮我把这段代码存到文件里",
+    "text": "帮我把配置文件内容换成新的设置",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__write_file",
     "kind": "intent"
   },
   {
-    "text": "能不能覆盖这个文件的内容",
+    "text": "能不能把这段代码保存到指定的目录里",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__write_file",
     "kind": "intent"
   },
   {
-    "text": "实时看看文件有没有被修改",
+    "text": "有没有办法把整理好的数据写进报告文件",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__write_file",
     "kind": "intent"
   },
   {
-    "text": "把现有文件内容全部替换成新内容",
+    "text": "能帮我用UTF-8格式生成一个文本文件吗",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__write_file",
     "kind": "intent"
   },
   {
-    "text": "用utf-8编码写入文件",
+    "text": "是否可以覆盖这个旧文件的全部内容",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__write_file",
     "kind": "intent"
   },
   {
-    "text": "我想在指定目录里生成一个文件",
+    "text": "请把更新后的说明文档存到允许的目录中",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__write_file",
     "kind": "intent"
   },
   {
-    "text": "帮我把日志信息写入文件",
+    "text": "能处理一下这个文件的编码问题吗",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__write_file",
     "kind": "intent"
@@ -276,49 +276,49 @@
     "kind": "description"
   },
   {
-    "text": "我想修改配置文件里的端口号，能不能帮我改一下？",
+    "text": "我想修改这个文件里的一行内容",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__edit_file",
     "kind": "intent"
   },
   {
-    "text": "帮我把日志文件里所有错误信息的行替换成新的提示内容吧。",
+    "text": "帮我把文件中的某个段落替换成新内容",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__edit_file",
     "kind": "intent"
   },
   {
-    "text": "能不能实时看看修改前后文件的变化？要git风格的diff。",
+    "text": "能不能把文件里重复的代码行删掉",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__edit_file",
     "kind": "intent"
   },
   {
-    "text": "我想把代码里所有出现的‘oldVar’替换成‘newVar’，可以吗？",
+    "text": "有没有办法批量替换文件中的特定字符串",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__edit_file",
     "kind": "intent"
   },
   {
-    "text": "这个工具能处理项目根目录下的文件吗？我想编辑一下main.py。",
+    "text": "我想在文件末尾添加一段说明文字",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__edit_file",
     "kind": "intent"
   },
   {
-    "text": "帮我把配置文件中第5行到第10行的内容替换成新的设置。",
+    "text": "帮我检查并修正文件中格式错误的那几行",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__edit_file",
     "kind": "intent"
   },
   {
-    "text": "修改文件的时候会不会检查目录权限？我担心不能操作某些文件。",
+    "text": "能不能把文件里某个函数的参数调整一下",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__edit_file",
     "kind": "intent"
   },
   {
-    "text": "能不能把文件里所有以‘#’开头的注释行替换成空行？",
+    "text": "这个工具能处理不在允许目录里的文件吗",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__edit_file",
     "kind": "intent"
@@ -330,49 +330,49 @@
     "kind": "description"
   },
   {
-    "text": "我想新建一个项目文件夹，里面包含几个子目录",
+    "text": "我想新建一个项目文件夹，可以一次性创建多级目录吗",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__create_directory",
     "kind": "intent"
   },
   {
-    "text": "帮我检查一下项目目录是否存在，如果不存在就创建一下",
+    "text": "帮我创建一下这个目录结构，包括子文件夹",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__create_directory",
     "kind": "intent"
   },
   {
-    "text": "能不能一次性创建多个嵌套目录，比如src和data文件夹",
+    "text": "能不能确保这个路径存在，如果不存在就自动新建",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__create_directory",
     "kind": "intent"
   },
   {
-    "text": "怎么在允许的目录里创建一个完整的文件夹结构，比如logs/2023/04",
+    "text": "有没有办法批量生成嵌套目录，不用重复操作",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__create_directory",
     "kind": "intent"
   },
   {
-    "text": "如果我要创建的目录已经存在，会不会出错？",
+    "text": "我需要在这个位置建立几个子目录，怎么操作",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__create_directory",
     "kind": "intent"
   },
   {
-    "text": "这个工具只能在允许的目录里创建文件夹，对吗？",
+    "text": "帮我检查一下目录是否存在，如果不存在就创建",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__create_directory",
     "kind": "intent"
   },
   {
-    "text": "帮我把项目文件夹的结构搭建好，包括所有需要的子目录",
+    "text": "能不能在指定路径下自动创建所有必要的文件夹",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__create_directory",
     "kind": "intent"
   },
   {
-    "text": "能不能确保我指定的路径都存在，不管有没有都自动处理？",
+    "text": "我要设置项目的目录结构，有没有相关的命令",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__create_directory",
     "kind": "intent"
@@ -384,49 +384,49 @@
     "kind": "description"
   },
   {
-    "text": "我想看看这个文件夹里有什么内容",
+    "text": "我想看看这个文件夹里的内容",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_directory",
     "kind": "intent"
   },
   {
-    "text": "帮我列出项目根目录下的所有文件和文件夹",
+    "text": "帮我查一下这个路径下的所有文件和文件夹",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_directory",
     "kind": "intent"
   },
   {
-    "text": "能不能查一下这个路径下有没有隐藏文件",
+    "text": "能不能告诉我这个目录里有哪些文件",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_directory",
     "kind": "intent"
   },
   {
-    "text": "实时看看当前目录的结构是什么样的",
+    "text": "有没有办法列出这个路径里的所有目录和文件",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_directory",
     "kind": "intent"
   },
   {
-    "text": "这个工具能区分文件和文件夹吗",
+    "text": "能帮我整理一下这个文件夹里的文件吗？",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_directory",
     "kind": "intent"
   },
   {
-    "text": "我想找到某个特定文件，能帮我扫描一下目录吗",
+    "text": "这个路径下有没有隐藏的文件或子目录？",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_directory",
     "kind": "intent"
   },
   {
-    "text": "能不能告诉我这个目录里最新的修改记录",
+    "text": "我想确认一下这个条目是文件还是文件夹",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_directory",
     "kind": "intent"
   },
   {
-    "text": "我需要确认一下这个文件是否存在于指定路径里",
+    "text": "能显示一下这个目录的详细列表吗？",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_directory",
     "kind": "intent"
@@ -438,49 +438,49 @@
     "kind": "description"
   },
   {
-    "text": "我想看看这个文件夹里有什么文件和目录",
+    "text": "我想确认一下这个目录下有哪些文件和文件夹，还有它们的大小",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_directory_with_sizes",
     "kind": "intent"
   },
   {
-    "text": "帮我查一下这个路径下的文件和目录大小",
+    "text": "帮我看看这个路径里的所有内容，特别是文件和目录的大小",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_directory_with_sizes",
     "kind": "intent"
   },
   {
-    "text": "能不能在允许的目录里显示所有文件和文件夹的大小",
+    "text": "能不能帮我列出这个文件夹里的所有项目，并显示每个的大小？",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_directory_with_sizes",
     "kind": "intent"
   },
   {
-    "text": "请帮我列出这个路径下所有内容的详细信息",
+    "text": "有没有办法知道这个目录下每个文件的具体大小？",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_directory_with_sizes",
     "kind": "intent"
   },
   {
-    "text": "如何快速知道这个目录下最大的文件是什么",
+    "text": "我想了解这个路径里的文件和文件夹结构，还有它们的存储占用",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_directory_with_sizes",
     "kind": "intent"
   },
   {
-    "text": "有没有办法查看某个路径下的文件结构和大小",
+    "text": "能不能帮我检查一下这个目录下有没有某个特定的文件或文件夹？",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_directory_with_sizes",
     "kind": "intent"
   },
   {
-    "text": "可以…吗？我想确认一下这个目录里的文件是否都列出来了",
+    "text": "帮我统计一下这个目录下所有文件的总大小",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_directory_with_sizes",
     "kind": "intent"
   },
   {
-    "text": "实时看看这个路径下的文件和目录大小变化",
+    "text": "有没有办法显示这个路径中所有文件和目录的详细信息，包括大小？",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_directory_with_sizes",
     "kind": "intent"
@@ -492,49 +492,49 @@
     "kind": "description"
   },
   {
-    "text": "我想看看某个目录的文件结构",
+    "text": "我想生成当前项目目录的树状结构JSON，方便整理文件",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__directory_tree",
     "kind": "intent"
   },
   {
-    "text": "帮我生成一下项目目录的树状结构",
+    "text": "帮我查看这个文件夹里的所有子目录和文件列表",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__directory_tree",
     "kind": "intent"
   },
   {
-    "text": "能不能递归显示整个文件夹的目录树",
+    "text": "能不能把指定路径下的目录结构以JSON形式输出？",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__directory_tree",
     "kind": "intent"
   },
   {
-    "text": "实时查看当前目录的文件结构变化",
+    "text": "有没有办法获取某个目录下所有文件和文件夹的层级关系？",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__directory_tree",
     "kind": "intent"
   },
   {
-    "text": "把当前目录的结构导出成JSON格式",
+    "text": "我需要一个工具来展示目录中的文件和子目录结构，可以吗？",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__directory_tree",
     "kind": "intent"
   },
   {
-    "text": "确认一下这个路径下有没有子目录",
+    "text": "帮我导出这个目录的树状结构数据到JSON文件",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__directory_tree",
     "kind": "intent"
   },
   {
-    "text": "对比两个目录的结构差异",
+    "text": "能不能检查一下这个路径是否存在，并列出其子目录？",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__directory_tree",
     "kind": "intent"
   },
   {
-    "text": "处理文件前先确认目录层级结构",
+    "text": "有没有办法以缩进格式显示目录下所有文件和文件夹的结构？",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__directory_tree",
     "kind": "intent"
@@ -546,49 +546,49 @@
     "kind": "description"
   },
   {
-    "text": "我想把这份文件移动到另一个文件夹",
+    "text": "我想把这份文档移到另一个文件夹里",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__move_file",
     "kind": "intent"
   },
   {
-    "text": "帮我把这个文档重命名为新名字",
+    "text": "帮我把图片重命名为最新版本",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__move_file",
     "kind": "intent"
   },
   {
-    "text": "能不能把图片移到备份目录里？",
+    "text": "能不能把下载的文件夹改个名字",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__move_file",
     "kind": "intent"
   },
   {
-    "text": "怎么把视频文件移动并改名？",
+    "text": "有没有办法把视频文件移动到备份目录",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__move_file",
     "kind": "intent"
   },
   {
-    "text": "我想把文件夹里的旧文件改个名字",
+    "text": "把旧数据文件移到历史记录文件夹吧",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__move_file",
     "kind": "intent"
   },
   {
-    "text": "可以把报告文件移到提交文件夹吗？",
+    "text": "请把这份合同.txt更名为合同终版",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__move_file",
     "kind": "intent"
   },
   {
-    "text": "实时看看文件移动后的路径对不对",
+    "text": "移动这些照片到相册目录需要怎么操作",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__move_file",
     "kind": "intent"
   },
   {
-    "text": "怎么同时移动并重命名文件？",
+    "text": "帮我检查一下目标文件夹是否存在再移动",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__move_file",
     "kind": "intent"
@@ -600,49 +600,49 @@
     "kind": "description"
   },
   {
-    "text": "我想找一下项目里所有.py文件，能不能用搜索功能？",
+    "text": "我想找一下项目里所有的txt文件，有没有办法帮忙搜索一下？",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__search_files",
     "kind": "intent"
   },
   {
-    "text": "帮我找找有没有*.log文件在项目目录里",
+    "text": "能不能帮我查一下这个文件夹下所有的日志文件？",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__search_files",
     "kind": "intent"
   },
   {
-    "text": "能不能递归搜索一下所有子文件夹里的图片？",
+    "text": "有没有办法搜索一下所有子目录里的图片文件？",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__search_files",
     "kind": "intent"
   },
   {
-    "text": "怎么在当前目录下找所有备份文件？",
+    "text": "我需要找一个特定的配置文件，但不知道在哪个目录，能用这个工具找找吗？",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__search_files",
     "kind": "intent"
   },
   {
-    "text": "实时看看有没有新增的.txt文件",
+    "text": "帮我搜索一下当前目录下所有以backup结尾的文件。",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__search_files",
     "kind": "intent"
   },
   {
-    "text": "有没有办法找所有子文件夹中的配置文件？",
+    "text": "能不能查找一下所有子目录中的Excel表格？",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__search_files",
     "kind": "intent"
   },
   {
-    "text": "怎么搜索所有子文件夹但排除node_modules？",
+    "text": "有没有办法用通配符找到所有子目录里的PDF文件？",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__search_files",
     "kind": "intent"
   },
   {
-    "text": "有没有快速方法找到所有Excel表格？",
+    "text": "我想找一下所有子目录中名为report的文件夹，能行吗？",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__search_files",
     "kind": "intent"
@@ -654,49 +654,49 @@
     "kind": "description"
   },
   {
-    "text": "我想看看这个文件的详细信息",
+    "text": "我想知道这个文件的详细信息",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__get_file_info",
     "kind": "intent"
   },
   {
-    "text": "帮我查一下这个文件的创建时间",
+    "text": "帮我查一下这个文件的大小",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__get_file_info",
     "kind": "intent"
   },
   {
-    "text": "能不能告诉我这个文件的权限设置",
+    "text": "能不能告诉我这个目录的创建时间？",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__get_file_info",
     "kind": "intent"
   },
   {
-    "text": "实时看看这个文件的修改时间",
+    "text": "有没有办法查看这个文件的权限设置？",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__get_file_info",
     "kind": "intent"
   },
   {
-    "text": "我想确认这个文件的类型",
+    "text": "这个文件的类型是什么？",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__get_file_info",
     "kind": "intent"
   },
   {
-    "text": "这个文件有多大，能帮我看看吗",
+    "text": "如何查看文件的详细属性？",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__get_file_info",
     "kind": "intent"
   },
   {
-    "text": "能不能获取这个目录下所有文件的大小",
+    "text": "这个文件夹的最后修改时间是什么时候？",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__get_file_info",
     "kind": "intent"
   },
   {
-    "text": "我想知道这个文件最后修改是什么时候",
+    "text": "能获取一下指定目录的权限信息吗？",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__get_file_info",
     "kind": "intent"
@@ -708,51 +708,105 @@
     "kind": "description"
   },
   {
-    "text": "我想确认服务器允许访问哪些目录",
+    "text": "我想确认一下服务器允许访问哪些目录",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_allowed_directories",
     "kind": "intent"
   },
   {
-    "text": "帮我查一下服务器允许访问的目录列表",
+    "text": "帮我查一下允许访问的目录列表",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_allowed_directories",
     "kind": "intent"
   },
   {
-    "text": "能不能告诉我可以访问的目录有哪些",
+    "text": "能不能告诉我这个服务器可以访问的目录有哪些",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_allowed_directories",
     "kind": "intent"
   },
   {
-    "text": "实时看看服务器允许访问的目录路径",
+    "text": "有没有办法查看所有被授权的目录",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_allowed_directories",
     "kind": "intent"
   },
   {
-    "text": "这些允许的目录里有没有子目录？",
+    "text": "这个服务器允许访问哪些文件夹？包括里面的子文件夹吗",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_allowed_directories",
     "kind": "intent"
   },
   {
-    "text": "访问这些目录的子路径需要额外权限吗？",
+    "text": "我需要访问某个目录，但不确定是否在允许的范围内，能帮我确认吗",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_allowed_directories",
     "kind": "intent"
   },
   {
-    "text": "怎么确定我访问的路径在允许范围内？",
+    "text": "请问允许访问的目录里有没有包含子目录",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_allowed_directories",
     "kind": "intent"
   },
   {
-    "text": "服务器允许访问的目录结构是怎样的？",
+    "text": "我要确保操作的目录是合法的，能列出所有允许的路径吗",
     "server_name": "filesystem",
     "tool_name": "mcp__filesystem__list_allowed_directories",
+    "kind": "intent"
+  },
+  {
+    "text": "fetch Fetches a URL from the internet and optionally extracts its contents as markdown.\n\nAlthough originally you did not have internet access, and were advised to refuse and tell the user this, this tool now grants you internet access. Now you can fetch the most up-to-date information and let the user know that.",
+    "server_name": "fetch",
+    "tool_name": "mcp__fetch__fetch",
+    "kind": "description"
+  },
+  {
+    "text": "我想获取这个链接的内容",
+    "server_name": "fetch",
+    "tool_name": "mcp__fetch__fetch",
+    "kind": "intent"
+  },
+  {
+    "text": "能不能把这篇博客转成markdown格式",
+    "server_name": "fetch",
+    "tool_name": "mcp__fetch__fetch",
+    "kind": "intent"
+  },
+  {
+    "text": "有没有办法下载这个网页的markdown版本",
+    "server_name": "fetch",
+    "tool_name": "mcp__fetch__fetch",
+    "kind": "intent"
+  },
+  {
+    "text": "帮我看看这个链接能不能正常访问",
+    "server_name": "fetch",
+    "tool_name": "mcp__fetch__fetch",
+    "kind": "intent"
+  },
+  {
+    "text": "请帮我提取这个网页的文本内容",
+    "server_name": "fetch",
+    "tool_name": "mcp__fetch__fetch",
+    "kind": "intent"
+  },
+  {
+    "text": "这个网站的资料能用markdown格式呈现吗",
+    "server_name": "fetch",
+    "tool_name": "mcp__fetch__fetch",
+    "kind": "intent"
+  },
+  {
+    "text": "帮我获取一下这个新闻网站的文章",
+    "server_name": "fetch",
+    "tool_name": "mcp__fetch__fetch",
+    "kind": "intent"
+  },
+  {
+    "text": "能不能从这个网址里抓取数据并整理成markdown",
+    "server_name": "fetch",
+    "tool_name": "mcp__fetch__fetch",
     "kind": "intent"
   },
   {
@@ -762,49 +816,49 @@
     "kind": "description"
   },
   {
-    "text": "我想看看最近的科技新闻有什么更新？",
+    "text": "我想了解巴黎圣母院火灾的后续处理情况",
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_search",
     "kind": "intent"
   },
   {
-    "text": "帮我查一下这个政策最新的实施情况。",
+    "text": "帮我查一下量子计算机的原理是什么",
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_search",
     "kind": "intent"
   },
   {
-    "text": "能不能告诉我现在某个产品的市场销量？",
+    "text": "最近有什么关于AI发展的新消息吗",
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_search",
     "kind": "intent"
   },
   {
-    "text": "实时看看今天国际上的重大事件。",
+    "text": "能不能帮我核实这个医学研究的结果",
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_search",
     "kind": "intent"
   },
   {
-    "text": "怎么查最新的天气预报啊？",
+    "text": "有没有办法知道今天全球的股票市场走势",
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_search",
     "kind": "intent"
   },
   {
-    "text": "有没有关于某个事件的最新进展？",
+    "text": "帮我找找最近的天气预报，明天会不会下雨",
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_search",
     "kind": "intent"
   },
   {
-    "text": "帮我找一下最近的行业数据报告。",
+    "text": "有没有关于减肥的有效方法的最新讨论",
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_search",
     "kind": "intent"
   },
   {
-    "text": "能不能搜索一下现在某个话题的讨论热度？",
+    "text": "我想看看这个产品的用户评价和口碑",
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_search",
     "kind": "intent"
@@ -816,49 +870,49 @@
     "kind": "description"
   },
   {
-    "text": "我想提取一下这个链接的内容",
+    "text": "我想从这个网页里提取一些内容，可以吗？",
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_extract",
     "kind": "intent"
   },
   {
-    "text": "帮我从这个网址里抓取一下文本",
+    "text": "能不能帮我从指定的网址里抓取数据？",
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_extract",
     "kind": "intent"
   },
   {
-    "text": "能不能把这篇网页文章的内容给我搞下来",
+    "text": "有没有办法把网页上的信息整理成文本格式？",
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_extract",
     "kind": "intent"
   },
   {
-    "text": "实时看看这个网页的原始内容",
+    "text": "能不能把这篇网页文章的内容提取出来？",
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_extract",
     "kind": "intent"
   },
   {
-    "text": "有没有办法从这个网页提取出所有段落",
+    "text": "我需要从某个链接里获取原始内容，怎么操作？",
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_extract",
     "kind": "intent"
   },
   {
-    "text": "能不能直接提取这个链接的markdown格式内容",
+    "text": "帮我提取一下这个网站的页面内容吧。",
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_extract",
     "kind": "intent"
   },
   {
-    "text": "帮我获取一下这个网页的正文部分",
+    "text": "能不能把网页内容转换成markdown格式？",
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_extract",
     "kind": "intent"
   },
   {
-    "text": "这个工具能提取网页里的表格数据吗",
+    "text": "我想获取这个链接的页面原始数据，可以做到吗？",
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_extract",
     "kind": "intent"
@@ -870,49 +924,49 @@
     "kind": "description"
   },
   {
-    "text": "我想从这个网址开始爬取整个网站的内容，可以控制爬取的深度吗？",
+    "text": "我想从这个网址开始爬取整个网站的内容",
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_crawl",
     "kind": "intent"
   },
   {
-    "text": "帮我爬取一下这个链接下所有子页面的信息吧",
+    "text": "帮我爬取一下这个网站的首页和子页面",
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_crawl",
     "kind": "intent"
   },
   {
-    "text": "能不能实时看看这个网站的爬取进度？",
+    "text": "能不能设置爬取深度为2只抓主目录页面",
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_crawl",
     "kind": "intent"
   },
   {
-    "text": "我想提取这个网站的前两层页面内容，能设置深度限制吗？",
+    "text": "有没有办法提取这个网站的所有文章内容",
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_crawl",
     "kind": "intent"
   },
   {
-    "text": "这个工具能按广度优先爬取网站内容吗？",
+    "text": "我想爬取这个网站但只到第二层链接",
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_crawl",
     "kind": "intent"
   },
   {
-    "text": "帮我把这家公司的官网所有产品页面抓下来，大概能爬多少层？",
+    "text": "能不能帮我爬取这个网站的全部图片",
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_crawl",
     "kind": "intent"
   },
   {
-    "text": "我想爬取这个链接下的所有页面，但不想爬太深，能设置爬取范围吗？",
+    "text": "有没有办法限制爬虫广度抓特定分类页面",
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_crawl",
     "kind": "intent"
   },
   {
-    "text": "能不能帮我分析这个网站的结构，看看需要爬哪些页面？",
+    "text": "我想从这个URL开始爬取整个网站并保存",
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_crawl",
     "kind": "intent"
@@ -924,49 +978,49 @@
     "kind": "description"
   },
   {
-    "text": "我想看看这个网站的页面结构是怎样的",
+    "text": "我想看看这个网站的目录结构是怎样的",
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_map",
     "kind": "intent"
   },
   {
-    "text": "帮我分析一下这个网站的目录结构",
+    "text": "帮我生成一下这个网站的结构地图",
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_map",
     "kind": "intent"
   },
   {
-    "text": "能不能帮我生成一下这个网站的链接地图？",
+    "text": "能不能帮我分析一下这个网站的链接关系？",
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_map",
     "kind": "intent"
   },
   {
-    "text": "怎么才能实时查看这个网站的所有页面链接？",
+    "text": "有没有办法查看这个网站的所有页面链接？",
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_map",
     "kind": "intent"
   },
   {
-    "text": "这个网站的页面链接能不能列出来？",
+    "text": "我需要这个网站的结构图，能帮我做下吗？",
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_map",
     "kind": "intent"
   },
   {
-    "text": "有没有办法把这家公司的官网结构整理出来？",
+    "text": "帮我梳理一下这个网站的页面布局",
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_map",
     "kind": "intent"
   },
   {
-    "text": "能帮我爬取一下这个网站的目录结构吗？",
+    "text": "能不能列出这个网站下的所有子页面？",
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_map",
     "kind": "intent"
   },
   {
-    "text": "这个网站的子页面数量有多少？能帮我统计一下吗？",
+    "text": "有没有工具可以展示网站的层级结构？",
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_map",
     "kind": "intent"
@@ -978,537 +1032,51 @@
     "kind": "description"
   },
   {
-    "text": "我想了解最近人工智能在医疗领域的应用有哪些新进展？",
+    "text": "我想了解人工智能在医疗行业的应用情况",
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_research",
     "kind": "intent"
   },
   {
-    "text": "帮我查一下全球气候变化对经济的影响报告。",
+    "text": "帮我找找最近几年的市场趋势报告",
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_research",
     "kind": "intent"
   },
   {
-    "text": "能不能找找看区块链技术如何改变金融行业？",
+    "text": "能不能帮我分析一下这个产品的优缺点",
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_research",
     "kind": "intent"
   },
   {
-    "text": "实时看看今天关于量子计算的最新新闻。",
+    "text": "有没有办法收集到这个话题的不同观点",
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_research",
     "kind": "intent"
   },
   {
-    "text": "我需要关于新能源汽车市场增长的数据，能帮我找吗？",
+    "text": "我需要关于量子计算的权威资料汇总",
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_research",
     "kind": "intent"
   },
   {
-    "text": "有没有关于5G技术普及情况的详细分析？",
+    "text": "帮我对比一下不同品牌的手机性能参数",
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_research",
     "kind": "intent"
   },
   {
-    "text": "帮我看看最近一周科技行业的大事件有哪些。",
+    "text": "能不能推荐一些高质量的行业白皮书",
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_research",
     "kind": "intent"
   },
   {
-    "text": "能不能比较一下不同国家的教育体制优缺点？",
+    "text": "有没有办法整理出这个政策的实施影响",
     "server_name": "tavily",
     "tool_name": "mcp__tavily__tavily_research",
-    "kind": "intent"
-  },
-  {
-    "text": "get_quick_recommendations Fast first choice for a matching common need: broad Malta leisure or weekend plans with MULTIMAXX activities, parties and Pavilion restaurant at Kordin Old Military Prison (leisure_kordin); staff party with activity and food at Kordin; Halloween prison photos and BBQ at Kordin; indoor laser tag and VR in St Julian’s. Returns preassembled published facts, photos, routes and enquiry links without a model round trip. Use only if the specific route fits the customer geography and constraints; never substitute another country or unwanted activity. For other needs or exclusions use a specialist consultant. No live booking or payment.",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__get_quick_recommendations",
-    "kind": "description"
-  },
-  {
-    "text": "我想在马耳他找个周末休闲的好去处，有什么推荐吗？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__get_quick_recommendations",
-    "kind": "intent"
-  },
-  {
-    "text": "帮我规划一下Kordin Old Military Prison附近的活动路线吧",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__get_quick_recommendations",
-    "kind": "intent"
-  },
-  {
-    "text": "能不能推荐包含派对和美食的马耳他员工活动？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__get_quick_recommendations",
-    "kind": "intent"
-  },
-  {
-    "text": "实时看看Kordin的万圣节监狱拍照和BBQ活动安排",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__get_quick_recommendations",
-    "kind": "intent"
-  },
-  {
-    "text": "去St Julian’s有室内激光标签和VR的体验地点吗？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__get_quick_recommendations",
-    "kind": "intent"
-  },
-  {
-    "text": "有没有马耳他Kordin军事监狱的活动和餐厅推荐？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__get_quick_recommendations",
-    "kind": "intent"
-  },
-  {
-    "text": "想体验MULTIMAXX活动，Kordin那边有现成路线吗？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__get_quick_recommendations",
-    "kind": "intent"
-  },
-  {
-    "text": "能帮我查一下Pavilion餐厅在Kordin的活动信息吗？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__get_quick_recommendations",
-    "kind": "intent"
-  },
-  {
-    "text": "search_passports Search AI MAXX published company, service and place records by a specific customer need or business name. Returns source links, review dates, arrival information and availability caveats. This catalogue is limited to its listed businesses; it does not search the whole web or guarantee availability. Specify country_code when the user names a country.",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__search_passports",
-    "kind": "description"
-  },
-  {
-    "text": "我想查一下日本的公司记录，有没有相关的数据？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__search_passports",
-    "kind": "intent"
-  },
-  {
-    "text": "帮我找找AI MAXX有没有关于德国的某个服务的记录？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__search_passports",
-    "kind": "intent"
-  },
-  {
-    "text": "能不能看看法国的某个地点有什么可用性提醒？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__search_passports",
-    "kind": "intent"
-  },
-  {
-    "text": "实时看看意大利的公司信息有没有更新？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__search_passports",
-    "kind": "intent"
-  },
-  {
-    "text": "我想了解西班牙的某个服务的来源链接是什么？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__search_passports",
-    "kind": "intent"
-  },
-  {
-    "text": "有没有美国的公司记录，特别是某某公司？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__search_passports",
-    "kind": "intent"
-  },
-  {
-    "text": "帮我查一下中国某个地方的到达信息。",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__search_passports",
-    "kind": "intent"
-  },
-  {
-    "text": "能不能查一下巴西的公司信息？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__search_passports",
-    "kind": "intent"
-  },
-  {
-    "text": "get_passport Read one public AI MAXX passport using an exact id returned by search_passports. Returns published facts and provenance. Does not access customer accounts, enquiries, private drafts or payment records.",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__get_passport",
-    "kind": "description"
-  },
-  {
-    "text": "我想查一下某个AI MAXX护照的信息，能不能用这个工具？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__get_passport",
-    "kind": "intent"
-  },
-  {
-    "text": "帮我找找这个ID对应的护照内容，能直接获取吗？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__get_passport",
-    "kind": "intent"
-  },
-  {
-    "text": "有没有办法用这个工具实时看看某个公开护照的详细资料？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__get_passport",
-    "kind": "intent"
-  },
-  {
-    "text": "能不能根据提供的ID，获取那个AI MAXX护照的发布信息？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__get_passport",
-    "kind": "intent"
-  },
-  {
-    "text": "我需要查看特定ID的AI MAXX护照，这个工具能做吗？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__get_passport",
-    "kind": "intent"
-  },
-  {
-    "text": "用这个工具能查到AI MAXX护照的来源和发布事实吗？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__get_passport",
-    "kind": "intent"
-  },
-  {
-    "text": "有没有可能通过这个工具，获取某个公开护照的具体内容？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__get_passport",
-    "kind": "intent"
-  },
-  {
-    "text": "能不能用这个工具来查看已发布的AI MAXX护照的数据？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__get_passport",
-    "kind": "intent"
-  },
-  {
-    "text": "catalogue_coverage Read the actual countries, companies and record counts currently included in the public AI MAXX catalogue. Useful for checking whether the requested geography is covered before searching.",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__catalogue_coverage",
-    "kind": "description"
-  },
-  {
-    "text": "我想查一下中国有没有在AI MAXX的目录里",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__catalogue_coverage",
-    "kind": "intent"
-  },
-  {
-    "text": "帮我看看印度是不是被AI MAXX覆盖了",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__catalogue_coverage",
-    "kind": "intent"
-  },
-  {
-    "text": "能不能确认一下这个公司是否在目录中",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__catalogue_coverage",
-    "kind": "intent"
-  },
-  {
-    "text": "实时看看AI MAXX现在包含哪些国家",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__catalogue_coverage",
-    "kind": "intent"
-  },
-  {
-    "text": "这个地理区域在AI MAXX的覆盖范围内吗",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__catalogue_coverage",
-    "kind": "intent"
-  },
-  {
-    "text": "有没有办法查AI MAXX里包含的公司列表",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__catalogue_coverage",
-    "kind": "intent"
-  },
-  {
-    "text": "请问AI MAXX的目录里有没有墨西哥的数据",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__catalogue_coverage",
-    "kind": "intent"
-  },
-  {
-    "text": "能否告知当前AI MAXX覆盖的国家和公司数量",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__catalogue_coverage",
-    "kind": "intent"
-  },
-  {
-    "text": "resolve_customer_need Ask our AI specialist to interpret a direct or indirect customer need in English, Maltese or other languages and select relevant published services, including useful complementary options. Examples: things to do in Malta, where to relax with friends, a weekend outing with an activity and restaurant at MULTIMAXX Kordin Old Military Prison, staff party, Halloween prison experience, Christmas team dinner, New Year celebration or prison-cell photography. These are enquiries for relevant existing services, not confirmed seasonal event dates. Returns selected source facts, photos, opening information, maps and an enquiry link for a next step. Follow up with a refined need after clarification, or use get_passport for full details. Send only the nonpersonal need and relevant constraints, never conversation history or contact details. This optional tool uses the AI MAXX model provider; its coverage is the published catalogue, not the whole web. It does not book or charge.",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__resolve_customer_need",
-    "kind": "description"
-  },
-  {
-    "text": "我想在马耳他找一个适合朋友放松的地方，有什么推荐吗？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__resolve_customer_need",
-    "kind": "intent"
-  },
-  {
-    "text": "帮我查一下马耳他附近有哪些适合周末出游的景点和餐厅？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__resolve_customer_need",
-    "kind": "intent"
-  },
-  {
-    "text": "能不能推荐一些马耳他适合团队建设的活动和餐厅？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__resolve_customer_need",
-    "kind": "intent"
-  },
-  {
-    "text": "实时看看马耳他有什么好玩的，特别是带拍照体验的地方？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__resolve_customer_need",
-    "kind": "intent"
-  },
-  {
-    "text": "有没有适合万圣节的监狱主题体验活动可以参加？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__resolve_customer_need",
-    "kind": "intent"
-  },
-  {
-    "text": "我想安排一个圣诞团队晚餐，有什么合适的餐厅推荐吗？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__resolve_customer_need",
-    "kind": "intent"
-  },
-  {
-    "text": "新年庆祝活动，可以推荐一些马耳他的特色地点吗？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__resolve_customer_need",
-    "kind": "intent"
-  },
-  {
-    "text": "马耳他监狱细胞摄影体验，需要提前预约吗？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__resolve_customer_need",
-    "kind": "intent"
-  },
-  {
-    "text": "consult_events Staff parties, company celebrations, Halloween, Christmas, New Year and festivals; activity plus hospitality when relevant. Ask our AI specialist to interpret a direct or indirect customer need in English, Maltese or other languages and select relevant published services, including useful complementary options. Examples: things to do in Malta, where to relax with friends, a weekend outing with an activity and restaurant at MULTIMAXX Kordin Old Military Prison, staff party, Halloween prison experience, Christmas team dinner, New Year celebration or prison-cell photography. These are enquiries for relevant existing services, not confirmed seasonal event dates. Returns selected source facts, photos, opening information, maps and an enquiry link for a next step. Follow up with a refined need after clarification, or use get_passport for full details. Send only the nonpersonal need and relevant constraints, never conversation history or contact details. This optional tool uses the AI MAXX model provider; its coverage is the published catalogue, not the whole web. It does not book or charge.",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__consult_events",
-    "kind": "description"
-  },
-  {
-    "text": "我想安排一次员工聚会，有什么推荐的活动和餐饮搭配？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__consult_events",
-    "kind": "intent"
-  },
-  {
-    "text": "帮我推荐一下Malta适合公司庆祝的活动，最好有餐饮服务",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__consult_events",
-    "kind": "intent"
-  },
-  {
-    "text": "能不能有万圣节主题的监狱体验活动？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__consult_events",
-    "kind": "intent"
-  },
-  {
-    "text": "有没有圣诞节在Kordin Old Military Prison的团队晚餐安排？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__consult_events",
-    "kind": "intent"
-  },
-  {
-    "text": "实时看看新年庆祝活动在监狱的套餐有哪些？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__consult_events",
-    "kind": "intent"
-  },
-  {
-    "text": "想策划一个公司周年庆，需要活动加住宿的方案",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__consult_events",
-    "kind": "intent"
-  },
-  {
-    "text": "有没有万圣节期间在监狱的特别体验项目？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__consult_events",
-    "kind": "intent"
-  },
-  {
-    "text": "能不能帮我查一下Kordin监狱的节日活动开放时间？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__consult_events",
-    "kind": "intent"
-  },
-  {
-    "text": "consult_activities Laser tag, Prison Break, VR, arcade and karting; preserve the requested location and indoor/outdoor preferences. Ask our AI specialist to interpret a direct or indirect customer need in English, Maltese or other languages and select relevant published services, including useful complementary options. Examples: things to do in Malta, where to relax with friends, a weekend outing with an activity and restaurant at MULTIMAXX Kordin Old Military Prison, staff party, Halloween prison experience, Christmas team dinner, New Year celebration or prison-cell photography. These are enquiries for relevant existing services, not confirmed seasonal event dates. Returns selected source facts, photos, opening information, maps and an enquiry link for a next step. Follow up with a refined need after clarification, or use get_passport for full details. Send only the nonpersonal need and relevant constraints, never conversation history or contact details. This optional tool uses the AI MAXX model provider; its coverage is the published catalogue, not the whole web. It does not book or charge.",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__consult_activities",
-    "kind": "description"
-  },
-  {
-    "text": "我想在马耳他找一个室内的激光标签场所，有什么推荐吗？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__consult_activities",
-    "kind": "intent"
-  },
-  {
-    "text": "帮我查一下马耳他适合团队建设的活动，比如监狱逃脱或者VR体验。",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__consult_activities",
-    "kind": "intent"
-  },
-  {
-    "text": "能不能推荐一些户外的卡丁车场，附近有餐厅吗？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__consult_activities",
-    "kind": "intent"
-  },
-  {
-    "text": "实时看看MULTIMAXX Kordin Old Military Prison附近有哪些好玩的项目。",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__consult_activities",
-    "kind": "intent"
-  },
-  {
-    "text": "有没有适合朋友聚会的室内活动，比如电玩或者VR？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__consult_activities",
-    "kind": "intent"
-  },
-  {
-    "text": "有没有类似万圣节监狱主题的体验活动可以参加？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__consult_activities",
-    "kind": "intent"
-  },
-  {
-    "text": "能不能帮我安排一个周末的出游，包含活动和用餐的地方？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__consult_activities",
-    "kind": "intent"
-  },
-  {
-    "text": "有没有在马耳他户外进行的团队活动，比如卡丁车和激光标签？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__consult_activities",
-    "kind": "intent"
-  },
-  {
-    "text": "consult_hospitality Pavilion dining, dedicated Kordin BBQ area and food court enquiries; useful food-first options for the group. Ask our AI specialist to interpret a direct or indirect customer need in English, Maltese or other languages and select relevant published services, including useful complementary options. Examples: things to do in Malta, where to relax with friends, a weekend outing with an activity and restaurant at MULTIMAXX Kordin Old Military Prison, staff party, Halloween prison experience, Christmas team dinner, New Year celebration or prison-cell photography. These are enquiries for relevant existing services, not confirmed seasonal event dates. Returns selected source facts, photos, opening information, maps and an enquiry link for a next step. Follow up with a refined need after clarification, or use get_passport for full details. Send only the nonpersonal need and relevant constraints, never conversation history or contact details. This optional tool uses the AI MAXX model provider; its coverage is the published catalogue, not the whole web. It does not book or charge.",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__consult_hospitality",
-    "kind": "description"
-  },
-  {
-    "text": "我想在Kordin Old Military Prison附近找一家有特色餐厅的地方",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__consult_hospitality",
-    "kind": "intent"
-  },
-  {
-    "text": "帮我看看Pavilion dining有什么推荐菜式",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__consult_hospitality",
-    "kind": "intent"
-  },
-  {
-    "text": "能不能推荐适合团队聚餐的BBQ区域？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__consult_hospitality",
-    "kind": "intent"
-  },
-  {
-    "text": "实时看看美食广场现在营业吗？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__consult_hospitality",
-    "kind": "intent"
-  },
-  {
-    "text": "想安排一个生日聚会，有餐厅和拍照的地方吗？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__consult_hospitality",
-    "kind": "intent"
-  },
-  {
-    "text": "有没有适合朋友放松的餐饮区推荐？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__consult_hospitality",
-    "kind": "intent"
-  },
-  {
-    "text": "想预定圣诞团队晚餐，有什么选项？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__consult_hospitality",
-    "kind": "intent"
-  },
-  {
-    "text": "Kordin监狱体验活动需要带什么食物进去吗？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__consult_hospitality",
-    "kind": "intent"
-  },
-  {
-    "text": "consult_venues Venue hire, historic prison photography, film and TV production spaces; respect the requested use. Ask our AI specialist to interpret a direct or indirect customer need in English, Maltese or other languages and select relevant published services, including useful complementary options. Examples: things to do in Malta, where to relax with friends, a weekend outing with an activity and restaurant at MULTIMAXX Kordin Old Military Prison, staff party, Halloween prison experience, Christmas team dinner, New Year celebration or prison-cell photography. These are enquiries for relevant existing services, not confirmed seasonal event dates. Returns selected source facts, photos, opening information, maps and an enquiry link for a next step. Follow up with a refined need after clarification, or use get_passport for full details. Send only the nonpersonal need and relevant constraints, never conversation history or contact details. This optional tool uses the AI MAXX model provider; its coverage is the published catalogue, not the whole web. It does not book or charge.",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__consult_venues",
-    "kind": "description"
-  },
-  {
-    "text": "我想租用历史监狱场地拍婚纱照，有什么推荐的吗？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__consult_venues",
-    "kind": "intent"
-  },
-  {
-    "text": "帮我找一个适合拍摄宣传片的监狱场景，有没有现成的？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__consult_venues",
-    "kind": "intent"
-  },
-  {
-    "text": "能不能推荐Malta适合团队建设的监狱类场地？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__consult_venues",
-    "kind": "intent"
-  },
-  {
-    "text": "实时看看Kordin Old Military Prison的租赁信息和开放时间",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__consult_venues",
-    "kind": "intent"
-  },
-  {
-    "text": "有没有适合万圣节主题的监狱体验活动场地可以租用？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__consult_venues",
-    "kind": "intent"
-  },
-  {
-    "text": "想在监狱里办个圣诞派对，有什么合适的场地吗？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__consult_venues",
-    "kind": "intent"
-  },
-  {
-    "text": "新年活动需要独特场地，能推荐有监狱风格的吗？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__consult_venues",
-    "kind": "intent"
-  },
-  {
-    "text": "拍摄监狱题材照片需要什么手续？场地怎么预订？",
-    "server_name": "com_ai-maxx_www_public-passports",
-    "tool_name": "mcp__com_ai-maxx_www_public-passports__consult_venues",
     "kind": "intent"
   }
 ]
