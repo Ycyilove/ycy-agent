@@ -122,7 +122,7 @@ function TaskItem({ task, isActive }) {
     // 本地任务未提交到后端（id 以 task- 开头且无 createdAt 服务端字段）
     // 直接本地删除即可
     try {
-      await deleteAgentTask(task.id);
+      await deleteAgentTask(task.id, task.sessionId);
     } catch (error) {
       // 404 说明后端已不存在，本地删除仍然正确
       const status = error?.status ?? error?.response?.status;

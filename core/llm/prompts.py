@@ -45,20 +45,32 @@ def attachment_context(attachments: List[Dict[str, Any]]) -> str:
     return "\n\n".join(parts)
 
 
+_INSTRUCTIONS = {
+    "ask": (
+        "回答用户问题。本次没有工具可用，"
+        "不要声称你执行了任何操作，也不要编造数据。"
+    ),
+    "agent": (
+        "直接完成用户要求。需要信息时先调用工具获取真实数据，"
+        "再基于真实结果回答；结果要简洁并说明已完成的动作。"
+    ),
+}
+
+
 def build_prompt(
     message: str,
     mode: str,
     attachments: List[Dict[str, Any]],
     rag_context: Optional[str] = None,
     tool_context: Optional[List[str]] = None,
+    extra_suffix: str = "",
 ) -> str:
     """构造最终发给 LLM 的 prompt。"""
-    instructions = {
-        "ask": "回答用户问题。可以使用知识库信息和工具返回的真实数据。",
-        "plan": "给出清晰、可执行的计划，并说明需要用户确认的动作。",
-        "craft": "直接完成用户要求，结果要简洁并说明已完成的动作。",
-    }
-    prompt = f"工作模式：{mode}\n{instructions[mode]}\n\n用户请求：{message}"
+    instruction = _INSTRUCTIONS.get(mode)
+    if instruction is None:
+        raise ValueError(f"非法 mode={mode!r}，必须是 {sorted(_INSTRUCTIONS)}")
+
+    prompt = f"工作模式：{mode}\n{instruction}\n\n用户请求：{message}"
 
     context = attachment_context(attachments)
     if context:
@@ -79,14 +91,15 @@ def build_prompt(
             "不要编造数据，不要声称没有权限，不要重复调用已经成功的工具。"
         )
     else:
-        # 没有工具执行结果时，明确阻止编造"已执行"
         prompt += (
             "\n\n【重要】本次没有成功执行任何工具调用。"
             "如果需要执行操作，请明确说明你无法执行或请求用户提供更多信息，"
             "**不要编造执行结果**。"
         )
 
-    # 要求输出思考/答案标记，便于 StreamSplitter 切分
+    if extra_suffix:
+        prompt += extra_suffix
+
     prompt += (
         "\n\n输出格式要求："
         "先用「思考：」开头给出推理过程，再用「答案：」开头给出最终回答。"

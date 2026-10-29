@@ -1,0 +1,18 @@
+fix(tools/orchestration): 修复 search_knowledge 必填参数丢失
+模型 fill_params 阶段输出多 JSON 对象导致解析失败、query 为空；增加 raw_decode 逐段提取与必填参数 goal 兜底，超时降级保留可检索字段。
+
+---
+refactor(core/task): 收敛模式为 ask/agent 双模式
+删除 plan/craft 遗留分支，统一权限模型：ask 只读单步直答，agent 全工具多步编排且工作区内免审批；gateway 的 plan_mode 重命名为 workspace_trusted。
+
+---
+feat(tools/orchestration): 引入任务类型与终止原因体系
+新增 TaskType 七族分类器与 StopReason/AssessResult 结构，assess 按任务族分流判定，PARTIAL/BLOCKED/QUALITY_FAIL 等终止原因终结无限重试，并持久化至任务表。
+
+---
+feat(tools/tools_def): 新增 run_tests 工具与 CODE_FIX 验证器
+基于 subprocess 本地执行 pytest，返回退出码与失败用例；CODE_FIX 写操作成功后主动触发测试，未通过则回灌失败用例继续修复。
+
+---
+feat(tools/skills): 接入 skills 能力模块
+新增 skills 目录结构与 session_skills 加载逻辑，技能通过 prompt 引导注入而不裁剪工具集，保持编排链路完整。

@@ -37,6 +37,7 @@ class MCPClientManager:
 
     def __init__(self, configs: List[MCPServerConfig]):
         self.configs = {config.name: config for config in configs}
+        self._static_configs = set(self.configs.keys())
         self.connections: Dict[str, MCPConnection] = {}
         self.tools: Dict[str, MCPToolSpec] = {}
         self.server_tool_names: Dict[str, set[str]] = {}
@@ -89,13 +90,22 @@ class MCPClientManager:
             if os.getenv(environment_name)
         }
 
-    @staticmethod
-    def _stdio_env(config: MCPServerConfig) -> dict[str, str]:
-        return {
-            key: os.environ[environment_name]
-            for key, environment_name in config.env_from.items()
-            if os.getenv(environment_name)
-        }
+    # ── 安全：stdio MCP 只继承白名单环境变量 ──
+    _SAFE_ENV_KEYS = frozenset({
+        "PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TEMP", "TMP",
+        "PYTHONPATH", "PYTHONIOENCODING", "NODE_PATH", "SYSTEMROOT",
+        "WINDIR", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
+    })
+
+    @classmethod
+    def _stdio_env(cls, config: MCPServerConfig) -> dict[str, str]:
+        safe = {k: v for k, v in os.environ.items() if k in cls._SAFE_ENV_KEYS}
+        safe.update({
+            key: os.environ[env_name]
+            for key, env_name in config.env_from.items()
+            if os.getenv(env_name)
+        })
+        return safe
 
     async def _connect_once(self, config: MCPServerConfig) -> MCPConnection:
         logger.info(
@@ -274,16 +284,6 @@ class MCPClientManager:
             annotations = raw.get("annotations") or {}
             public_name = f"mcp__{server_name}__{tool.name}"
             _read_only = bool(annotations.get("readOnlyHint", False))
-            # 兜底：名字含 search/extract/crawl/research/fetch/map 的工具
-            # 默认视为只读。很多 MCP server（如 tavily）不标 readOnlyHint，
-            # 导致这些工具 danger_level="high"，被 allowed_danger_levels
-            # ={'safe'} 过滤掉，LLM 选了就报"不存在"。
-            _remote_lower = (tool.name or "").lower()
-            if not _read_only and any(
-                kw in _remote_lower
-                for kw in ("search", "extract", "crawl", "research", "fetch", "map")
-            ):
-                _read_only = True
             spec = MCPToolSpec(
                 public_name=public_name,
                 server_name=server_name,
@@ -401,9 +401,15 @@ class MCPClientManager:
         idempotent_hint = spec.idempotent_hint if spec else False
 
         if spec is None:
+            # ── 安全：只允许 config 显式声明的隐藏工具 ──
+            allowed_hidden = getattr(config, "allow_hidden_tools", ())
+            if remote_name not in allowed_hidden:
+                raise RuntimeError(
+                    f"工具 {remote_name} 未在 tools/list 中声明，拒绝调用"
+                )
             logger.info(
                 "[dsh][mcp] on-demand tool call: %s "
-                "(not in tools/list; server=%s, remote=%s)",
+                "(allowed hidden; server=%s, remote=%s)",
                 public_name, server_name, remote_name,
             )
 

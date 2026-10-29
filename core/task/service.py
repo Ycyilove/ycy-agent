@@ -26,6 +26,7 @@ from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
 from tools.agent import ToolAgent, ToolCallRequest, ToolCallResult
 from tools.orchestration.state import OrchestratorState
+from core.task.modes import MODE_ASK, MODE_AGENT, MODES, validate_mode
 
 from core.llm.prompts import (
     attachment_context as build_attachment_context,
@@ -45,16 +46,6 @@ from core.task.tool_result_store import build_handle_summary
 logger = logging.getLogger(__name__)
 
 
-MODES = {"ask", "plan", "craft"}
-WORKSPACE_PATH_KEYS = {
-    "directory",
-    "file_path",
-    "old_path",
-    "output_path",
-    "path",
-}
-
-
 @dataclass
 class PendingApproval:
     task_id: str
@@ -68,8 +59,9 @@ class PendingApproval:
 
     # ── orchestrator 恢复所需信息 ──
     goal: str = ""
-    mode: str = "plan"
+    mode: str = MODE_AGENT
     workspace: Optional[List[str]] = None
+    workspace_trusted: bool = False
     auto_discover_mcp: bool = False
     step_index: int = 1
     state_snapshot: Optional[dict] = None
@@ -214,6 +206,22 @@ class AgentTaskService:
             self._purge_expired_locked()
             self._pending[pending.approval_id] = pending
 
+        # ── 同步到服务端权威 ApprovalStore（供网关 verify 用） ──
+        try:
+            from tools.security.approval import get_approval_store
+            store = get_approval_store()
+            # 若 orchestrator 已 create 过（同 approval_id），跳过
+            existing = store._records.get(pending.approval_id)  # 内部读，仅同步用
+            if existing is None:
+                store.create(
+                    task_id=pending.task_id,
+                    session_id=pending.session_id,
+                    tool_name=pending.tool_call.tool_name,
+                    params=pending.tool_call.parameters,
+                )
+        except Exception:
+            logger.exception("同步 ApprovalStore 失败: %s", pending.approval_id)
+
     def _take_pending(
         self, approval_id: str, task_id: str
     ) -> Optional["PendingApproval"]:
@@ -348,30 +356,6 @@ class AgentTaskService:
             for path in (workspace or [])
             if str(path).strip()
         ]
-
-    @staticmethod
-    def _path_in_workspace(path: str, workspace: List[str]) -> bool:
-        if not workspace:
-            return True
-        absolute = os.path.abspath(path)
-        return any(
-            absolute == root or absolute.startswith(root + os.sep)
-            for root in workspace
-        )
-
-    def _needs_workspace_confirmation(
-        self,
-        tool_call: ToolCallRequest,
-        workspace: List[str],
-    ) -> bool:
-        if not workspace:
-            return False
-        for key, value in tool_call.parameters.items():
-            if key not in WORKSPACE_PATH_KEYS or not isinstance(value, str):
-                continue
-            if value and not self._path_in_workspace(value, workspace):
-                return True
-        return False
 
     # ────────── 附件 ──────────
 
@@ -918,12 +902,29 @@ class AgentTaskService:
                 self._build_multimodal_message(message, attachments)
             )
         else:
+            stop_block = ""
+            if task_id:
+                try:
+                    task = self._session_provider().get_task(task_id)
+                    stop_reason = task.get("stop_reason") if task else None
+                    stop_detail = task.get("stop_detail") if task else None
+                except Exception:
+                    stop_reason, stop_detail = None, None
+                if stop_reason and stop_reason != "done":
+                    stop_block = (
+                        f"\n\n【终止原因】{stop_reason}"
+                        + (f"：{stop_detail}" if stop_detail else "")
+                        + "\n请在回答里如实说明未完成的部分与原因，"
+                        "不要声称任务已完全完成。"
+                    )
+
             prompt = build_prompt(
                 message,
                 mode,
                 attachments,
                 rag_context,
                 tool_context=tool_context,
+                extra_suffix=stop_block,
             )
             messages = list(prior_messages) + [{"role": "user", "content": prompt}]
             provider = self._llm_provider().stream_generate(messages, mode="deep")
@@ -1170,6 +1171,7 @@ class AgentTaskService:
         message: str,
         mode: str,
         workspace: Optional[List[str]],
+        workspace_trusted: bool,
         auto_discover_mcp: bool,
         analysis_step_id: str,
         tool_execution_context: List[str],
@@ -1201,7 +1203,8 @@ class AgentTaskService:
         elif event_type == "approval_required":
             tool_call = event["tool_call"]
             reason = event.get("reason") or "需要用户确认"
-            approval_id = f"approval-{uuid.uuid4().hex}"
+            # ── 优先用 orchestrator 网关生成的 approval_id（params_hash 绑定） ──
+            approval_id = event.get("approval_id") or f"approval-{uuid.uuid4().hex}"
             tool_step_id = f"{task_id}:{turn_id}:approval:{approval_id}"
             title = f"确认执行工具：{tool_call.tool_name}（{reason}）"
 
@@ -1217,6 +1220,7 @@ class AgentTaskService:
                 goal=message,
                 mode=mode,
                 workspace=workspace,
+                workspace_trusted=workspace_trusted,
                 auto_discover_mcp=auto_discover_mcp,
                 step_index=event.get("step", 1),
                 state_snapshot=event.get("state_snapshot"),
@@ -1234,18 +1238,12 @@ class AgentTaskService:
                 "stepId": tool_step_id,
             }
             waiting_step = self._step(
-                tool_step_id,
-                title,
-                "waiting",
-                "action",
-                path=pending.path,
-                approval=approval,
+                tool_step_id, title, "waiting", "action",
+                path=pending.path, approval=approval,
             )
             yield self._emit_step(
                 task_id,
-                self._step(
-                    analysis_step_id, "任务分析完成", "done", "think"
-                ),
+                self._step(analysis_step_id, "任务分析完成", "done", "think"),
             )
             yield self._emit_step(task_id, waiting_step)
             self._persist_task_status(task_id, "waiting")
@@ -1395,12 +1393,27 @@ class AgentTaskService:
                     })
 
         elif event_type == "done":
+            reason = event.get("reason", "done")
+            detail = event.get("detail", "")
+            label = {
+                "done": "任务分析完成",
+                "partial": f"部分完成：{detail}" if detail else "部分完成",
+                "blocked": f"外部阻塞：{detail}" if detail else "外部阻塞",
+                "quality_fail": f"校验未通过：{detail}" if detail else "校验未通过",
+            }.get(reason, "任务分析完成")
+            status = "done" if reason == "done" else "failed"
             yield self._emit_step(
                 task_id,
-                self._step(
-                    analysis_step_id, "任务分析完成", "done", "think"
-                ),
+                self._step(analysis_step_id, label, status, "think"),
             )
+            try:
+                memory = self._session_provider()
+                if hasattr(memory, "update_task"):
+                    memory.update_task(
+                        task_id, stop_reason=reason, stop_detail=detail,
+                    )
+            except Exception:
+                logger.exception("持久化 stop_reason 失败: %s", task_id)
 
         elif event_type == "max_steps":
             yield self._emit_step(
@@ -1441,51 +1454,40 @@ class AgentTaskService:
     ) -> AsyncIterator[str]:
         task_id = task_id or f"task-{uuid.uuid4().hex}"
         turn_id = uuid.uuid4().hex[:8]
-        mode = mode if mode in MODES else "plan"
+
+        try:
+            mode = validate_mode(mode)
+        except ValueError as exc:
+            yield sse_event("error", message=str(exc))
+            return
+
         session_id = self._ensure_session(session_id, message)
 
-        # ── 每个任务开头重置 per-task 状态 ──
-        # contextvars 在新 asyncio task 里是继承的副本，但显式清一次更保险，
-        # 避免把上一个任务的允许工具集带进来。
         try:
             self._agent_provider().clear_available_tools()
         except Exception:
             logger.exception("clear_available_tools failed")
 
-        # ── 开启 turn：把本次提问的所有 LLM 调用归到同一目录 ──
-        begin_turn(
-            session_id=session_id,
-            task_id=task_id,
-            question=message,
-        )
+        begin_turn(session_id=session_id, task_id=task_id, question=message)
 
-        # ── 开启 mem0 记录（per-task） ──
         try:
             from infra.debug_log.mem0 import begin_task as begin_mem0_task
             begin_mem0_task(session_id=session_id, task_id=task_id)
         except Exception:
             logger.exception("begin_mem0_task failed")
 
-        with set_turn_context(
-            session_id=session_id,
-            task_id=task_id,
-            question=message,
-        ):
+        with set_turn_context(session_id=session_id, task_id=task_id, question=message):
+          _sec_ctx_token = None
           try:
-            # 说明：tried_servers 的重置由 orchestrator.run() 内部完成，
-            # 这里是 contextvars 语义，per-task 隔离，不需要重复 reset。
-                    
             memory = self._session_provider()
             prior_messages = (
                 memory.get_conversation_context(session_id, 20)
-                if session_id
-                else history
+                if session_id else history
             )
             if not prior_messages:
                 prior_messages = history
             self._record_session_input(session_id, message, attachments)
 
-            # ── Mem0：从用户消息提取路径 ──
             try:
                 from core.memory.mem0_layer import remember_user_message
                 remember_user_message(session_id, message)
@@ -1493,38 +1495,27 @@ class AgentTaskService:
                 logger.exception("remember_user_message 失败")
 
             self._persist_task(
-                task_id=task_id,
-                session_id=session_id,
-                message=message,
-                mode=mode,
-                workspace=workspace,
-                attachments=attachments,
+                task_id=task_id, session_id=session_id, message=message,
+                mode=mode, workspace=workspace, attachments=attachments,
             )
 
-            yield sse_event(
-                "task", task_id=task_id, session_id=session_id, turn_id=turn_id
-            )
+            yield sse_event("task", task_id=task_id, session_id=session_id, turn_id=turn_id)
 
             if message.strip():
                 yield self._emit_step(
                     task_id,
-                    self._step(
-                        f"{task_id}:{turn_id}:user",
-                        message.strip(),
-                        "done",
-                        "user",
-                    ),
+                    self._step(f"{task_id}:{turn_id}:user", message.strip(), "done", "user"),
                 )
 
             for index, attachment in enumerate(attachments):
-                step = self._step(
-                    f"{task_id}:{turn_id}:attachment:{index}",
-                    f"接收附件：{attachment_label(attachment)}",
-                    "done",
-                    "action",
-                    path=attachment_label(attachment),
+                yield self._emit_step(
+                    task_id,
+                    self._step(
+                        f"{task_id}:{turn_id}:attachment:{index}",
+                        f"接收附件：{attachment_label(attachment)}",
+                        "done", "action", path=attachment_label(attachment),
+                    ),
                 )
-                yield self._emit_step(task_id, step)
 
             analysis_step_id = f"{task_id}:{turn_id}:analysis"
             yield self._emit_step(
@@ -1532,14 +1523,41 @@ class AgentTaskService:
                 self._step(analysis_step_id, "正在理解任务…", "running", "think"),
             )
 
-            if mode == "ask":
-                allowed_dangers: Optional[set] = {"safe"}
+            if mode == MODE_ASK:
+                allowed_dangers: set = {"safe"}
+                workspace_roots_for_ctx: Optional[List[str]] = None
+                workspace_trusted = False
             else:
                 allowed_dangers = {"safe", "medium", "high"}
+                workspace_roots_for_ctx = self._normalise_workspace(workspace) or None
+                workspace_trusted = bool(workspace_roots_for_ctx)
+
+            from tools.security.gateway import (
+                SecurityContext, set_security_context, reset_security_context,
+            )
+            _sec_ctx_token = set_security_context(SecurityContext(
+                allowed_danger_levels=allowed_dangers,
+                workspace_roots=workspace_roots_for_ctx,
+                workspace_trusted=workspace_trusted,
+                session_id=session_id,
+            ))
 
             accumulated_resources: List[Dict[str, Any]] = []
             accumulated_resources.extend(self._collect_session_resources(session_id))
             tool_execution_context: List[str] = []
+
+            if mode == MODE_ASK:
+                yield self._emit_step(
+                    task_id,
+                    self._step(analysis_step_id, "对话模式", "done", "think"),
+                )
+                async for evt in self._stream_answer(
+                    task_id, session_id, prior_messages, message, mode,
+                    attachments, turn_id,
+                    rag_context=None, rag_resources=None, tool_context=None,
+                ):
+                    yield evt
+                return
 
             used_orchestrator = False
             if self._orchestrator_provider is not None:
@@ -1549,19 +1567,16 @@ class AgentTaskService:
                     message,
                     allowed_danger_levels=allowed_dangers,
                     allow_mcp_discovery=auto_discover_mcp,
-                    workspace_paths=self._normalise_workspace(workspace) if mode == "plan" else None,
-                    plan_mode=(mode == "plan"),
+                    workspace_paths=workspace_roots_for_ctx,
                     prior_messages=prior_messages,
                     session_id=session_id,
+                    task_id=task_id,
                 ):
                     async for evt in self._process_orchestrator_event(
                         event,
-                        task_id=task_id,
-                        session_id=session_id,
-                        turn_id=turn_id,
-                        message=message,
-                        mode=mode,
-                        workspace=workspace,
+                        task_id=task_id, session_id=session_id, turn_id=turn_id,
+                        message=message, mode=mode, workspace=workspace,
+                        workspace_trusted=workspace_trusted,
                         auto_discover_mcp=auto_discover_mcp,
                         analysis_step_id=analysis_step_id,
                         tool_execution_context=tool_execution_context,
@@ -1572,38 +1587,30 @@ class AgentTaskService:
                     if event.get("type") == "approval_required":
                         return
 
-            # 无 orchestrator 时的回退路径
             if not used_orchestrator:
                 tool_call: Optional[ToolCallRequest] = None
-                if mode != "ask":
-                    try:
-                        attachment_names = ", ".join(
-                            attachment_label(item) for item in attachments
-                        )
-                        intent_message = message
-                        if attachment_names:
-                            intent_message += f"\n当前附件：{attachment_names}"
-                        intent = self._agent_provider().analyze_intent(
-                            intent_message, use_llm=True
-                        )
-                        tool_call = self._agent_provider().prepare_tool_call(intent)
-                    except Exception as error:
-                        yield sse_event("error", message=f"任务分析失败：{error}")
+                try:
+                    attachment_names = ", ".join(
+                        attachment_label(item) for item in attachments
+                    )
+                    intent_message = message
+                    if attachment_names:
+                        intent_message += f"\n当前附件：{attachment_names}"
+                    intent = self._agent_provider().analyze_intent(intent_message, use_llm=True)
+                    tool_call = self._agent_provider().prepare_tool_call(intent)
+                except Exception as error:
+                    yield sse_event("error", message=f"任务分析失败：{error}")
 
                 if tool_call:
-                    workspace_paths = self._normalise_workspace(workspace)
                     needs_confirmation = (
-                        mode == "plan"
-                        or tool_call.user_confirmation_needed
-                        or self._needs_workspace_confirmation(tool_call, workspace_paths)
+                        tool_call.user_confirmation_needed or not workspace_trusted
                     )
                     yield self._emit_step(
                         task_id,
                         self._step(
                             analysis_step_id,
                             f"已识别操作：{tool_call.tool_name}",
-                            "done",
-                            "think",
+                            "done", "think",
                         ),
                     )
                     if needs_confirmation:
@@ -1611,36 +1618,25 @@ class AgentTaskService:
                         tool_step_id = f"{task_id}:{turn_id}:approval:{approval_id}"
                         title = f"确认执行工具：{tool_call.tool_name}"
                         pending = PendingApproval(
-                            task_id=task_id,
-                            session_id=session_id,
-                            step_id=tool_step_id,
-                            approval_id=approval_id,
-                            tool_call=tool_call,
-                            title=title,
-                            turn_id=turn_id,
-                            path=self._tool_path(tool_call),
+                            task_id=task_id, session_id=session_id,
+                            step_id=tool_step_id, approval_id=approval_id,
+                            tool_call=tool_call, title=title, turn_id=turn_id,
+                            path=self._tool_path(tool_call), mode=mode,
+                            workspace=workspace, workspace_trusted=workspace_trusted,
+                            auto_discover_mcp=auto_discover_mcp,
                         )
                         self._store_pending(pending)
 
                         approval = {
-                            "id": approval_id,
-                            "title": title,
+                            "id": approval_id, "title": title,
                             "toolName": tool_call.tool_name,
                             "parameters": tool_call.parameters,
-                            "dangerLevel": "high"
-                            if tool_call.user_confirmation_needed
-                            else "medium",
-                            "path": pending.path,
-                            "taskId": task_id,
-                            "stepId": tool_step_id,
+                            "dangerLevel": "high" if tool_call.user_confirmation_needed else "medium",
+                            "path": pending.path, "taskId": task_id, "stepId": tool_step_id,
                         }
                         waiting_step = self._step(
-                            tool_step_id,
-                            title,
-                            "waiting",
-                            "action",
-                            path=pending.path,
-                            approval=approval,
+                            tool_step_id, title, "waiting", "action",
+                            path=pending.path, approval=approval,
                         )
                         yield self._emit_step(task_id, waiting_step)
                         self._persist_task_status(task_id, "waiting")
@@ -1652,14 +1648,11 @@ class AgentTaskService:
                         tool_execution_context=tool_execution_context,
                     ):
                         yield event
-
                     return
 
                 yield self._emit_step(
                     task_id,
-                    self._step(
-                        analysis_step_id, "已完成任务分析", "done", "think"
-                    ),
+                    self._step(analysis_step_id, "已完成任务分析", "done", "think"),
                 )
 
             if accumulated_resources:
@@ -1695,6 +1688,13 @@ class AgentTaskService:
             ):
                 yield event
           finally:
+            # ── 复位 SecurityContext（必须最先） ──
+            if _sec_ctx_token is not None:
+                try:
+                    reset_security_context(_sec_ctx_token)
+                except Exception:
+                    logger.exception("reset_security_context failed")
+
             end_turn()
             try:
                 from infra.debug_log.mem0 import end_task as end_mem0_task
@@ -1730,11 +1730,16 @@ class AgentTaskService:
             )
         pending = self._take_pending(approval_id, task_id)
         if pending is None:
-            logger.info(
-                "[dsh][task_service] stream_approval: id 已失效，静默忽略"
-            )
+            logger.info("[dsh][task_service] stream_approval: id 已失效，静默忽略")
             yield sse_event("done", task_status="stale")
             return
+
+        # ── 同步 ApprovalStore 决策（供网关 verify 用） ──
+        try:
+            from tools.security.approval import get_approval_store
+            get_approval_store().decide(approval_id, pending.session_id, action)
+        except Exception:
+            logger.exception("同步 ApprovalStore.decide 失败: %s", approval_id)
 
         if action not in {"allow", "allow-always"}:
             rejected = self._step(
@@ -1960,99 +1965,104 @@ class AgentTaskService:
         last_tool_ok: bool,
         last_tool_log: str,
     ) -> AsyncIterator[str]:
-        """从审批后的状态恢复 orchestrator，继续循环。
-
-        自动注入最后一次工具执行的结果，让 LLM 决定下一步。
-        """
         task_id = pending.task_id
         session_id = pending.session_id
         turn_id = pending.turn_id or uuid.uuid4().hex[:8]
         message = pending.goal
         mode = pending.mode
         workspace = pending.workspace
+        workspace_trusted = pending.workspace_trusted
         auto_discover_mcp = pending.auto_discover_mcp
         memory = self._session_provider()
         prior_messages = (
             memory.get_conversation_context(session_id, 20)
-            if session_id
-            else []
+            if session_id else []
         )
-        
         analysis_step_id = f"{task_id}:{turn_id}:analysis-resume"
 
-        if mode == "ask":
-            allowed_dangers: Optional[set] = {"safe"}
+        if mode == MODE_ASK:
+            allowed_dangers: set = {"safe"}
+            workspace_roots_for_ctx: Optional[List[str]] = None
         else:
             allowed_dangers = {"safe", "medium", "high"}
+            workspace_roots_for_ctx = self._normalise_workspace(workspace) or None
 
-        # 把最后一次工具结果作为上下文传入
-        tag = "成功" if last_tool_ok else "失败"
-        tool_execution_context: List[str] = [
-            f"【工具 {last_tool_name} 返回（{tag}）】\n"
-            f"{(last_tool_log or '')[:8000]}"
-        ]
-        accumulated_resources: List[Dict[str, Any]] = []
-        accumulated_resources.extend(
-            self._collect_session_resources(session_id)
+        from tools.security.gateway import (
+            SecurityContext, set_security_context, reset_security_context,
         )
-
-        orchestrator = self._orchestrator_provider()
-        async for event in orchestrator.run(
-            message,
+        _sec_token = set_security_context(SecurityContext(
             allowed_danger_levels=allowed_dangers,
-            allow_mcp_discovery=auto_discover_mcp,
-            workspace_paths=(
-                self._normalise_workspace(workspace)
-                if mode == "plan"
-                else None
-            ),
-            plan_mode=(mode == "plan"),
-            resume_state=state,
-            resume_from_step=start_step,
-            prior_messages=prior_messages,
+            workspace_roots=workspace_roots_for_ctx,
+            workspace_trusted=workspace_trusted,
             session_id=session_id,
-        ):
-            async for evt in self._process_orchestrator_event(
-                event,
-                task_id=task_id,
-                session_id=session_id,
-                turn_id=turn_id,
-                message=message,
-                mode=mode,
-                workspace=workspace,
-                auto_discover_mcp=auto_discover_mcp,
-                analysis_step_id=analysis_step_id,
-                tool_execution_context=tool_execution_context,
-                accumulated_resources=accumulated_resources,
-                event_prefix="resume",
-            ):
-                yield evt
-            if event.get("type") == "approval_required":
-                return
+        ))
 
-        # orchestrator 正常结束（done / max_steps / error）
-        if accumulated_resources:
-            yield self._emit_step(
-                task_id,
-                self._step(
-                    f"{task_id}:{turn_id}:resources",
-                    f"相关资源 {len(accumulated_resources)} 个",
-                    "done",
-                    "resource",
-                    resources=accumulated_resources,
-                ),
+        try:
+            tag = "成功" if last_tool_ok else "失败"
+            tool_execution_context: List[str] = [
+                f"【工具 {last_tool_name} 返回（{tag}）】\n"
+                f"{(last_tool_log or '')[:8000]}"
+            ]
+            accumulated_resources: List[Dict[str, Any]] = []
+            accumulated_resources.extend(
+                self._collect_session_resources(session_id)
             )
 
-        async for evt in self._stream_answer(
-            task_id,
-            session_id,
-            prior_messages,
-            message,
-            mode,
-            [],  # 无附件
-            turn_id,
-            rag_context=None,
-            rag_resources=None,
-            tool_context=tool_execution_context,
-        ):
-            yield evt
+            orchestrator = self._orchestrator_provider()
+            async for event in orchestrator.run(
+                message,
+                allowed_danger_levels=allowed_dangers,
+                allow_mcp_discovery=auto_discover_mcp,
+                workspace_paths=workspace_roots_for_ctx,
+                resume_state=state,
+                resume_from_step=start_step,
+                prior_messages=prior_messages,
+                session_id=session_id,
+                task_id=task_id,
+            ):
+                async for evt in self._process_orchestrator_event(
+                    event,
+                    task_id=task_id,
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    message=message,
+                    mode=mode,
+                    workspace=workspace,
+                    workspace_trusted=workspace_trusted,
+                    auto_discover_mcp=auto_discover_mcp,
+                    analysis_step_id=analysis_step_id,
+                    tool_execution_context=tool_execution_context,
+                    accumulated_resources=accumulated_resources,
+                    event_prefix="resume",
+                ):
+                    yield evt
+                if event.get("type") == "approval_required":
+                    return
+
+            if accumulated_resources:
+                yield self._emit_step(
+                    task_id,
+                    self._step(
+                        f"{task_id}:{turn_id}:resources",
+                        f"相关资源 {len(accumulated_resources)} 个",
+                        "done",
+                        "resource",
+                        resources=accumulated_resources,
+                    ),
+                )
+
+            async for evt in self._stream_answer(
+                task_id,
+                session_id,
+                prior_messages,
+                message,
+                mode,
+                [],  # 无附件
+                turn_id,
+                rag_context=None,
+                rag_resources=None,
+                tool_context=tool_execution_context,
+            ):
+                yield evt
+        finally:
+            reset_security_context(_sec_token)

@@ -31,8 +31,14 @@ def _estimate_tokens(text: str) -> int:
     return int(cn / 1.5 + other / 4)
 
 
+def _safe_task_dir(task_id: str) -> str:
+    """把 task_id 转成安全目录名（防路径穿越）。"""
+    safe = re.sub(r"[^a-zA-Z0-9_-]", "_", task_id or "_default")[:64]
+    return safe or "_default"
+
+
 def _ensure_dir(task_id: str) -> str:
-    d = os.path.join(_RESULT_DIR, task_id or "_default")
+    d = os.path.join(_RESULT_DIR, _safe_task_dir(task_id))
     os.makedirs(d, exist_ok=True)
     return d
 
@@ -57,30 +63,42 @@ def save_tool_result(
     return result_id
 
 
+def _find_exact(d: str, result_id: str) -> Optional[str]:
+    """精确匹配 <result_id>.json 或 <result_id>-*.json（前缀 + 分隔符）。"""
+    if not result_id:
+        return None
+    prefix = result_id + "-"
+    exact = os.path.join(d, f"{result_id}.json")
+    if os.path.isfile(exact):
+        return exact
+    for fn in os.listdir(d):
+        if fn.endswith(".json") and (
+            fn == f"{result_id}.json" or fn.startswith(prefix)
+        ):
+            return os.path.join(d, fn)
+    return None
+
+
 def load_tool_result(task_id: str, result_id: str) -> Optional[Dict[str, Any]]:
-    """按 result_id 读回完整结果。"""
-    d = os.path.join(_RESULT_DIR, task_id or "_default")
+    d = os.path.join(_RESULT_DIR, _safe_task_dir(task_id))
     if not os.path.isdir(d):
         return None
-    for fn in os.listdir(d):
-        if fn.startswith(result_id) and fn.endswith(".json"):
-            try:
-                with open(os.path.join(d, fn), "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception:
-                logger.exception("[tool_result_store] 读取失败: %s", fn)
-                return None
-    return None
+    path = _find_exact(d, result_id)
+    if not path:
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        logger.exception("[tool_result_store] 读取失败: %s", path)
+        return None
 
 
 def find_result_path(task_id: str, result_id: str) -> Optional[str]:
-    d = os.path.join(_RESULT_DIR, task_id or "_default")
+    d = os.path.join(_RESULT_DIR, _safe_task_dir(task_id))
     if not os.path.isdir(d):
         return None
-    for fn in os.listdir(d):
-        if fn.startswith(result_id) and fn.endswith(".json"):
-            return os.path.join(d, fn)
-    return None
+    return _find_exact(d, result_id)
 
 
 def summarize_search_knowledge(

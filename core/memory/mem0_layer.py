@@ -353,50 +353,50 @@ def _add_fact(session_id: str, fact: str, fact_type: str) -> None:
         )
 
 
+# 允许写入 mem0 的工具：内置 + 只读
+_MEM0_WRITABLE_ORIGINS = frozenset({"builtin", "skill"})
+_MEM0_READ_HINTS = ("read", "search", "list", "get", "info", "stats", "knowledge")
+
+
 def remember_tool_success(
     session_id: str,
     tool_name: str,
     params: Dict[str, Any],
     result: Any,
+    *,
+    origin: str = "builtin",
 ) -> None:
     """工具成功后提取事实。
 
-    只在写类工具成功后写入 file_modified；读类工具只在参数里出现
-    明确路径时写 file_path。避免每次调用都触发存储。
+    ⚠️ 安全：只对内置/技能来源、且非写类的工具写 mem0。
+    外部 MCP 工具的返回内容不可信，写入会污染后续 prompt。
     """
-    # ── 调试：把每次调用都打出来 ──
-    logger.info(
-        "[mem0] remember_tool_success 入口: enabled=%r session_id=%r "
-        "tool=%s params_keys=%r",
-        _enabled, session_id, tool_name,
-        list(params.keys()) if isinstance(params, dict) else None,
-    )
-
     if not _enabled:
-        logger.info("[mem0] 跳过：_enabled=False")
         record_skip(reason="mem0_disabled", tool_name=tool_name, params=params)
         return
     if not session_id:
-        logger.warning(
-            "[mem0] 跳过：session_id 为空 (tool=%s)", tool_name,
-        )
         record_skip(reason="no_session", tool_name=tool_name, params=params)
         return
 
-    params_paths = _extract_paths_from_params(tool_name, params)
-    result_paths = _extract_paths_from_result(result)
+    # ── origin 过滤：外部 MCP 不写 ──
+    if origin not in _MEM0_WRITABLE_ORIGINS:
+        record_skip(
+            reason="origin_not_writable", tool_name=tool_name, origin=origin
+        )
+        return
 
-    logger.info(
-        "[mem0] 抽取结果: is_write=%r params_paths=%r result_paths=%r",
-        _is_write_tool(tool_name), params_paths, result_paths,
-    )
-
+    # ── 写类工具不写（避免把"删了 X"记成事实） ──
     if _is_write_tool(tool_name):
+        # 写类只记 file_modified（这是有用的），但要排除外部 MCP
+        params_paths = _extract_paths_from_params(tool_name, params)
+        result_paths = _extract_paths_from_result(result)
         for p in _dedup(params_paths + result_paths):
             _add_fact(session_id, p, "file_modified")
-    else:
-        for p in _dedup(params_paths):
-            _add_fact(session_id, p, "file_path")
+        return
+
+    # 读类：只记参数里明确出现的路径
+    for p in _dedup(_extract_paths_from_params(tool_name, params)):
+        _add_fact(session_id, p, "file_path")
 
 
 def remember_user_message(session_id: str, message: str) -> None:

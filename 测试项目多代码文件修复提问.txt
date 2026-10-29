@@ -1,0 +1,9 @@
+请帮我修复以下问题，并确保 tests/ 下的测试全部通过：
+
+1. calculator/core.py 的 divide 函数遇到除零会崩溃
+2. calculator/validators.py 的 validate_positive 逻辑反了
+3. calculator/formatters.py 的 format_result 精度不对（应保留 2 位小数）
+4. config.py 的 DATA_DIR 硬编码了 D:/hardcoded/path，应改为从环境变量读取
+5. main.py 调用 divide 时未导入
+
+修复后请运行 tests/ 验证。

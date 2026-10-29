@@ -4,7 +4,7 @@ export const streamAgentTask = async ({
   taskId,
   message,
   history = [],
-  mode = 'plan',
+  mode = 'agent',
   workspace = [],
   sessionId = null,
   files = [],
@@ -35,6 +35,7 @@ export const approveAgentTask = async (taskId, approvalId, action = 'allow', sig
 export const listAgentTasks = (sessionId) => requestJson(
   `/api/agent/tasks?session_id=${encodeURIComponent(sessionId)}`
 );
-export const deleteAgentTask = (taskId) => requestJson(`/api/agent/tasks/${taskId}`, {
-  method: 'DELETE',
-});
+export const deleteAgentTask = (taskId, sessionId) => requestJson(
+  `/api/agent/tasks/${taskId}?session_id=${encodeURIComponent(sessionId)}`,
+  { method: 'DELETE' },
+);

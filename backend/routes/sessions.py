@@ -1,9 +1,28 @@
 """会话管理路由。"""
 
+import os
+from pathlib import Path
 from typing import Any, Callable
 
 from fastapi import APIRouter, Form, HTTPException, Query
 from fastapi.responses import FileResponse
+
+
+# 资源根：所有 session file 的物理存储必须在 data/resources/ 下
+_RESOURCE_ROOT = Path(
+    os.getenv(
+        "AGENT_RESOURCE_DIR",
+        str(Path(__file__).resolve().parents[2] / "data" / "resources"),
+    )
+).resolve()
+
+
+def _is_within_resource_root(path: str) -> bool:
+    try:
+        p = Path(path).resolve()
+    except Exception:
+        return False
+    return p == _RESOURCE_ROOT or _RESOURCE_ROOT in p.parents
 
 
 def create_sessions_router(
@@ -46,9 +65,16 @@ def create_sessions_router(
         info = session_provider().get_file_by_id(file_id)
         if not info or not info.get("file_path"):
             raise HTTPException(status_code=404, detail="文件不存在")
+        # ── 安全：只允许读 data/resources/ 下的文件 ──
+        file_path = info["file_path"]
+        if not _is_within_resource_root(file_path):
+            raise HTTPException(status_code=403, detail="文件路径不在资源目录内")
+        if not os.path.isfile(file_path):
+            raise HTTPException(status_code=404, detail="文件不存在")
         return FileResponse(
-            path=info["file_path"],
+            path=file_path,
             filename=info.get("file_name") or "file",
+            headers={"X-Content-Type-Options": "nosniff"},
         )
 
     @router.delete("/api/session/file/{file_id}")
@@ -103,12 +129,13 @@ def create_sessions_router(
     async def add_session_file(
         session_id: str,
         file_name: str = Form(...),
-        file_path: str = Form(None),
         file_type: str = Form(None),
     ):
+        # ── 安全：不再接受客户端传入 file_path ──
+        # file_path 由服务端在资源入库时填充；此处只记录元信息。
         try:
             file_id = session_provider().add_session_file(
-                session_id, file_name, file_path, file_type
+                session_id, file_name, None, file_type
             )
             return {"status": "success", "file_id": file_id}
         except Exception as e:

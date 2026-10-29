@@ -1,0 +1,17 @@
+{
+  "id": "kb_overview",
+  "name": "知识库文档速览",
+  "description": "快速盘点本地知识库：先看统计，再列文档，最后按文档逐个检索内容，回答「知识库有哪些文档、分别讲了什么」。",
+  "prompt_template": "【技能：知识库文档速览】\\n当用户问「知识库有多少文档」「这些文档讲了什么」「分别介绍每个文档」时，按以下顺序执行：\\n1. 先调 `knowledge_stats()` 确认文档数与分块数；若为 0，直接告知用户知识库为空，不要继续。\\n2. 调 `list_knowledge_sources()` 拿到文档清单。\\n3. **对清单里的每个文档，逐个调 `search_knowledge(query=<文档主题或文件名>, mode='flat', top_k=10)`**。query 用该文档的主题或文件名（如 'IBM'、'第十届天梯赛获奖名单'），**不要重复用同一个 query 搜不同文档**。\\n4. 每搜完一个文档，记录已覆盖；当 **所有文档都搜过一遍** 后，才汇总。\\n5. 汇总时按文档分组，每个文档给出 1-2 句摘要，并标注 chunk 数。\\n6. 若某个文档检索结果为空，明确说「该文档未检索到相关内容」，不要编造。\\n注意：不要用 `search_content` 代替 `search_knowledge`——前者只搜文件系统，搜不到知识库。",
+  "tool_names": [
+    "\"knowledge_stats\"",
+    "\"list_knowledge_sources\"",
+    "“search_knowledge\""
+  ],
+  "parameters": {},
+  "examples": [],
+  "category": "skill",
+  "danger_level": "safe",
+  "enabled": true,
+  "version": "1.0"
+}

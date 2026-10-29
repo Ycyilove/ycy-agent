@@ -101,19 +101,29 @@ class ToolAgent:
             and "__" in tool_name[len(_MCP_TOOL_PREFIX):]
         )
 
-    def register_dynamic_tool(self, name, description, parameters=None,
-                               handler=None, input_schema=None, origin="builtin",
-                               danger_level="safe", idempotent=False):
-        logger.info("[dsh][mcp] register tool: %s (origin=%s)", name, origin)
+    def register_dynamic_tool(
+        self, name, description, parameters=None, handler=None,
+        input_schema=None, origin="builtin", danger_level="safe",
+        idempotent=False,
+    ):
+        from tools.security.trust import assign_trust_level
+        trust_level = assign_trust_level(
+            name, origin, self._mcp_client_manager,
+        )
+        logger.info(
+            "[dsh][mcp] register tool: %s (origin=%s, trust=L%d)",
+            name, origin, trust_level,
+        )
         self.registry.register_callable(
             handler, name=name, description=description,
             parameters=parameters, input_schema=input_schema,
-            origin=origin, danger_level=danger_level, idempotent=idempotent,
+            origin=origin, danger_level=danger_level,
+            idempotent=idempotent, trust_level=trust_level,
         )
         self.tool_descriptions = self.registry.get_tool_descriptions()
         self.llm_intent_recognizer._tool_descriptions_cache = None
         return handler
-
+        
     def unregister_dynamic_tool(self, name: str) -> bool:
         metadata = self.registry.get_metadata(name)
         if metadata is None or metadata.origin != "mcp":
@@ -175,7 +185,24 @@ class ToolAgent:
         tool_func = self.registry.get_tool(tool_name)
         params = tool_call.parameters or {}
 
-        # 动态 MCP 路由
+        # ── 安全网关（统一入口，替代分散检查） ──
+        from tools.security.gateway import get_gateway, get_security_context
+        ctx = get_security_context()
+        meta = self.registry.get_metadata(tool_name)
+        if ctx is not None:
+            decision = get_gateway().check(tool_name, params, meta, ctx)
+            if not decision.allowed:
+                logger.warning(
+                    "[dsh][security] blocked %s: %s", tool_name, decision.reason
+                )
+                return ToolCallResult(
+                    tool_name=tool_name, success=False,
+                    error=f"安全网关拒绝: {decision.reason}",
+                    execution_time=time.time() - start_time,
+                    parameters=params,
+                )
+
+        # 动态 MCP 路由（保持原逻辑）
         if tool_func is None and self._is_mcp_tool_name(tool_name):
             mcp_client = self._mcp_client_manager
             if mcp_client is None:
@@ -185,14 +212,10 @@ class ToolAgent:
                     execution_time=time.time() - start_time,
                     parameters=params,
                 )
-            logger.info(
-                "[dsh][mcp] dynamic route: %s params=%r", tool_name, params,
-            )
+            logger.info("[dsh][mcp] dynamic route: %s params=%r", tool_name, params)
             try:
                 result = await mcp_client.call_tool(tool_name, params)
                 if isinstance(result, dict):
-                    # MCP 的 success 是传输层标记，不代表业务成功。
-                    # 优先看 structuredContent 里的业务错误。
                     sc = result.get("structuredContent")
                     if isinstance(sc, dict) and sc.get("error"):
                         success = False
@@ -243,30 +266,7 @@ class ToolAgent:
                 parameters=params,
             )
 
-        # ── 修复 D：内置工具必填参数预校验（MCP 工具豁免） ──
-        if not self._is_mcp_tool_name(tool_name):
-            from .schema_utils import read_tool_schema
-            meta = self.registry.get_metadata(tool_name)
-            if meta is not None:
-                _props, _required = read_tool_schema(meta)
-                if _required:
-                    missing = [k for k in _required if k not in params]
-                    if missing:
-                        accepted = list(_props.keys()) or list(_required)
-                        logger.warning(
-                            "[dsh][agent] %s missing required params %r "
-                            "(accepted=%r)", tool_name, missing, accepted,
-                        )
-                        return ToolCallResult(
-                            tool_name=tool_name, success=False,
-                            error=(
-                                f"缺少必填参数: {missing}。"
-                                f"工具 `{tool_name}` 接受的关键字：{accepted}\n"
-                                f"请补齐后重试。"
-                            ),
-                            execution_time=time.time() - start_time,
-                            parameters=params,
-                        )
+        # ── 已删除：内置工具必填参数预校验（网关 + _fill_params 兜底已覆盖） ──
 
         try:
             result = tool_func(**params)
@@ -278,7 +278,6 @@ class ToolAgent:
                     success = bool(result["success"])
                     error_message = None if success else result.get("error")
                 elif result.get("error"):
-                    # 有 error 字段但没 success → 视为失败
                     success = False
                     error_message = str(result["error"])
                 else:
@@ -293,7 +292,6 @@ class ToolAgent:
                 parameters=params,
             )
         except TypeError as error:
-            # 参数名错误 → 给出工具接受的关键字
             try:
                 sig = inspect.signature(tool_func)
                 accepted = list(sig.parameters.keys())
@@ -315,7 +313,7 @@ class ToolAgent:
                 execution_time=time.time() - start_time,
                 parameters=params,
             )
-
+            
     def format_tool_result(self, result: ToolCallResult) -> str:
         from .format import format_tool_result as _fmt
         try:

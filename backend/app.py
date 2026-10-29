@@ -98,6 +98,7 @@ from rag import LocalRAGService
 from backend.routes.agent import create_agent_router
 from backend.routes.mcp import create_mcp_router
 from backend.routes.tools import create_tools_router
+from backend.routes.skills import create_skills_router
 from backend.routes.rag import create_rag_router
 from backend.routes.sessions import create_sessions_router
 from backend.routes.health import create_health_router
@@ -501,6 +502,8 @@ app.include_router(create_trash_router())
 app.include_router(create_resource_router())
 
 app.include_router(create_tools_router(get_tool_agent))
+
+app.include_router(create_skills_router(get_tool_agent))
 
 app.include_router(
     create_mcp_router(

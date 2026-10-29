@@ -92,6 +92,7 @@ class ToolMetadata:
     origin: str = "builtin"
     idempotent: bool = False
     resource_kinds: List[str] = field(default_factory=list)
+    trust_level: int = 0                      # ← 新增：0 内置 / 1 静态 MCP / 2 动态 / 3 拒绝
 
 
 class ToolRegistry:
@@ -179,9 +180,8 @@ class ToolRegistry:
         idempotent: bool = False,
         resource_kinds: List[str] = None,
         required: List[str] = None,
+        trust_level: int = 0,                 # ← 新增
     ) -> Callable:
-        """Register a runtime callable, including async MCP handlers."""
-        # 未显式提供 input_schema 时，用 parameters + required 构造
         if input_schema is None and parameters:
             input_schema = _build_input_schema(parameters, required)
 
@@ -197,6 +197,7 @@ class ToolRegistry:
             origin=origin,
             idempotent=idempotent,
             resource_kinds=list(resource_kinds or []),
+            trust_level=trust_level,
         )
         return func
         

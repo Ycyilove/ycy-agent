@@ -84,12 +84,14 @@ class SessionMemory:
                         session_id TEXT NOT NULL,
                         title TEXT DEFAULT '',
                         status TEXT DEFAULT 'running',
-                        mode TEXT DEFAULT 'plan',
+                        mode TEXT DEFAULT 'agent',
                         workspace TEXT DEFAULT '[]',
                         skills TEXT DEFAULT '[]',
                         attachments TEXT DEFAULT '[]',
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL,
+                        stop_reason TEXT,
+                        stop_detail TEXT,
                         FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
                     )
                 """)
@@ -159,6 +161,22 @@ class SessionMemory:
                     "WHERE status IN ('running', 'waiting')",
                     (datetime.now().isoformat(),)
                 )
+                cursor.execute(
+                    "UPDATE tasks SET mode = 'agent' "
+                    "WHERE mode IN ('plan','craft','auto')"
+                )
+                cursor.execute(
+                    "UPDATE tasks SET mode = 'ask' "
+                    "WHERE mode IS NULL OR mode = ''"
+                )
+                for ddl in (
+                    "ALTER TABLE tasks ADD COLUMN stop_reason TEXT",
+                    "ALTER TABLE tasks ADD COLUMN stop_detail TEXT",
+                ):
+                    try:
+                        cursor.execute(ddl)
+                    except sqlite3.OperationalError:
+                        pass
                 conn.commit()
 
     # ────────── 会话 ──────────
@@ -431,7 +449,7 @@ class SessionMemory:
                         task["session_id"],
                         task.get("title", ""),
                         task.get("status", "running"),
-                        task.get("mode", "plan"),
+                        task.get("mode", "agent"),
                         json.dumps(task.get("workspace", []), ensure_ascii=False),
                         json.dumps(task.get("skills", []), ensure_ascii=False),
                         json.dumps(task.get("attachments", []), ensure_ascii=False),
@@ -446,7 +464,10 @@ class SessionMemory:
         if not patch:
             return False
         now = datetime.now().isoformat()
-        allowed = {"title", "status", "mode", "workspace", "skills", "attachments"}
+        allowed = {
+            "title", "status", "mode", "workspace", "skills", "attachments",
+            "stop_reason", "stop_detail",
+        }
         fields = []
         values = []
         for key, value in patch.items():
@@ -685,6 +706,8 @@ class SessionMemory:
             "created_at": row["created_at"],
             "updatedAt": row["updated_at"],
             "updated_at": row["updated_at"],
+            "stop_reason": row["stop_reason"] if "stop_reason" in row.keys() else None,
+            "stop_detail": row["stop_detail"] if "stop_detail" in row.keys() else None,
         }
 
     @staticmethod

@@ -10,11 +10,14 @@ import ApprovalQueue from '../../features/activity/ApprovalQueue';
 import KnowledgeBasePanel from '../../features/knowledge-base/KnowledgeBasePanel';
 import SessionPanel from '../../features/sessions/SessionPanel';
 import ToolsPanel from '../../capabilities/tools/ToolsPanel';
+import SkillsPanel from '../../features/skills/SkillsPanel';
 import { useApp } from '../state/AppContext';
 
 export default function AppShell() {
   const { state, dispatch } = useApp();
-  const [modals, setModals] = useState({ kb: false, session: false, tools: false });
+  const [modals, setModals] = useState({
+    kb: false, session: false, tools: false, skills: false,
+  });
 
   const closeModal = (key) => setModals((m) => ({ ...m, [key]: false }));
 
@@ -65,6 +68,11 @@ export default function AppShell() {
         onClose={() => closeModal('session')}
       />
       <ToolsPanel isOpen={modals.tools} onClose={() => closeModal('tools')} />
+      <SkillsPanel
+        isOpen={modals.skills}
+        onClose={() => closeModal('skills')}
+        sessionId={state.activeSessionId}
+      />
     </div>
   );
 }

@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+from .task_types import TaskType
 
 def params_key(params: Any) -> str:
     """把参数字典变成稳定的 key。"""
@@ -22,6 +23,7 @@ class OrchestratorState:
     """多步编排的会话状态，跨步骤传递。"""
     goal: str = ""
     session_id: Optional[str] = None   # ← Mem0 结构化记忆的隔离键
+    task_id: Optional[str] = None          # ← 新增：审批 store 用
     history: List[str] = field(default_factory=list)
 
     successful_calls: Dict[Tuple[str, str], int] = field(default_factory=dict)
@@ -29,9 +31,7 @@ class OrchestratorState:
     succeeded_tool_names: Dict[str, int] = field(default_factory=dict)
 
     last_successful_call_key: Optional[Tuple[str, str]] = None
-
-    mandatory_next_tool: Optional[str] = None
-
+    
     total_attempts: int = 0
 
     # 最近一次成功读取的文件内容，供 _fill_params 使用
@@ -41,12 +41,24 @@ class OrchestratorState:
     # 按时间顺序记录成功调用的工具名，供完成度校验使用
     successful_tool_sequence: List[str] = field(default_factory=list)
 
-    # 最近一次结果评估是否通过（供 _validate_done 使用）
-    last_assessment_passed: bool = True
-
     failed_capabilities: set = field(default_factory=set)
     discovery_count: int = 0
+
+    # ── kb_overview 等多文档任务：累计已覆盖的文档 ──
+    covered_documents: set = field(default_factory=set)
+    # ── 已搜索过的 query（防 conditional 拦截后重复） ──
+    searched_queries: set = field(default_factory=set)
+    # ── 当前会话的工作区根（供 _fill_params 注入 prompt） ──
+    workspace_roots: Optional[List[str]] = None
+
+    # ── 任务类型（完成判据族），供 assess 分流 ──
+    task_type: TaskType = TaskType.INFO_QUERY
+
+    # ── 终止原因（编排循环退出时写入，供 answer 层如实告知） ──
+    stop_reason: Optional[str] = None
+    stop_detail: str = ""
     
+
     def add_history(self, entry: str) -> None:
         self.history.append(entry)
 
@@ -97,6 +109,7 @@ class OrchestratorState:
         return {
             "goal": self.goal,
             "session_id": self.session_id,
+            "task_id": self.task_id,       # ← 新增
             "history": list(self.history),
             "successful_calls": dict(self.successful_calls),
             "failed_calls": dict(self.failed_calls),
@@ -106,7 +119,14 @@ class OrchestratorState:
             "last_read_content": self.last_read_content,
             "last_read_path": self.last_read_path,
             "successful_tool_sequence": list(self.successful_tool_sequence),
-            "last_assessment_passed": self.last_assessment_passed,
+            "covered_documents": list(self.covered_documents),
+            "searched_queries": list(self.searched_queries),
+            "workspace_roots": list(self.workspace_roots) if self.workspace_roots else None,
+            "task_type": self.task_type.value
+            if isinstance(self.task_type, TaskType)
+            else str(self.task_type),
+            "stop_reason": self.stop_reason,
+            "stop_detail": self.stop_detail,
         }
 
     @classmethod
@@ -114,6 +134,7 @@ class OrchestratorState:
         st = cls(
             goal=snap.get("goal", ""),
             session_id=snap.get("session_id"),
+            task_id=snap.get("task_id"),   # ← 新增
         )
         st.history = list(snap.get("history", []))
         st.successful_calls = {
@@ -129,5 +150,14 @@ class OrchestratorState:
         st.successful_tool_sequence = list(
             snap.get("successful_tool_sequence", [])
         )
-        st.last_assessment_passed = snap.get("last_assessment_passed", True)
+        st.covered_documents = set(snap.get("covered_documents", []))
+        st.searched_queries = set(snap.get("searched_queries", []))
+        st.workspace_roots = snap.get("workspace_roots")
+        raw_tt = snap.get("task_type", "info_query")
+        try:
+            st.task_type = TaskType(raw_tt)
+        except ValueError:
+            st.task_type = TaskType.INFO_QUERY
+        st.stop_reason = snap.get("stop_reason")
+        st.stop_detail = snap.get("stop_detail", "")
         return st

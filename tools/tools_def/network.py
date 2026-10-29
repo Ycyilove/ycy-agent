@@ -13,55 +13,47 @@ from urllib.parse import urlparse
 
 from .. import tool, get_registry
 
+# ── 复用 fetch.py 的 SSRF 检查（统一口径） ──
+from .fetch import _check_url_safety as _fetch_ssrf_check
+
 
 ALLOWED_PROTOCOLS = ['http', 'https']
-BLOCKED_DOMAINS = [
-    'localhost',
-    '127.0.0.1',
-    '0.0.0.0',
-    '::1',
-]
-
 DANGEROUS_PORTS = [21, 22, 23, 25, 3306, 5432, 6379, 27017, 11211]
+
+_MAX_RESPONSE_BYTES = 10 * 1024 * 1024   # 10MB
+_MAX_REDIRECTS = 5
 
 
 def is_url_safe(url: str) -> tuple[bool, str]:
-    """检查URL是否安全"""
+    """URL 安全校验（复用 fetch.py 的 ipaddress 级检查）。"""
+    reason = _fetch_ssrf_check(url)
+    if reason:
+        return False, reason
+    # 额外保留危险端口检查
     try:
         parsed = urlparse(url)
-
-        if parsed.scheme not in ALLOWED_PROTOCOLS:
-            return False, f"不支持的协议: {parsed.scheme}"
-
-        if not parsed.netloc:
-            return False, "无效的URL"
-
-        domain = parsed.netloc.split(':')[0].lower()
-
-        if domain in BLOCKED_DOMAINS:
-            return False, f"禁止访问: {domain}"
-
-        if re.match(r'^(\d{1,3}\.){3}\d{1,3}$', domain):
-            if domain == '127.0.0.1' or domain == '0.0.0.0' or domain.startswith('192.168.') or domain.startswith('10.') or domain.startswith('172.'):
-                return False, f"禁止访问内网IP: {domain}"
-
         if ':' in parsed.netloc:
-            try:
-                port = int(parsed.netloc.split(':')[1])
-                if port in DANGEROUS_PORTS:
-                    return False, f"禁止访问危险端口: {port}"
-            except (ValueError, IndexError):
-                pass
+            port = int(parsed.netloc.rsplit(':', 1)[1])
+            if port in DANGEROUS_PORTS:
+                return False, f"禁止访问危险端口: {port}"
+    except (ValueError, IndexError):
+        pass
+    return True, ""
 
-        return True, ""
 
-    except Exception as e:
-        return False, f"URL解析错误: {str(e)}"
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """禁用 urllib 自动重定向，改为手动校验。"""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None   # 返回 None → urllib 不跟随，抛 HTTPError
+
+
+def _build_opener():
+    return urllib.request.build_opener(_NoRedirect)
 
 
 def make_request(method: str, url: str, headers: Dict[str, str] = None,
                   data: Any = None, timeout: int = 30) -> Dict[str, Any]:
-    """发起HTTP请求"""
+    """发起HTTP请求（含重定向链逐跳 SSRF 校验 + 大小限制）。"""
     safe, error = is_url_safe(url)
     if not safe:
         return {"success": False, "error": error}
@@ -71,34 +63,69 @@ def make_request(method: str, url: str, headers: Dict[str, str] = None,
 
         if headers is None:
             headers = {}
-
         if 'User-Agent' not in headers:
-            headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
 
         if data is not None:
             if isinstance(data, (dict, list)):
                 data = json.dumps(data).encode('utf-8')
-                if 'Content-Type' not in headers:
-                    headers['Content-Type'] = 'application/json'
+                headers.setdefault('Content-Type', 'application/json')
             elif isinstance(data, str):
                 data = data.encode('utf-8')
 
-        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        opener = _build_opener()
+        current_url = url
+        redirects = 0
 
-        with urllib.request.urlopen(req, context=context, timeout=timeout) as response:
+        while True:
+            req = urllib.request.Request(
+                current_url, data=data, headers=headers, method=method
+            )
+            try:
+                response = opener.open(req, timeout=timeout)
+                break
+            except urllib.error.HTTPError as e:
+                # 3xx → 手动跟一跳
+                if 300 <= e.code < 400 and redirects < _MAX_REDIRECTS:
+                    location = e.headers.get('Location')
+                    if not location:
+                        raise
+                    current_url = urllib.parse.urljoin(current_url, location)
+                    # 逐跳校验
+                    ok, reason = is_url_safe(current_url)
+                    if not ok:
+                        return {
+                            "success": False,
+                            "error": f"重定向目标不安全: {reason}",
+                        }
+                    redirects += 1
+                    # 3xx 后 GET 不带 body
+                    if method in ('POST', 'PUT') and e.code in (301, 302, 303):
+                        method, data = 'GET', None
+                    continue
+                raise
+
+        with response:
             status_code = response.status
             response_headers = dict(response.headers)
-
             content_type = response.headers.get('Content-Type', '')
+
+            raw = response.read(_MAX_RESPONSE_BYTES + 1)
+            if len(raw) > _MAX_RESPONSE_BYTES:
+                return {
+                    "success": False,
+                    "error": f"响应超过大小限制 ({_MAX_RESPONSE_BYTES} bytes)",
+                }
+
             if 'application/json' in content_type:
                 try:
-                    body = json.loads(response.read().decode('utf-8'))
-                except:
-                    body = response.read().decode('utf-8')
+                    body = json.loads(raw.decode('utf-8'))
+                except Exception:
+                    body = raw.decode('utf-8', errors='replace')
             elif 'text/' in content_type:
-                body = response.read().decode('utf-8')
+                body = raw.decode('utf-8', errors='replace')
             else:
-                body = f"[二进制内容，长度: {response.length} bytes]"
+                body = f"[二进制内容，长度: {len(raw)} bytes]"
 
             return {
                 "success": True,
@@ -106,8 +133,8 @@ def make_request(method: str, url: str, headers: Dict[str, str] = None,
                 "status_message": response.reason,
                 "headers": response_headers,
                 "body": body,
-                "url": url,
-                "method": method
+                "url": current_url,
+                "method": method,
             }
 
     except urllib.error.HTTPError as e:
@@ -116,7 +143,10 @@ def make_request(method: str, url: str, headers: Dict[str, str] = None,
             "error": f"HTTP错误 {e.code}: {e.reason}",
             "status_code": e.code,
             "response_headers": dict(e.headers),
-            "response_body": e.read().decode('utf-8', errors='replace') if e.fp else None
+            "response_body": (
+                e.read(_MAX_RESPONSE_BYTES).decode('utf-8', errors='replace')
+                if e.fp else None
+            ),
         }
     except urllib.error.URLError as e:
         return {"success": False, "error": f"网络错误: {str(e.reason)}"}
@@ -124,6 +154,7 @@ def make_request(method: str, url: str, headers: Dict[str, str] = None,
         return {"success": False, "error": f"请求失败: {str(e)}"}
 
 
+# ── http_get 保持 safe ──
 @tool(
     name="http_get",
     description="发送HTTP GET请求，获取网页内容或API数据",
@@ -141,10 +172,10 @@ def make_request(method: str, url: str, headers: Dict[str, str] = None,
     danger_level="safe"
 )
 def http_get(url: str, headers: Dict[str, str] = None, timeout: int = 30) -> Dict[str, Any]:
-    """发送GET请求"""
     return make_request('GET', url, headers, None, timeout)
 
 
+# ── http_post / http_put 改为 medium ──
 @tool(
     name="http_post",
     description="发送HTTP POST请求，常用于提交表单或JSON数据",
@@ -157,13 +188,11 @@ def http_get(url: str, headers: Dict[str, str] = None, timeout: int = 30) -> Dic
     required=["url", "data"],
     examples=[
         "http_post(url='https://httpbin.org/post', data={'key': 'value'})",
-        "http_post(url='https://api.example.com/submit', data={'name': 'test', 'age': 20})"
     ],
     category="network",
-    danger_level="safe"
+    danger_level="medium"      # ← 改动：safe → medium
 )
 def http_post(url: str, data: Any, headers: Dict[str, str] = None, timeout: int = 30) -> Dict[str, Any]:
-    """发送POST请求"""
     return make_request('POST', url, headers, data, timeout)
 
 
@@ -177,14 +206,11 @@ def http_post(url: str, data: Any, headers: Dict[str, str] = None, timeout: int 
         "timeout": {"type": "int", "description": "超时时间（秒）"}
     },
     required=["url", "data"],
-    examples=[
-        "http_put(url='https://api.example.com/resource/1', data={'name': 'updated'})"
-    ],
+    examples=["http_put(url='https://api.example.com/resource/1', data={'name': 'updated'})"],
     category="network",
-    danger_level="safe"
+    danger_level="medium"      # ← 改动：safe → medium
 )
 def http_put(url: str, data: Any, headers: Dict[str, str] = None, timeout: int = 30) -> Dict[str, Any]:
-    """发送PUT请求"""
     return make_request('PUT', url, headers, data, timeout)
 
 
@@ -197,14 +223,11 @@ def http_put(url: str, data: Any, headers: Dict[str, str] = None, timeout: int =
         "timeout": {"type": "int", "description": "超时时间（秒）"}
     },
     required=["url"],
-    examples=[
-        "http_delete(url='https://api.example.com/resource/1')"
-    ],
+    examples=["http_delete(url='https://api.example.com/resource/1')"],
     category="network",
-    danger_level="safe"
+    danger_level="high"        # ← 改动：safe → high
 )
 def http_delete(url: str, headers: Dict[str, str] = None, timeout: int = 30) -> Dict[str, Any]:
-    """发送DELETE请求"""
     return make_request('DELETE', url, headers, None, timeout)
 
 
@@ -222,7 +245,7 @@ def http_delete(url: str, headers: Dict[str, str] = None, timeout: int = 30) -> 
     danger_level="safe"
 )
 def check_url_status(url: str) -> Dict[str, Any]:
-    """检查URL状态"""
+    """检查URL状态（HEAD 请求，复用 is_url_safe 做 SSRF 校验）。"""
     import time
     start_time = time.time()
 

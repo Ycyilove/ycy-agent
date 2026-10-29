@@ -67,18 +67,27 @@ def _extract_path(goal: str) -> Optional[str]:
 def _has_path(goal: str) -> bool:
     return _extract_path(goal) is not None
 
+_NEGATIONS = ("不要", "别", "禁止", "不可", "无需", "不用", "don't", "do not", "never")
+
+def _has_negation(goal: str) -> bool:
+    lower = goal.lower()
+    return any(n in lower for n in _NEGATIONS)
 
 def _pick(tools: Dict[str, Any], *suffixes: str) -> Optional[str]:
-    """按后缀优先级在 tools 里挑一个；找不到返回 None。"""
+    """优先精确名，其次只匹配内置工具。"""
     for suffix in suffixes:
+        if suffix in tools:
+            return suffix
         for name in tools:
+            if name.startswith("mcp__"):
+                continue        # 快速路径不选 MCP 工具
             if name.endswith(suffix):
                 return name
     return None
 
-
 def route_intent(goal: str, tools: Dict[str, Any]) -> Optional[str]:
-    """根据 goal 意图选出工具名。找不到合适的返回 None。"""
+    if _has_negation(goal):
+        return None
     lower = goal.lower()
     has_path = _has_path(goal)
 

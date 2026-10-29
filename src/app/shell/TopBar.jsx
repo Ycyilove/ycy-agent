@@ -6,17 +6,12 @@ const MODES = [
   {
     id: 'ask',
     label: 'Ask',
-    hint: 'Chat only. No tools. Knowledge base lookup is allowed.',
+    hint: '对话模式：只读问答，不执行文件操作',
   },
   {
-    id: 'plan',
-    label: 'Plan',
-    hint: 'Agent plans and asks before executing.',
-  },
-  {
-    id: 'craft',
-    label: 'Auto',
-    hint: 'Agent executes directly.',
+    id: 'agent',
+    label: 'Agent',
+    hint: '代理模式：可调用工具执行文件与命令操作',
   },
 ];
 
@@ -85,6 +80,12 @@ export default function TopBar({ onOpenModal }) {
             className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs text-[var(--muted)] hover:text-[var(--text)] hover:bg-[var(--surface)] rounded-md transition-colors"
           >
             <Icon d={I.tool} className="w-3.5 h-3.5" /> 工具
+          </button>
+          <button
+            onClick={() => onOpenModal('skills')}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs text-[var(--muted)] hover:text-[var(--text)] hover:bg-[var(--surface)] rounded-md transition-colors"
+          >
+            <Icon d={I.spark} className="w-3.5 h-3.5" /> 技能
           </button>
           <div className="w-px h-4 bg-[var(--border)] mx-1" />
           <div className="flex items-center gap-1.5 px-1.5">

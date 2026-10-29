@@ -9,7 +9,7 @@ const initialState = {
   tasks: {},
   activeSessionId: null,
   modelName: '',
-  mode: 'ask',
+  mode: 'agent',
   fileLog: [],
   trash: [],
   approvals: [],
@@ -21,8 +21,10 @@ const initialState = {
 
 function reducer(state, action) {
   switch (action.type) {
-    case 'SET_MODE':
+    case 'SET_MODE': {
+      if (!['ask', 'agent'].includes(action.mode)) return state;
       return { ...state, mode: action.mode };
+    }
 
     case 'SET_MODEL':
       return { ...state, modelName: action.modelName };

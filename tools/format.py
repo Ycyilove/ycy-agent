@@ -24,18 +24,29 @@ def format_tool_result(
 ) -> str:
     """格式化工具结果。
 
-    - 用 guidance.extractor 提取引导
-    - 用 semantics.failure 分类失败
-    - 按 guidance_type 分级输出
+    ⚠️ 安全：MCP 返回不提取 guidance（防 prompt injection）。
     """
     guidance: Dict[str, Any] = {}
-    if isinstance(result.result, dict):
+    # 只对内置工具提取 guidance
+    if (
+        isinstance(result.result, dict)
+        and not result.tool_name.startswith("mcp__")
+        and result.tool_name not in ("search_and_connect_mcp",)
+    ):
         try:
             guidance = extract_guidance(result.result)
         except Exception:
             logger.exception("extract_guidance failed")
 
     next_tool = guidance.get("next_tool")
+    # next_tool 必须在 available_tools 里
+    if next_tool and available_tools and next_tool not in available_tools:
+        logger.warning(
+            "[format] guidance next_tool %r not in available, dropped", next_tool
+        )
+        next_tool = None
+        guidance["guidance_type"] = "none"
+
     next_args = guidance.get("next_args") or {}
     next_message = guidance.get("message") or ""
     guest_tools = guidance.get("guest_tools") or []
@@ -205,7 +216,7 @@ def format_tool_result(
         available_tools=available,
     )
 
-    # 1. MCP guidance（MCP 服务器明确给的指令，优先级最高）
+    # 1. 内置工具 guidance（MCP 返回不提取）
     output = directive_block
 
     # 2. 失败原文 —— 核心信息放这里，不遮不掩

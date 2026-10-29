@@ -27,6 +27,7 @@ class MCPServerConfig:
     call_timeout: float = 30.0
     retries: int = 2
     enabled: bool = True
+    allow_hidden_tools: tuple[str, ...] = ()
 
     @classmethod
     def from_mapping(cls, name: str, value: dict) -> "MCPServerConfig":
@@ -58,6 +59,9 @@ class MCPServerConfig:
             call_timeout=max(0.1, float(value.get("call_timeout", 30))),
             retries=max(0, int(value.get("retries", 2))),
             enabled=bool(value.get("enabled", True)),
+            allow_hidden_tools=tuple(
+                str(t) for t in value.get("allow_hidden_tools", [])
+            ),
         )
 
 

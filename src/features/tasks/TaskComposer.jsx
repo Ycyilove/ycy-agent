@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import Icon from '../../shared/ui/Icon';
 import { I } from '../../shared/ui/icons';
 import { useApp } from '../../app/state/AppContext';
-import { streamAgentTask } from '../../services/api';
+import { streamAgentTask, listSkills } from '../../services/api';
 
 const ACCEPT = 'image/*,.pdf,.txt,.docx,.xlsx,.csv,.json,.md';
 
@@ -14,6 +14,7 @@ export default function TaskComposer() {
   const [isGlobalDragging, setIsGlobalDragging] = useState(false);
   const [submittingTasks, setSubmittingTasks] = useState(() => new Set());
   const [submitError, setSubmitError] = useState('');
+  const [skills, setSkills] = useState([]);
   const inputRef = useRef(null);
   const fileInputRef = useRef(null);
   const dragCounter = useRef(0);
@@ -50,6 +51,18 @@ export default function TaskComposer() {
     setAttachments([]);
     setSubmitError('');
   }, [activeSessionId, activeTaskId]);
+
+  useEffect(() => {
+    listSkills()
+      .then((d) => setSkills((d.skills || []).filter((s) => s.enabled !== false)))
+      .catch(() => setSkills([]));
+  }, []);
+
+  const applySkill = (skill) => {
+    const template = skill.prompt_template || skill.description || skill.name || '';
+    setInput(template);
+    inputRef.current?.focus();
+  };
 
   useEffect(() => {
     const handler = (event) => {
@@ -304,6 +317,21 @@ export default function TaskComposer() {
 
       <div className="border-t border-[var(--border)] bg-[var(--bg)]">
         <div className="mx-auto max-w-[760px] px-6 py-4">
+          {skills.length > 0 && (
+            <div className="mb-2 flex flex-wrap gap-1.5">
+              {skills.map((s) => (
+                <button
+                  key={s.id}
+                  type="button"
+                  onClick={() => applySkill(s)}
+                  title={s.description || s.name}
+                  className="rounded-md border border-[var(--border)] bg-[var(--surface-2)] px-2 py-1 text-[11px] text-[var(--muted)] transition-colors hover:text-[var(--text)] hover:border-[var(--border-hover)]"
+                >
+                  {s.name}
+                </button>
+              ))}
+            </div>
+          )}
           {attachments.length > 0 && (
             <div className="mb-2 flex flex-wrap gap-1.5">
               {attachments.map((file, index) => (
@@ -329,7 +357,7 @@ export default function TaskComposer() {
               ))}
             </div>
           )}
-
+          
           <form onSubmit={submit}>
             <div
               onDragOver={(event) => {

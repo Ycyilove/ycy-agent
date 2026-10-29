@@ -4,89 +4,48 @@ import { I } from '../../shared/ui/icons';
 import { useApp } from '../../app/state/AppContext';
 import { useActiveWorkspace } from '../../app/state/AppStore';
 
-const SUPPORTS_PICKER =
-  typeof window !== 'undefined' && 'showDirectoryPicker' in window;
+const ABSOLUTE_PATH_RE = /^([A-Za-z]:[\\/]|\/)/;
 
 export default function WorkspacePanel() {
   const { state, dispatch } = useApp();
   const workspace = useActiveWorkspace();
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
   const [manualMode, setManualMode] = useState(false);
   const [manualPath, setManualPath] = useState('');
+  const [error, setError] = useState('');
 
   const activeSessionId = state.activeSessionId;
   const hasSession = Boolean(activeSessionId && state.sessions[activeSessionId]);
 
-  const pickDirectory = async () => {
-    setError('');
-    if (!hasSession) {
-      setError('请先创建或选择一个会话');
-      return;
-    }
-    if (!SUPPORTS_PICKER) {
-      setManualMode(true);
-      return;
-    }
-    setBusy(true);
-    try {
-      const handle = await window.showDirectoryPicker({ mode: 'readwrite' });
-
-      if (handle.queryPermission) {
-        const perm = await handle.queryPermission({ mode: 'readwrite' });
-        if (perm !== 'granted') {
-          const req = await handle.requestPermission({ mode: 'readwrite' });
-          if (req !== 'granted') {
-            setError('未获得该目录的读写权限');
-            return;
-          }
-        }
-      }
-
-      const exists = workspace.allowed.some((d) => d.label === handle.name);
-      if (exists) {
-        setError(`目录「${handle.name}」已在工作区中`);
-        return;
-      }
-
-      dispatch({
-        type: 'ADD_WORKSPACE_DIR',
-        sessionId: activeSessionId,
-        dir: {
-          path: handle.name,
-          label: handle.name,
-          handle,
-        },
-      });
-    } catch (err) {
-      if (err?.name === 'AbortError') return;
-      console.error('选择目录失败:', err);
-      setError(err?.message || '选择目录失败');
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const submitManual = () => {
-    const path = manualPath.trim();
-    if (!path) return;
+    const raw = manualPath.trim();
+    if (!raw) return;
     if (!hasSession) {
       setError('请先创建或选择一个会话');
       return;
     }
-    const exists = workspace.allowed.some((d) => d.path === path);
-    if (exists) {
+    if (!ABSOLUTE_PATH_RE.test(raw)) {
+      setError('请输入绝对路径（如 D:/projects/foo 或 /home/user/foo）');
+      return;
+    }
+    const normalized = raw.replace(/\\/g, '/').replace(/\/+$/, '');
+    if (workspace.allowed.some((d) => d.path === normalized)) {
       setError('该路径已在工作区中');
       return;
     }
-    const label = path.split(/[\\/]/).filter(Boolean).pop() || path;
+    const label = normalized.split('/').filter(Boolean).pop() || normalized;
     dispatch({
       type: 'ADD_WORKSPACE_DIR',
       sessionId: activeSessionId,
-      dir: { path, label },
+      dir: { path: normalized, label },
     });
     setManualPath('');
     setManualMode(false);
+    setError('');
+  };
+
+  const cancelManual = () => {
+    setManualMode(false);
+    setManualPath('');
     setError('');
   };
 
@@ -106,30 +65,12 @@ export default function WorkspacePanel() {
           工作区
         </span>
         <button
-          onClick={pickDirectory}
-          disabled={busy || !hasSession}
+          onClick={() => setManualMode(true)}
+          disabled={!hasSession || manualMode}
           className="rounded p-1 text-[var(--muted)] transition-colors hover:text-[var(--text)] disabled:opacity-40"
-          title="添加目录"
+          title="添加目录（绝对路径）"
         >
-          {busy ? (
-            <svg className="h-3.5 w-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
-              <circle
-                className="opacity-25"
-                cx="12"
-                cy="12"
-                r="10"
-                stroke="currentColor"
-                strokeWidth="3"
-              />
-              <path
-                className="opacity-75"
-                fill="currentColor"
-                d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
-              />
-            </svg>
-          ) : (
-            <Icon d={I.plus} className="h-3.5 w-3.5" />
-          )}
+          <Icon d={I.plus} className="h-3.5 w-3.5" />
         </button>
       </div>
 
@@ -149,13 +90,9 @@ export default function WorkspacePanel() {
               onChange={(e) => setManualPath(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') submitManual();
-                if (e.key === 'Escape') {
-                  setManualMode(false);
-                  setManualPath('');
-                  setError('');
-                }
+                if (e.key === 'Escape') cancelManual();
               }}
-              placeholder="输入目录绝对路径…"
+              placeholder="输入目录绝对路径，如 D:/projects/foo"
               className="h-7 flex-1 rounded border border-[var(--border)] bg-[var(--surface-2)] px-2 font-mono text-[11px] text-[var(--text)] placeholder-[var(--dim)] focus:border-[var(--accent)]/60 focus:outline-none"
             />
             <button
@@ -166,9 +103,7 @@ export default function WorkspacePanel() {
             </button>
           </div>
           <div className="mt-1 text-[10px] text-[var(--dim)]">
-            {SUPPORTS_PICKER
-              ? '提示：按 Esc 取消'
-              : '当前浏览器不支持文件选择器，请手动输入路径'}
+            浏览器不暴露文件选择器的真实路径，请手动输入绝对路径（Esc 取消）
           </div>
         </div>
       )}
@@ -187,7 +122,7 @@ export default function WorkspacePanel() {
             <div
               key={dir.path}
               className="group flex items-center gap-2 rounded-md px-2.5 py-1.5 transition-colors hover:bg-[var(--surface)]"
-              title={dir.handle ? `${dir.label}（由文件选择器授权）` : dir.path}
+              title={dir.path}
             >
               <Icon
                 d={I.folder}
@@ -196,14 +131,6 @@ export default function WorkspacePanel() {
               <span className="flex-1 truncate text-xs text-[var(--muted)]">
                 {dir.label}
               </span>
-              {dir.handle && (
-                <span
-                  className="flex-shrink-0 rounded border border-[var(--border)] px-1 text-[9px] text-[var(--dim)]"
-                  title="通过文件选择器授权"
-                >
-                  句柄
-                </span>
-              )}
               <button
                 onClick={() => removeDir(dir.path)}
                 className="flex-shrink-0 text-[var(--dim)] opacity-0 transition-all hover:text-[var(--danger)] group-hover:opacity-100"
@@ -215,27 +142,16 @@ export default function WorkspacePanel() {
 
           {workspace.allowed.length === 0 && !manualMode && (
             <button
-              onClick={pickDirectory}
+              onClick={() => setManualMode(true)}
               className="w-full rounded-md border border-dashed border-[var(--border)] px-2.5 py-3 text-left text-[11px] text-[var(--dim)] transition-colors hover:border-[var(--accent)]/40 hover:text-[var(--muted)]"
             >
-              点击选择文件夹作为工作区
+              点击输入目录绝对路径作为工作区
             </button>
           )}
 
           {workspace.allowed.length === 0 && !manualMode && (
             <div className="px-2.5 pt-2 text-[11px] leading-relaxed text-[var(--dim)]">
               Agent 只能在工作区内直接操作文件；工作区外每次操作都需确认。
-            </div>
-          )}
-
-          {SUPPORTS_PICKER && !manualMode && workspace.allowed.length > 0 && (
-            <div className="px-2.5 pt-2">
-              <button
-                onClick={() => setManualMode(true)}
-                className="text-[10px] text-[var(--dim)] transition-colors hover:text-[var(--muted)]"
-              >
-                手动输入路径
-              </button>
             </div>
           )}
         </div>

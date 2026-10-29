@@ -8,13 +8,26 @@
 - 保留旧 import 路径（tools.file_tools.list_files 仍然可用）
 """
 
+from . import (  # noqa: F401  触发 @tool 装饰器注册
+    file,
+    file_search,
+    sandbox,
+    data,
+    time,
+    network,
+    mysql,
+    knowledge,
+    run_tests,
+)
+
 __all__ = [
     "file",
-    "file_search"
+    "file_search",
     "sandbox",
     "data",
     "time",
     "network",
     "mysql",
     "knowledge",
+    "run_tests",
 ]
