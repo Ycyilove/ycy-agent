@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .task_types import TaskType
 
+
 def params_key(params: Any) -> str:
     """把参数字典变成稳定的 key。"""
     if not params:
@@ -22,8 +23,8 @@ def params_key(params: Any) -> str:
 class OrchestratorState:
     """多步编排的会话状态，跨步骤传递。"""
     goal: str = ""
-    session_id: Optional[str] = None   # ← Mem0 结构化记忆的隔离键
-    task_id: Optional[str] = None          # ← 新增：审批 store 用
+    session_id: Optional[str] = None
+    task_id: Optional[str] = None
     history: List[str] = field(default_factory=list)
 
     successful_calls: Dict[Tuple[str, str], int] = field(default_factory=dict)
@@ -31,33 +32,45 @@ class OrchestratorState:
     succeeded_tool_names: Dict[str, int] = field(default_factory=dict)
 
     last_successful_call_key: Optional[Tuple[str, str]] = None
-    
+
     total_attempts: int = 0
 
     # 最近一次成功读取的文件内容，供 _fill_params 使用
     last_read_content: Optional[str] = None
     last_read_path: Optional[str] = None
 
-    # 按时间顺序记录成功调用的工具名，供完成度校验使用
+    # 上一步的 thinking 摘要（短上下文下保留"计划"）
+    last_thinking: Optional[str] = None
+
+    # ── 通用证据（供 audit 用，不按 task_type） ──
+    read_paths: set = field(default_factory=set)
+    written_paths: set = field(default_factory=set)
+    verification_evidence: Optional[dict] = None
+
+    # 最近 discovery 注册的工具名（供 _decide 补进候选，最多 10 个）
+    recent_discovered_tools: set = field(default_factory=set)
+
+    # 连续失败计数（key = (tool_name, params_key) → count）
+    # 运行时状态，不进 snapshot
+    _consecutive_failures: dict = field(default_factory=dict)
+
+    # 连续收到 verification hint 但未响应的次数
+    _verification_hint_count: int = 0
+
+    # 按时间顺序记录成功调用的工具名
     successful_tool_sequence: List[str] = field(default_factory=list)
 
     failed_capabilities: set = field(default_factory=set)
     discovery_count: int = 0
 
-    # ── kb_overview 等多文档任务：累计已覆盖的文档 ──
     covered_documents: set = field(default_factory=set)
-    # ── 已搜索过的 query（防 conditional 拦截后重复） ──
     searched_queries: set = field(default_factory=set)
-    # ── 当前会话的工作区根（供 _fill_params 注入 prompt） ──
     workspace_roots: Optional[List[str]] = None
 
-    # ── 任务类型（完成判据族），供 assess 分流 ──
     task_type: TaskType = TaskType.INFO_QUERY
 
-    # ── 终止原因（编排循环退出时写入，供 answer 层如实告知） ──
     stop_reason: Optional[str] = None
     stop_detail: str = ""
-    
 
     def add_history(self, entry: str) -> None:
         self.history.append(entry)
@@ -109,7 +122,7 @@ class OrchestratorState:
         return {
             "goal": self.goal,
             "session_id": self.session_id,
-            "task_id": self.task_id,       # ← 新增
+            "task_id": self.task_id,
             "history": list(self.history),
             "successful_calls": dict(self.successful_calls),
             "failed_calls": dict(self.failed_calls),
@@ -118,6 +131,11 @@ class OrchestratorState:
             "total_attempts": self.total_attempts,
             "last_read_content": self.last_read_content,
             "last_read_path": self.last_read_path,
+            "last_thinking": self.last_thinking,
+            "read_paths": list(self.read_paths),
+            "written_paths": list(self.written_paths),
+            "verification_evidence": self.verification_evidence,
+            "recent_discovered_tools": list(self.recent_discovered_tools),
             "successful_tool_sequence": list(self.successful_tool_sequence),
             "covered_documents": list(self.covered_documents),
             "searched_queries": list(self.searched_queries),
@@ -134,7 +152,7 @@ class OrchestratorState:
         st = cls(
             goal=snap.get("goal", ""),
             session_id=snap.get("session_id"),
-            task_id=snap.get("task_id"),   # ← 新增
+            task_id=snap.get("task_id"),
         )
         st.history = list(snap.get("history", []))
         st.successful_calls = {
@@ -147,6 +165,11 @@ class OrchestratorState:
         st.total_attempts = snap.get("total_attempts", 0)
         st.last_read_content = snap.get("last_read_content")
         st.last_read_path = snap.get("last_read_path")
+        st.last_thinking = snap.get("last_thinking")
+        st.read_paths = set(snap.get("read_paths", []))
+        st.written_paths = set(snap.get("written_paths", []))
+        st.verification_evidence = snap.get("verification_evidence")
+        st.recent_discovered_tools = set(snap.get("recent_discovered_tools", []))
         st.successful_tool_sequence = list(
             snap.get("successful_tool_sequence", [])
         )

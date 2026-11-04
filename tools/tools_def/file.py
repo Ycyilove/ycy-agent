@@ -595,67 +595,143 @@ def write_file(file_path: str, content: str, encoding: str = "utf-8") -> Dict[st
 
 @tool(
     name="edit_file",
-    description="在文件里做局部替换。用于修改现有文件内容（非全量覆盖）。",
+    description=(
+        "在文件里做局部替换。两种模式（互斥）："
+        "1) old_text/new_text 逐字替换，old_text 必须在文件里唯一出现；"
+        "2) start_line/end_line 按行范围替换，适合大文件。"
+    ),
     parameters={
-        "file_path": {"type": "str", "description": "文件路径（必填）"},
-        "old_text": {"type": "str", "description": "要替换的旧文本（必填）"},
-        "new_text": {"type": "str", "description": "替换后的新文本（必填）"},
+        "file_path": {"type": "string", "description": "文件路径"},
+        "old_text": {
+            "type": "string",
+            "description": "要替换的旧文本（与 start_line 二选一）",
+        },
+        "new_text": {
+            "type": "string",
+            "description": "替换后的新文本（与 start_line 二选一）",
+        },
+        "start_line": {
+            "type": "integer",
+            "description": "按行替换的起始行（1-based，可选；提供则走 line_range 模式）",
+        },
+        "end_line": {
+            "type": "integer",
+            "description": "按行替换的结束行（1-based，包含；默认 = start_line）",
+        },
     },
-    required=["file_path", "old_text", "new_text"],
+    required=["file_path"],
     examples=[
         "edit_file(file_path='notes.txt', old_text='test', new_text='production')",
+        "edit_file(file_path='big.py', start_line=100, end_line=105, new_text='...')",
     ],
     category="file",
     danger_level="medium",
 )
-def edit_file(file_path: str, old_text: str, new_text: str) -> Dict[str, Any]:
-    """局部替换文件内容。"""
+def edit_file(
+    file_path: str,
+    old_text: str = "",
+    new_text: str = "",
+    start_line: int | None = None,
+    end_line: int | None = None,
+    encoding: str = "utf-8",
+) -> dict:
+    """局部替换文件内容。
+
+    两种模式（互斥）：
+        1. old_text/new_text：逐字替换，old_text 必须在文件里唯一出现
+        2. start_line/end_line：按行范围替换，适合大文件
+    """
+    if not os.path.isfile(file_path):
+        return {"success": False, "error": f"文件不存在：{file_path}"}
+
     try:
-        if not is_safe_path(os.path.abspath(file_path)):
-            return {"success": False, "error": "操作被拒绝：路径受保护"}
-        with open(file_path, "r", encoding="utf-8") as f:
-            content = f.read()
-        if old_text not in content:
-            preview = old_text[:80] + ("..." if len(old_text) > 80 else "")
+        with open(file_path, "r", encoding=encoding) as f:
+            lines = f.readlines()
+    except Exception as e:
+        return {"success": False, "error": f"读取失败：{e}"}
+
+    # ── 模式 2：按行范围替换 ──
+    if start_line is not None:
+        if start_line < 1 or start_line > len(lines):
             return {
                 "success": False,
-                "error": (
-                    f"文件中未找到要替换的内容。"
-                    f"你传入的 old_text（前 80 字符）：{preview!r}\n"
-                    f"提示：old_text 必须逐字匹配文件内容（含空格、缩进、换行）。"
-                ),
-                "file_path": os.path.abspath(file_path),
-                "old_text_preview": preview,
+                "error": f"start_line {start_line} 越界（文件共 {len(lines)} 行）",
             }
-        new_content = content.replace(old_text, new_text, 1)
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(new_content)
-        abs_path = os.path.abspath(file_path)
-        delta_lines = (
-            new_content.count("\n") - content.count("\n")
+        end = end_line if end_line is not None else start_line
+        if end < start_line or end > len(lines):
+            return {
+                "success": False,
+                "error": f"end_line {end} 越界（start={start_line}, 文件共 {len(lines)} 行）",
+            }
+        # 替换 [start_line-1, end) 行
+        new_lines = (
+            lines[: start_line - 1]
+            + [new_text if new_text.endswith("\n") else new_text + "\n"]
+            + lines[end:]
         )
+        try:
+            with open(file_path, "w", encoding=encoding) as f:
+                f.writelines(new_lines)
+        except Exception as e:
+            return {"success": False, "error": f"写入失败：{e}"}
         return {
             "success": True,
             "message": (
-                f"已替换 {abs_path}"
-                f"（old_text {len(old_text)} 字符 → new_text {len(new_text)} 字符"
-                + (
-                    f"，行数 {delta_lines:+d}"
-                    if delta_lines != 0
-                    else ""
-                )
-                + "）"
+                f"已按行替换 {file_path}（第 {start_line}-{end} 行 → "
+                f"{len(new_text)} 字符，总行数 {len(lines)} → {len(new_lines)}）"
             ),
-            "file_path": abs_path,
-            "old_text_preview": old_text[:80],
-            "new_text_preview": new_text[:80],
-            "old_size": len(content),
-            "new_size": len(new_content),
-            "delta_lines": delta_lines,
+            "file_path": file_path,
+            "mode": "line_range",
+            "start_line": start_line,
+            "end_line": end,
+            "old_line_count": len(lines),
+            "new_line_count": len(new_lines),
         }
-    except Exception as e:
-        return {"success": False, "error": str(e)}
 
+    # ── 模式 1：old_text/new_text 逐字替换 ──
+    if not old_text:
+        return {
+            "success": False,
+            "error": "必须提供 old_text/new_text 或 start_line/end_line",
+        }
+    content = "".join(lines)
+    if old_text not in content:
+        return {
+            "success": False,
+            "error": (
+                f"文件中未找到要替换的内容。old_text 前 80 字符："
+                f"{old_text[:80]!r}\n"
+                f"提示：old_text 必须逐字匹配；大文件建议用 start_line/end_line 模式。"
+            ),
+        }
+    count = content.count(old_text)
+    if count > 1:
+        return {
+            "success": False,
+            "error": (
+                f"old_text 在文件中出现 {count} 次，不唯一。"
+                f"请扩大 old_text 范围使其唯一，或用 start_line/end_line 模式。"
+            ),
+        }
+    new_content = content.replace(old_text, new_text, 1)
+    try:
+        with open(file_path, "w", encoding=encoding) as f:
+            f.write(new_content)
+    except Exception as e:
+        return {"success": False, "error": f"写入失败：{e}"}
+    return {
+        "success": True,
+        "message": (
+            f"已替换 {file_path}（old_text {len(old_text)} 字符 → "
+            f"new_text {len(new_text)} 字符）"
+        ),
+        "file_path": file_path,
+        "mode": "old_text",
+        "old_text_preview": old_text[:80],
+        "new_text_preview": new_text[:80],
+        "old_size": len(content),
+        "new_size": len(new_content),
+    }
 
 @tool(
     name="create_directory",

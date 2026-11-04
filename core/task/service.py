@@ -1425,6 +1425,17 @@ class AgentTaskService:
                     "think",
                 ),
             )
+            # 持久化 stop_reason，供 _stream_answer 拼【终止原因】
+            try:
+                memory = self._session_provider()
+                if hasattr(memory, "update_task"):
+                    memory.update_task(
+                        task_id,
+                        stop_reason="max_steps",
+                        stop_detail=f"已达最大步数 {event['steps']}",
+                    )
+            except Exception:
+                logger.exception("持久化 max_steps 失败: %s", task_id)
 
         elif event_type == "error":
             yield sse_event(

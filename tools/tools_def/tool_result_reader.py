@@ -32,13 +32,21 @@ READ_TOOL_RESULT_PARAMETERS: Dict[str, Any] = {
         "type": "string",
         "description": "只读某个文档的 chunk（可选，search_knowledge 场景用）",
     },
-    "start_index": {
+    "chunk_index": {
         "type": "integer",
-        "description": "chunk 起始索引，默认 0",
+        "description": "chunk 场景：从第几个 chunk 开始（从 0 开始），默认 0",
     },
-    "limit": {
+    "chunk_count": {
         "type": "integer",
-        "description": "最多返回多少个 chunk，默认 5",
+        "description": "chunk 场景：最多返回几个 chunk，默认 3",
+    },
+    "char_offset": {
+        "type": "integer",
+        "description": "通用场景：字符偏移，默认 0",
+    },
+    "char_limit": {
+        "type": "integer",
+        "description": "通用场景：最多返回多少字符，默认 4000",
     },
 }
 
@@ -47,9 +55,19 @@ def read_tool_result(
     result_id: str,
     task_id: str,
     filename: Optional[str] = None,
-    start_index: int = 0,
-    limit: int = 5,
+    chunk_index: int = 0,
+    chunk_count: int = 3,
+    char_offset: int = 0,
+    char_limit: int = 4000,
+    **legacy,
 ) -> Dict[str, Any]:
+    # 兼容旧参数 start_index / limit
+    if "start_index" in legacy:
+        chunk_index = int(legacy["start_index"])
+        char_offset = int(legacy["start_index"])
+    if "limit" in legacy:
+        chunk_count = int(legacy["limit"])
+        char_limit = int(legacy["limit"]) * 2000
     """读取之前工具返回的大结果的完整内容。"""
     payload = load_tool_result(task_id, result_id)
     if payload is None:
@@ -69,12 +87,12 @@ def read_tool_result(
                 c for c in chunks
                 if isinstance(c, dict) and c.get("filename") == filename
             ]
-        sliced = chunks[start_index: start_index + max(1, limit)]
+        sliced = chunks[chunk_index: chunk_index + max(1, chunk_count)]
         return {
             "success": True,
             "result_id": result_id,
             "filename": filename,
-            "start_index": start_index,
+            "chunk_index": chunk_index,
             "returned": len(sliced),
             "total": len(chunks),
             "chunks": sliced,
@@ -85,12 +103,12 @@ def read_tool_result(
         text = json.dumps(payload, ensure_ascii=False, default=str)
     except Exception:
         text = str(payload)
-    start = max(0, start_index)
-    end = start + max(1, limit) * 2000
+    start = max(0, char_offset)
+    end = start + max(1, char_limit)
     return {
         "success": True,
         "result_id": result_id,
-        "start_index": start,
+        "char_offset": start,
         "returned_chars": len(text[start:end]),
         "total_chars": len(text),
         "content": text[start:end],
@@ -104,11 +122,15 @@ get_registry().register_callable(
     description=(
         "读取之前工具返回的大结果的完整内容。"
         "当工具返回里有 `result_id` 或 `handle` 字段时，说明结果被卸载到磁盘，"
-        "可用本工具按需读取。支持按 chunk 索引或 offset/limit 分页。\n\n"
+        "可用本工具按需读取。\n\n"
         "**使用场景**：\n"
         "- `search_knowledge` 返回的摘要只包含每个文档的部分 chunk，"
-        "  想看某个文档的更多 chunk 时，用 result_id + filename + start_index 读取。\n"
-        "- 想看完整 JSON 时，用 offset/limit 分页。\n"
+        "  想看某个文档的更多 chunk 时，用 "
+        "`result_id` + `filename` + `chunk_index` + `chunk_count` 读取。\n"
+        "- 想看完整 JSON 时，用 `char_offset` + `char_limit` 分页。\n"
+        "- **chunk 场景和字符场景不要混用参数**：\n"
+        "  * chunk 场景用 `chunk_index` / `chunk_count`\n"
+        "  * 字符场景用 `char_offset` / `char_limit`\n"
     ),
     parameters=READ_TOOL_RESULT_PARAMETERS,
     required=["result_id", "task_id"],

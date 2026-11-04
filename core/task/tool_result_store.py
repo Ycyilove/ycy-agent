@@ -180,7 +180,12 @@ def build_handle_summary(
     if result_id:
         p = find_result_path(task_id, result_id)
         if p:
-            handle_path = os.path.relpath(p, _PROJECT_ROOT).replace("\\", "/")
+            try:
+                handle_path = os.path.relpath(p, _PROJECT_ROOT).replace("\\", "/")
+            except ValueError:
+                # 跨盘符（Windows C: vs D:）无法计算相对路径，
+                # 退回绝对路径，保证 handle_path 非空
+                handle_path = p.replace("\\", "/")
 
     # 针对 search_knowledge 生成按文档采样的摘要
     summary = None

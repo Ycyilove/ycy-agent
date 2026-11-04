@@ -22,17 +22,15 @@ from tools.semantics import get_intent_tags
 
 from .prompt import ORCHESTRATOR_PROMPT
 from .state import OrchestratorState, params_key
-from .validator import (
-    requires_tool_call,
-    classify_request,
-    is_web_query,
-    check_web_query_completion,
-)
+from .validator import requires_tool_call
 from .intent_router import route_intent
 from .task_classifier import classify_task
 from .task_types import (
-    TaskType, StopReason, AssessResult, can_upgrade, TERMINAL_REASONS,
+    TaskType, StopReason, AssessResult, GapKind, can_upgrade,
+    TERMINAL_REASONS,
 )
+from .audit import run_audit, collect_evidence
+from core.llm.provider import ContextLengthExceeded
 
 
 logger = logging.getLogger(__name__)
@@ -44,6 +42,15 @@ logger = logging.getLogger(__name__)
 
 import os as _os
 
+# 读类工具名特征（不按任务类型，按工具能力）
+_READ_TOOL_HINTS = (
+    "read", "list", "search", "get_file_info", "stat", "fetch", "crawl",
+)
+
+
+def _is_read_like(name: str) -> bool:
+    low = (name or "").lower()
+    return any(h in low for h in _READ_TOOL_HINTS)
 
 def _norm_filename(name: str) -> str:
     """归一化文件名：去路径前缀、去首尾空白、统一分隔符。
@@ -57,26 +64,6 @@ def _norm_filename(name: str) -> str:
     s = name.replace("\\", "/").strip()
     return _os.path.basename(s)
 
-
-def _extract_target_files(goal: str, state: Any) -> set:
-    """从 goal 或 state 里提取目标文档全集（已归一化）。
-
-    优先级：
-        1. state._target_files_cache（knowledge_stats / list_knowledge_sources 成功时缓存）
-        2. goal 里没有多文档提示词 → 返回空（非盘点任务）
-    """
-    multi_hints = (
-        "这些文档", "所有文档", "各个文档", "每个文档",
-        "几个文档", "多少文档", "分别",
-        "盘点", "速览", "概览",
-    )
-    if not any(h in goal for h in multi_hints):
-        return set()
-
-    target = getattr(state, "_target_files_cache", None) if state else None
-    if target:
-        return {_norm_filename(f) for f in target if f}
-    return set()
 
 
 @dataclass
@@ -184,15 +171,42 @@ class _SucceededSeqView:
 class AgentOrchestrator:
     _MCP_DISCOVERY_TOOLS = frozenset({"search_and_connect_mcp"})
 
+    # 静态配置的 MCP server（与 mcp_servers.json 对齐）。
+    # 意图索引无命中时，只保留这些，不把动态发现的 MCP 全量塞给 LLM。
+    _STATIC_MCP_SERVERS = frozenset({"tavily", "fetch"})
+
+    # 单步工具结果进 state.history 的字符上限。
+    # 设计原则：
+    #   - 读/检索类：保留足够内容供后续步推理，但不必全量
+    #     （全文在 last_read_content 或 tool_result_store 落盘）
+    #   - 写/改类：状态和路径就够，结果不需要长 history
+    #   - 未列出的工具用 _DEFAULT_HISTORY_LIMIT
     _HISTORY_LIMITS = {
-        "search_knowledge": 6000,
-        "read_pdf_text": 4000,
-        "read_docx_text": 4000,
-        "read_csv": 2000,
-        "search_content": 2000,
-        "fetch_url": 4000,
-        "http_get": 4000,
+        # 检索类（结果本身是摘要）
+        "search_knowledge": 3000,
+        "knowledge_stats": 1500,
+        "list_knowledge_sources": 1500,
+        # 读文件类（核心内容要进 history）
+        "read_text_file": 1500,        # ← 本次修复的关键
+        "read_file_range": 1500,
+        "read_pdf_text": 2000,
+        "read_docx_text": 2000,
+        "read_csv": 1200,
+        "search_content": 1200,
+        "search_files": 1200,
+        # 抓取类
+        "fetch_url": 2000,
+        "http_get": 2000,
+        # 写/改类（状态为主）
+        "write_file": 300,
+        "edit_file": 300,
+        "create_directory": 200,
+        "move_file": 200,
+        "delete_file": 200,
+        # 验证类
+        "run_tests": 2000,
     }
+    _DEFAULT_HISTORY_LIMIT = 1000
 
     def __init__(
         self,
@@ -207,6 +221,28 @@ class AgentOrchestrator:
         self._max_steps = max_steps
         self._enable_intent_router = enable_intent_router
         self._shortlister_provider = shortlister_provider
+
+        # ── 上下文预算（短上下文模型友好） ──
+        try:
+            from backend.config import (
+                LLM_PROMPT_BUDGET_CHARS,
+                LLM_HISTORY_BUDGET_RATIO,
+                LLM_HISTORY_ENTRY_CHARS,
+                LLM_COMPACT_TRIGGER_RATIO,
+                LLM_COMPACT_KEEP_RECENT,
+            )
+            self._prompt_budget_chars = LLM_PROMPT_BUDGET_CHARS
+            self._history_budget_ratio = LLM_HISTORY_BUDGET_RATIO
+            self._history_entry_chars = LLM_HISTORY_ENTRY_CHARS
+            self._compact_trigger_ratio = LLM_COMPACT_TRIGGER_RATIO
+            self._compact_keep_recent = LLM_COMPACT_KEEP_RECENT
+        except Exception:
+            # config 不可用时用保守默认，不阻塞
+            self._prompt_budget_chars = 24000
+            self._history_budget_ratio = 0.4
+            self._history_entry_chars = 1000
+            self._compact_trigger_ratio = 0.8
+            self._compact_keep_recent = 5
 
 
     def _format_tool_directory(self, tools: Dict[str, Any]) -> str:
@@ -236,7 +272,8 @@ class AgentOrchestrator:
             if tags:
                 tag_str = f"  [tags: {','.join(str(t) for t in tags[:4])}]"
 
-            # 内置工具打 ⭐，让 LLM 倾向选内置
+            # 内置工具打 ⭐，仅表示"来源=内置"；是否优先由任务场景决定，
+            # 见 prompt.py 的"优先级（按任务场景，不按工具来源）"
             marker = "" if name.startswith("mcp__") else "⭐ "
 
             # MCP 工具：附上 server 名，让 LLM 知道来源
@@ -517,6 +554,47 @@ class AgentOrchestrator:
 
     # ── LLM 决策 ──
 
+    _SCENE_BLOCKLIST = {
+        "code": {"mysql_query", "mysql_execute", "edit_excel", "write_excel",
+                 "read_csv", "read_excel", "convert_file_format"},
+        "data": {"mysql_query", "mysql_execute", "search_content",
+                 "search_files", "edit_file", "write_file"},
+        "web": {"mysql_query", "mysql_execute", "edit_excel", "write_excel",
+                "read_csv", "read_excel", "edit_file", "write_file",
+                "search_content", "search_files"},
+    }
+
+    @classmethod
+    def _filter_builtin_by_scene(
+        cls, goal: str, tools: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """按 goal 场景过滤内置工具，排除明显无关的（mysql/excel 等）。
+
+        保守策略：无法判断场景时不过滤（返回原 tools），避免误删。
+        """
+        if not goal:
+            return tools
+        g = goal.lower()
+
+        # 场景判断
+        scene = None
+        if any(k in g for k in ("修复", "代码", "bug", "test", "tests",
+                                 ".py", ".js", ".ts", "重构", "函数")):
+            scene = "code"
+        elif any(k in g for k in ("excel", "csv", "表格", "数据", "统计")):
+            scene = "data"
+        elif any(k in g for k in ("网页", "新闻", "最新", "url", "web")):
+            scene = "web"
+        elif any(k in g for k in ("数据库", "sql", "mysql", "查询表")):
+            scene = "db"
+
+        if scene is None:
+            return tools  # 不确定场景，不过滤
+
+        blocklist = cls._SCENE_BLOCKLIST.get(scene, set())
+        filtered = {n: m for n, m in tools.items() if n not in blocklist}
+        return filtered or tools
+        
     def _select_shortlist(
         self, goal: str, tools: Dict[str, Any]
     ) -> Dict[str, Any]:
@@ -536,8 +614,9 @@ class AgentOrchestrator:
             n: m for n, m in tools.items() if n.startswith("mcp__")
         }
 
-        # ── 1. 内置工具：embedding shortlist ──
+        # ── 1. 内置工具：先按任务场景过滤，再 embedding shortlist ──
         if builtin_tools:
+            builtin_tools = self._filter_builtin_by_scene(goal, builtin_tools)
             if self._shortlister_provider is not None:
                 try:
                     sl = self._shortlister_provider()
@@ -570,59 +649,124 @@ class AgentOrchestrator:
                         len(keep_mcp), len(mcp_tools),
                     )
                 else:
-                    # 意图索引无命中 → 全量 MCP 交给 LLM（不要筛掉）
-                    logger.info(
-                        "[dsh][orchestrator] intent index no hit, "
-                        "pass all %d MCP tools",
-                        len(mcp_tools),
-                    )
-                    picked.update(mcp_tools)
+                    # 意图索引无命中：
+                    # 1. 网页/实时信息任务 → 保留静态 MCP（tavily/fetch）
+                    # 2. 本地任务 → 不保留任何 MCP，只留 discovery 入口
+                    # 3. 最近 discovery 注册的由 _decide 补回
+                    goal_low = (goal or "").lower()
+                    is_web_task = any(k in goal_low for k in (
+                        "网页", "网站", "新闻", "最新", "实时",
+                        "url", "web", "news", "latest",
+                    ))
+                    if is_web_task:
+                        static_mcp = {
+                            n: m for n, m in mcp_tools.items()
+                            if len(n.split("__", 2)) == 3
+                            and n.split("__", 2)[1] in self._STATIC_MCP_SERVERS
+                        }
+                        if static_mcp:
+                            picked.update(static_mcp)
+                        logger.info(
+                            "[dsh][orchestrator] web task, pass %d static MCP",
+                            len(static_mcp),
+                        )
+                    else:
+                        logger.info(
+                            "[dsh][orchestrator] non-web task, "
+                            "skip static MCP (keep discovery entry only)"
+                        )
             except Exception:
                 logger.exception(
-                    "[dsh][orchestrator] intent index failed, pass all MCP"
+                    "[dsh][orchestrator] intent index failed, "
+                    "fallback by task scene"
                 )
-                picked.update(mcp_tools)
+                goal_low = (goal or "").lower()
+                is_web_task = any(k in goal_low for k in (
+                    "网页", "网站", "新闻", "最新", "实时",
+                    "url", "web", "news", "latest",
+                ))
+                if is_web_task:
+                    static_mcp = {
+                        n: m for n, m in mcp_tools.items()
+                        if len(n.split("__", 2)) == 3
+                        and n.split("__", 2)[1] in self._STATIC_MCP_SERVERS
+                    }
+                    if static_mcp:
+                        picked.update(static_mcp)
 
         if not picked:
             picked = dict(tools)
 
-        # ── 3. 强制保留关键工具 ──
-        force_keep = self._MCP_DISCOVERY_TOOLS | {
-            # ── 文件操作（必须始终在候选里） ──
-            "read_text_file",
-            "write_file",
-            "edit_file",
-            "create_directory",
-            "move_file",
-            "delete_file",
-            "restore_file",
-            "list_files",
-            "get_file_info",
-            "search_content",
-            "search_files",
-            "read_file_range",
-            # ── 检索 / 抓取 ──
-            "fetch_url",
-            "search_knowledge",
-            "knowledge_stats",
-            "list_knowledge_sources",
-            # ── tavily ──
-            "mcp__tavily__tavily_search",
-            "mcp__tavily__tavily_extract",
-            "mcp__tavily__tavily_crawl",
-            "mcp__tavily__tavily_research",
-        }
-        added = []
-        for name in force_keep:
+        # ── 3. discovery 入口必须始终可用（功能性必需，不是召回兜底） ──
+        for name in self._MCP_DISCOVERY_TOOLS:
             if name in tools and name not in picked:
                 picked[name] = tools[name]
-                added.append(name)
-        if added:
-            logger.info(
-                "[dsh][orchestrator] force-kept tools: %s", added
-            )
+                logger.info(
+                    "[dsh][orchestrator] force-kept discovery entry: %s", name
+                )
 
         return picked
+
+    def _assemble_decide_prompt(
+        self,
+        shortlist: Dict[str, Any],
+        history_text: str,
+        goal: str,
+        conversation_block: str = "",
+    ) -> str:
+        """按预算组装 decide prompt。
+
+        优先级：goal > tool_directory > conversation > history
+        history 从尾部倒序保留（近期步比早期步重要）。
+        """
+        budget = getattr(self, "_prompt_budget_chars", 24000)
+
+        # 骨架（不含可变块）
+        skeleton = (
+            ORCHESTRATOR_PROMPT
+            .replace("{goal}", goal)
+            .replace("{max_steps}", str(self._max_steps))
+        )
+        # 减去占位符本身的长度（替换后会被实际内容替代）
+        skeleton_len = len(skeleton) - len("{tool_directory}") - len("{history}")
+        remaining = max(2000, budget - skeleton_len)
+
+        # tool_directory：优先保留，工具太多时截断
+        tool_dir = self._format_tool_directory(shortlist)
+        tool_dir_budget = max(1000, int(remaining * 0.35))
+        if len(tool_dir) > tool_dir_budget:
+            lines = tool_dir.split("\n")
+            keep_lines = max(10, tool_dir_budget // 80)
+            tool_dir = "\n".join(lines[:keep_lines]) + "\n...(工具列表已截断)"
+        remaining -= len(tool_dir)
+
+        # conversation_block：最近一轮用户意图，优先保留
+        if conversation_block:
+            conv_budget = max(500, int(remaining * 0.25))
+            if len(conversation_block) > conv_budget:
+                conversation_block = (
+                    conversation_block[:conv_budget] + "\n...(截断)"
+                )
+            remaining -= len(conversation_block)
+
+        # history：剩余预算全给，从尾部倒序保留
+        if not history_text:
+            history_text = "(尚无步骤)"
+        elif remaining <= 0:
+            # 预算耗尽：只留最后 500 字符
+            history_text = (
+                "...(早期历史已省略)\n" + history_text[-500:]
+            )
+        elif len(history_text) > remaining:
+            history_text = (
+                "...(早期历史已省略)\n" + history_text[-remaining:]
+            )
+
+        return conversation_block + (
+            skeleton
+            .replace("{tool_directory}", tool_dir)
+            .replace("{history}", history_text)
+        )
 
     async def _decide(
         self,
@@ -633,6 +777,22 @@ class AgentOrchestrator:
     ) -> Optional[OrchestratorStep]:
         # 预筛：优先 embedding，退关键词
         shortlist = self._select_shortlist(goal, tools)
+
+        # 补：最近 discovery 注册的工具（LLM 刚发现它们，应可见）。
+        # _select_shortlist 在意图索引无命中时只留静态 MCP，
+        # 会筛掉刚发现的动态工具；这里补回，保证"发现→用"闭环。
+        recent = getattr(state, "recent_discovered_tools", set()) or set()
+        if recent:
+            added = []
+            for name in recent:
+                if name in tools and name not in shortlist:
+                    shortlist[name] = tools[name]
+                    added.append(name)
+            if added:
+                logger.info(
+                    "[dsh][orchestrator] re-added recently-discovered tools: %r",
+                    added,
+                )
 
         # 对话历史（结构化）——只保留用户意图，不保留 assistant 结论
         conversation_block = ""
@@ -650,6 +810,14 @@ class AgentOrchestrator:
 
         # 如果之前读过文件，把它放进 prompt 的 history 部分
         history_text = self._format_history(state.history, goal, state)
+
+        # 上一步思考摘要（短上下文下，计划比早期工具结果更有用）
+        if getattr(state, "last_thinking", None):
+            history_text += (
+                f"\n\n## 上一步思考摘要\n"
+                f"{state.last_thinking[:1000]}\n"
+            )
+
         if state.last_read_content:
             path = state.last_read_path or "(未知)"
             content = state.last_read_content
@@ -661,16 +829,10 @@ class AgentOrchestrator:
                 f"内容：\n```\n{content}\n```\n"
             )
 
-        prompt = (
-            ORCHESTRATOR_PROMPT
-            .replace("{tool_directory}", self._format_tool_directory(shortlist))
-            .replace("{history}", history_text)
-            .replace("{goal}", goal)
-            .replace("{max_steps}", str(self._max_steps))
+        prompt = self._assemble_decide_prompt(
+            shortlist, history_text, goal, conversation_block
         )
-        # 把对话历史插入 prompt 头部（ORCHESTRATOR_PROMPT 里没有占位符）
-        if conversation_block:
-            prompt = conversation_block + prompt
+        
         import time as _time
         _t0 = _time.time()
 
@@ -703,6 +865,54 @@ class AgentOrchestrator:
                     "tools_in_prompt": list(shortlist.keys()),
                     "tools_total": len(tools),
                 },
+            )
+        except ContextLengthExceeded as exc:
+            duration_ms = (_time.time() - _t0) * 1000
+            logger.warning(
+                "[dsh][orchestrator] _decide context exceeded, "
+                "fallback to no-history prompt: %s", exc,
+            )
+            dump_llm_call(
+                kind="decide", prompt=prompt, response=None,
+                duration_ms=duration_ms, error=f"context_exceeded: {exc}",
+            )
+            # 降级：只留 goal + 工具目录，history 置空，重试一次
+            fallback_prompt = (
+                ORCHESTRATOR_PROMPT
+                .replace("{tool_directory}", self._format_tool_directory(shortlist))
+                .replace("{history}", "(已省略，因上下文超限)")
+                .replace("{goal}", goal)
+                .replace("{max_steps}", str(self._max_steps))
+            )
+            try:
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self._llm_provider().generate,
+                        [{"role": "user", "content": fallback_prompt}],
+                        mode="quick",
+                        timeout=110.0,
+                    ),
+                    timeout=120.0,
+                )
+            except Exception:
+                logger.exception("_decide fallback also failed")
+                return None
+
+            data = self._parse_json(response)
+            if data is None:
+                return None
+            raw_name = data.get("tool_name")
+            resolved_name = raw_name
+            if raw_name and raw_name not in tools:
+                resolved = self._resolve_tool_name(raw_name, tools)
+                if resolved:
+                    resolved_name = resolved
+            return OrchestratorStep(
+                step_index=len(state.history) + 1,
+                thought=str(data.get("thought", "")),
+                tool_name=resolved_name,
+                parameters={},
+                done=bool(data.get("done", False)),
             )
         except asyncio.TimeoutError:
             duration_ms = (_time.time() - _t0) * 1000
@@ -763,54 +973,36 @@ class AgentOrchestrator:
         goal: str,
         state: OrchestratorState,
     ) -> Optional[str]:
-        """如果 done=true 不合理，返回拒绝原因（字符串）；合理则返回 None。"""
+        """如果 done=true 不合理，返回拒绝原因；合理则返回 None。
+
+        统一走 audit（要求-证据），不按 task_type / classify_request 分支。
+        """
+
+        # 无工具调用需求的请求（闲聊/教程）直接放行
         if not requires_tool_call(goal):
             return None
 
-        # ── 网页检索优先检查（正交于 action / query） ──
-        if is_web_query(goal):
-            web_reject = check_web_query_completion(state)
-            if web_reject:
-                logger.info(
-                    "[dsh][orchestrator] web query done rejected: %s",
-                    web_reject[:120],
-                )
-                return web_reject
+        audit = run_audit(goal, state, evidence=collect_evidence(state))
+        if audit.satisfied:
+            return None
 
-        kind = classify_request(goal)
-
-        if kind == "action":
-            # 涉及副作用的请求：必须有写类工具成功执行
-            from tools.security.gateway import SecurityGateway
-            write_succeeded = any(
-                SecurityGateway.is_write_operation(name)
-                for name in state.succeeded_tool_names
-            )
-            if not write_succeeded:
-                # 检查是否有写操作尝试过（失败）
-                write_attempted = any(
-                    SecurityGateway.is_write_operation(name)
-                    for name, _ in state.failed_calls.keys()
-                )
-                if write_attempted:
-                    # 尝试过但失败 → 允许 done，但要求如实告知
-                    return None   # 不拦，让 LLM 在回答里说明失败原因
-                succeeded = ", ".join(state.succeeded_tool_names.keys()) or "(无)"
-                return (
-                    f"⛔ 校验失败 —— 请求是「修改类」（action），但没有任何写操作尝试。\n"
-                    f"已成功调用：{succeeded}\n"
-                    f"**必须使用 write_file / edit_file / create_directory / "
-                    f"move_file / rename_file 等写类工具实际尝试修改文件**。"
-                )
-
-        elif kind == "query":
-            if not state.succeeded_tool_names:
-                return (
-                    "⛔ 校验失败 —— 请求涉及文件读取（query），"
-                    "但还没有成功调用任何工具。"
-                )
-
-        return None
+        logger.info(
+            "[dsh][orchestrator] done rejected by audit: kind=%s gap=%r",
+            audit.gap_kind.value, audit.gap[:120],
+        )
+        kind_hint = {
+            GapKind.MISSING_CONTENT: "**下一步：读取/检索缺失内容**",
+            GapKind.MISSING_ACTION: "**下一步：执行写/改操作**",
+            GapKind.MISSING_VERIFICATION: "**下一步：运行验证（测试/检查）**",
+            GapKind.BLOCKED: "**外部阻塞，需 done=true 并如实告知用户**",
+            GapKind.NONE: "",
+        }.get(audit.gap_kind, "")
+        return (
+            f"⛔ 校验失败 —— 目标尚未完成。\n"
+            f"缺失要求：{audit.gap}\n"
+            f"{kind_hint}\n"
+            f"{audit.next_hint}"
+        )
 
     # ── 调用拦截（策略 E） ──
 
@@ -832,6 +1024,16 @@ class AgentOrchestrator:
                     f"找不到合适的外部服务。"
                 )
 
+        # ── 连续失败拦截：同工具 + 同参数连续失败 3 次 → 强制停止 ──
+        _fk = (tool_name, params_key(params))
+        _fail_count = state._consecutive_failures.get(_fk, 0)
+        if _fail_count >= 3:
+            return (
+                f"⛔ {tool_name} 已连续失败 {_fail_count} 次（同参数），强制停止。\n"
+                f"**下一步**：done=true，如实告知用户该工具不可用，"
+                f"不要继续重试。"
+            )
+            
         metadata = tools.get(tool_name)
         idem = classify_tool_idempotency(tool_name, metadata)
 
@@ -954,15 +1156,25 @@ class AgentOrchestrator:
             and state.last_read_content
         ):
             content = state.last_read_content
-            if len(content) > 4000:
-                content = content[:4000] + "\n... (truncated)"
             path = state.last_read_path or "(未知)"
-            file_content_block = (
-                f"## 最近读取的文件内容\n"
-                f"路径：`{path}`\n"
-                f"内容（**`old_text` 必须逐字匹配这里的内容**）：\n"
-                f"```\n{content}\n```\n\n"
-            )
+            if len(content) > 4000:
+                total_lines = content.count("\n") + 1
+                file_content_block = (
+                    f"## 最近读取的文件\n"
+                    f"路径：`{path}`（{total_lines} 行，{len(content)} 字符）\n"
+                    f"**文件较大，未全部放入 prompt。两种修改方式**：\n"
+                    f"1. **按行替换（推荐）**：先用 `read_file_range` 读目标行范围，"
+                    f"确认后调用 `edit_file` 传 `start_line`/`end_line`/`new_text`。\n"
+                    f"2. **逐字替换**：`old_text` 必须逐字匹配且唯一。\n"
+                    f"前 2000 字符预览：\n```\n{content[:2000]}\n```\n\n"
+                )
+            else:
+                file_content_block = (
+                    f"## 最近读取的文件内容\n"
+                    f"路径：`{path}`\n"
+                    f"内容（**`old_text` 必须逐字匹配这里的内容**）：\n"
+                    f"```\n{content}\n```\n"
+                )
 
         # 对话历史（最近 6 条）——关键：让 LLM 知道用户上句说的文件在哪
         # 【安全】discovery 工具不注入任何历史/记忆：
@@ -1165,6 +1377,24 @@ class AgentOrchestrator:
                 tool_name=tool_name,
                 extra={"goal": goal[:200]},
             )
+        except ContextLengthExceeded as exc:
+            duration_ms = (_time.time() - _t0) * 1000
+            logger.warning(
+                "[dsh][orchestrator] _fill_params context exceeded for %s: %s",
+                tool_name, exc,
+            )
+            dump_llm_call(
+                kind="fill_params", prompt=prompt, response=None,
+                duration_ms=duration_ms, tool_name=tool_name,
+                error=f"context_exceeded: {exc}",
+            )
+            # 降级：必填 query 类参数用 goal 填，其余留给工具层报错
+            fallback: Dict[str, Any] = {}
+            if _required:
+                for k in _required:
+                    if k in ("query", "q", "keyword", "search_query"):
+                        fallback[k] = goal
+            return fallback
         except asyncio.TimeoutError:
             duration_ms = (_time.time() - _t0) * 1000
             logger.warning(
@@ -1310,199 +1540,145 @@ class AgentOrchestrator:
                             adapted[k] = m.group(0)
                     # 其他必填参数不猜，留给工具层报错
 
+        # ── 重试：必填仍缺 → 把"缺 X"反馈给 LLM 再问一次 ──
+        _still_missing = [
+            k for k in (_required or [])
+            if k not in adapted or adapted.get(k) in (None, "")
+        ]
+        if _still_missing and not _is_discovery:
+            logger.info(
+                "[dsh][orchestrator] _fill_params: %s still missing %r, retry once",
+                tool_name, _still_missing,
+            )
+            retry_suffix = (
+                f"\n\n## ⚠️ 上一次输出缺少必填参数：{_still_missing}\n"
+                f"**必须补上这些字段**，字段名与参数表完全一致。"
+                f"只输出一个合法 JSON 对象，不要输出其他工具的字段。\n"
+            )
+            try:
+                raw2 = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self._llm_provider().generate,
+                        [{"role": "user", "content": prompt + retry_suffix}],
+                        mode="quick",
+                        timeout=110.0,
+                    ),
+                    timeout=120.0,
+                )
+                data2 = self._parse_json(raw2)
+                if isinstance(data2, dict):
+                    adapted2 = self._adapt_params_for_tool(tool_name, data2, tools)
+                    # 只接受"补上了必填"的结果，否则保留原 adapted
+                    _missing2 = [
+                        k for k in _required
+                        if k not in adapted2 or adapted2.get(k) in (None, "")
+                    ]
+                    if len(_missing2) < len(_still_missing):
+                        adapted = adapted2
+                        logger.info(
+                            "[dsh][orchestrator] _fill_params retry ok for %s: %r",
+                            tool_name, adapted,
+                        )
+            except Exception:
+                logger.exception(
+                    "[dsh][orchestrator] _fill_params retry failed for %s",
+                    tool_name,
+                )
+
         return adapted
 
     # ── 结果达标评估 ──
 
-    # 检索类工具：返回非空且包含 query 实体即视为充分，不走 LLM
-    _RETRIEVAL_TOOLS = frozenset({
-        "search_knowledge",
-        "knowledge_stats",
-        "list_knowledge_sources",
-        "search_content",
-        "search_files",
-        "read_pdf_text",
-        "read_pdf_metadata",
-        "read_docx_text",
-        "read_docx_tables",
-        "read_csv",
-        "read_text_file",
-        "read_file_range",
-        "fetch_url",
-        "http_get",
-        "fetch_json",
-    })
+    # 执行类工具特征：不限定具体测试工具名，按"能执行命令"分类
+    _VERIFY_TOOL_HINTS = (
+        # Python / JS 测试
+        "run_test", "pytest", "test_runner", "jest", "vitest", "mocha",
+        # 通用执行
+        "run_python", "run_shell", "run_command", "run_script",
+        "bash", "shell", "execute", "exec",
+        # 检查类
+        "lint", "typecheck", "check",
+    )
 
-    @staticmethod
-    def _extract_query_terms(goal: str) -> List[str]:
-        """从 goal 里提取 2-4 字的中文实体片段，用于确定性匹配。"""
-        terms: List[str] = []
-        for m in re.finditer(r"[\u4e00-\u9fff]{2,4}", goal or ""):
-            terms.append(m.group(0))
-        seen = set()
-        out = []
-        for t in terms:
-            if t not in seen:
-                seen.add(t)
-                out.append(t)
-        return out[:8]
-
-    def _deterministic_assess(
-        self,
-        goal: str,
-        tool_name: str,
-        preview: str,
-        state: Optional[OrchestratorState] = None,
-    ) -> Optional[Dict[str, Any]]:
-        """确定性充分性判断。返回 None 表示需要 LLM 兜底。"""
-        if not preview:
-            if tool_name in ("search_knowledge", "knowledge_stats", "list_knowledge_sources"):
-                hint = (
-                    "知识库可能为空或 mode 选错；"
-                    "先调用 knowledge_stats 检查，再换 query 或 mode='flat' 重试"
-                )
-            elif tool_name in ("fetch_url", "http_get", "fetch_json"):
-                hint = "换一个 URL 或换一个搜索词重试"
-            elif tool_name in ("search_content", "search_files"):
-                hint = "换一个关键词或扩大搜索范围"
-            else:
-                hint = "换一种策略重试"
-            return {
-                "sufficient": False,
-                "gap": "工具返回内容为空",
-                "next_hint": hint,
-            }
-
-        if tool_name not in self._RETRIEVAL_TOOLS:
-            return None
-
-        # search_knowledge：累计覆盖文档判定
-        if tool_name == "search_knowledge":
-            # 提取本次覆盖的文档（归一化）
-            raw_filenames = re.findall(r'"filename":\s*"([^"]+)"', preview)
-            files_in_preview = {
-                _norm_filename(f) for f in raw_filenames if f
-            }
-
-            # 累计到 state
-            if state is not None and files_in_preview:
-                state.covered_documents |= files_in_preview
-                logger.info(
-                    "[dsh][orchestrator] covered_documents += %r → total %d",
-                    files_in_preview, len(state.covered_documents),
-                )
-
-            # 目标文档全集（已归一化）
-            target_files = _extract_target_files(goal, state)
-            covered = (
-                {_norm_filename(f) for f in state.covered_documents}
-                if state is not None
-                else files_in_preview
-            )
-
-            if target_files:
-                missing = target_files - covered
-                if missing:
-                    return {
-                        "sufficient": False,
-                        "gap": (
-                            f"已覆盖 {len(covered)}/{len(target_files)} 个文档，"
-                            f"还缺：{sorted(missing)}"
-                        ),
-                        "next_hint": (
-                            f"对剩余文档分别调用 search_knowledge："
-                            f"{sorted(missing)}"
-                        ),
-                    }
-                # 全部覆盖 → 充分
-                return {
-                    "sufficient": True,
-                    "gap": "",
-                    "next_hint": "",
-                }
-
-            # 没有目标文档集（非盘点任务）→ 本次 chunks 非空即充分
-            if files_in_preview or len(preview) > 200:
-                return {
-                    "sufficient": True,
-                    "gap": "",
-                    "next_hint": "",
-                }
-
-        # 检索类工具：preview 里出现任意 query 实体片段 → 充分
-        terms = self._extract_query_terms(goal)
-        if terms and any(t in preview for t in terms):
-            return {
-                "sufficient": True,
-                "gap": "",
-                "next_hint": "",
-            }
-
-        # 没有实体片段但 preview 很长（> 500 字），视为有内容
-        if len(preview) > 500:
-            return {
-                "sufficient": True,
-                "gap": "",
-                "next_hint": "",
-            }
-
+    @classmethod
+    def _find_verify_tool(cls, tools: Dict[str, Any]) -> Optional[str]:
+        for name in tools:
+            low = name.lower()
+            if any(k in low for k in cls._VERIFY_TOOL_HINTS):
+                return name
         return None
-        
-    async def _verify_code_fix(
+
+    # 验证信号：覆盖多场景（测试/文档/API/数据库/配置/纯查询）
+    _VERIFY_PATTERN = (
+        r"(测试|tests?|验证|确保.{0,8}通过|make.{0,8}pass|run.{0,8}test|"
+        r"检查.{0,8}(通过|内容|包含|是否|结果)|"
+        r"确认.{0,8}(返回|成功|通过|不报错|入库|存在|结果)|"
+        r"启动.{0,8}确认|查询.{0,8}确认|"
+        r"npm\s+test|jest|vitest|mocha|"
+        r"verify|validate|confirm|check.{0,8}(pass|success|200|ok)|"
+        # 纯查询也要"实际抓取"验证，不凭记忆
+        r"查一下|查询一下|搜一下|最新状态|最新情况|当前状态)"
+    )
+
+    @classmethod
+    def _goal_needs_verification(cls, goal: str) -> bool:
+        if not goal:
+            return False
+        import re as _re
+        return bool(_re.search(cls._VERIFY_PATTERN, goal, _re.I))
+
+    async def _collect_verification(
         self,
         goal: str,
         state: OrchestratorState,
         tools: Dict[str, Any],
     ) -> Optional[AssessResult]:
-        """CODE_FIX 质量校验：跑 tests，退出码 0 才算 DONE。"""
-        if "run_tests" not in tools:
-            logger.info("[dsh][verify] run_tests 工具不可用，跳过校验")
-            return None
+        """通用验证提示：不自动执行，返回 MISSING_VERIFICATION 让 LLM 决策。
 
-        from tools.security.gateway import SecurityGateway
-        write_succeeded = any(
-            SecurityGateway.is_write_operation(name)
-            for name in state.succeeded_tool_names
-        )
-        if not write_succeeded:
-            return None
-
-        project_dir = None
-        if state.workspace_roots:
-            project_dir = state.workspace_roots[0]
-        if not project_dir:
-            return None
-
-        tool_call = ToolCallRequest(
-            tool_name="run_tests",
-            parameters={"project_dir": project_dir},
-            confidence=1.0,
-            reasoning="CODE_FIX 完成度校验",
-        )
-        try:
-            result = await self._agent_provider().execute_tool_async(tool_call)
-        except Exception:
-            logger.exception("[dsh][verify] run_tests 执行失败")
-            return None
-
-        if not result.success or not isinstance(result.result, dict):
-            return None
-
-        payload = result.result
-        if payload.get("success"):
+        设计理由：
+            - 验证场景开放（pytest / npm test / curl / read 文件检查 / SQL 查询）
+            - 编排层不知道该项目该跑什么命令
+            - LLM 看到"可用执行工具"和"验证要求"后自己决定
+        """
+        verify_tool = self._find_verify_tool(tools)
+        if not verify_tool:
             return AssessResult(
-                sufficient=True, stop_reason=StopReason.DONE,
-                verify_detail=payload,
+                sufficient=False,
+                stop_reason=StopReason.NEEDS_USER,
+                gap=(
+                    "goal 要求验证，但当前工具集里没有可用的执行类工具"
+                    "（run_python / run_shell / bash / pytest 等）"
+                ),
+                gap_kind=GapKind.MISSING_VERIFICATION,
+                next_hint=(
+                    "**下一步**：如果可用工具确实无法验证，done=true 并如实告知用户"
+                    "「已修改但无法自动验证」；否则换一个能执行命令的工具。"
+                ),
             )
-        failures = payload.get("failures") or []
-        fail_desc = "; ".join(
-            f"{f.get('test')}: {f.get('message')}" for f in failures[:5]
-        ) or payload.get("message", "")
+
+        exec_tools = [
+            name for name in tools
+            if any(k in name.lower() for k in self._VERIFY_TOOL_HINTS)
+        ]
+        exec_hint = "、".join(f"`{n}`" for n in exec_tools) or f"`{verify_tool}`"
+
         return AssessResult(
-            sufficient=False, stop_reason=StopReason.QUALITY_FAIL,
-            gap=f"tests 未通过（{payload.get('failed', '?')} failed）：{fail_desc}",
-            next_hint="根据失败用例修代码，再次运行 tests",
-            verify_detail=payload,
+            sufficient=False,
+            stop_reason=StopReason.NEEDS_USER,
+            gap=(
+                f"goal 要求验证，但尚未执行任何验证动作。"
+                f"可用执行类工具：{exec_hint}"
+            ),
+            gap_kind=GapKind.MISSING_VERIFICATION,
+            next_hint=(
+                f"**下一步**：用执行类工具（优先 {exec_hint}）"
+                f"跑验证命令。例如：\n"
+                f"- Python 项目：`pytest` / `python -m unittest`\n"
+                f"- JS 项目：`npm test` / `jest`\n"
+                f"- API：`curl -s -o /dev/null -w '%{{http_code}}' <url>`\n"
+                f"- 文档/数据：读回文件检查内容\n"
+                f"验证通过后再 done=true。"
+            ),
         )
 
     async def _assess_result(
@@ -1513,218 +1689,97 @@ class AgentOrchestrator:
         result: ToolCallResult,
         state: OrchestratorState,
     ) -> Optional[AssessResult]:
-        """评估最近一次工具结果。按 task_type 分流，返回 AssessResult。"""
+        """评估最近一次工具结果。
+
+        统一走通用审计（要求 → 证据），不按 task_type 分支。
+        返回 None 表示"本步无需打扰 LLM，继续循环"。
+        """
+        # 闲聊/无工具需求：直接完成，不进入审计
+        if not requires_tool_call(goal):
+            return AssessResult(sufficient=True, stop_reason=StopReason.DONE)
+
         from tools.security.gateway import SecurityGateway
 
+        # 1. 工具失败 → 通用失败评估
+        if not result.success:
+            return AssessResult(
+                sufficient=False,
+                stop_reason=StopReason.NEEDS_USER,
+                gap=f"工具 {tool_name} 失败：{result.error or ''}",
+                gap_kind=GapKind.MISSING_ACTION,
+                next_hint="检查参数/路径/权限后重试，或换工具",
+            )
+
+        # 2. 写操作成功 → 记录证据；是否 DONE 交给 audit
         if SecurityGateway.is_write_operation(tool_name):
-            return None
-
-        tt = state.task_type
-
-        if tt == TaskType.CHITCHAT:
-            return AssessResult(sufficient=True, stop_reason=StopReason.DONE)
-
-        if tt == TaskType.CODE_FIX and tool_name in self._RETRIEVAL_TOOLS:
-            if result.success and result.result is not None:
-                return AssessResult(sufficient=True, stop_reason=StopReason.DONE)
+            wp = self._extract_path_from_params(params)
+            if wp:
+                state.written_paths.add(wp)
+            audit = run_audit(goal, state, evidence=collect_evidence(state))
+            if audit.satisfied:
+                return AssessResult(
+                    sufficient=True, stop_reason=StopReason.DONE,
+                )
             return AssessResult(
-                sufficient=False, stop_reason=StopReason.NEEDS_USER,
-                gap="读取失败", next_hint="检查路径后重试",
+                sufficient=False,
+                stop_reason=StopReason.NEEDS_USER,
+                gap=audit.gap,
+                gap_kind=audit.gap_kind,
+                next_hint=audit.next_hint,
             )
 
-        if tt == TaskType.CODE_FIX and tool_name == "run_tests":
-            if result.success and isinstance(result.result, dict):
+        # ── 执行类工具成功 → 记录 verification_evidence ──
+        if any(k in tool_name.lower() for k in self._VERIFY_TOOL_HINTS):
+            try:
                 payload = result.result
-                if payload.get("success"):
-                    return AssessResult(
-                        sufficient=True, stop_reason=StopReason.DONE,
-                        verify_detail=payload,
-                    )
-                failures = payload.get("failures") or []
-                fail_desc = "; ".join(
-                    f"{f.get('test')}: {f.get('message')}" for f in failures[:5]
-                ) or payload.get("message", "")
+                passed = bool(
+                    isinstance(payload, dict)
+                    and payload.get("success")
+                )
+                state.verification_evidence = {
+                    "tool": tool_name,
+                    "success": passed,
+                    "payload": payload if isinstance(payload, dict) else {},
+                }
+                logger.info(
+                    "[dsh][orchestrator] verification evidence recorded: "
+                    "tool=%s success=%r",
+                    tool_name, passed,
+                )
+            except Exception:
+                logger.exception("record verification evidence failed")
+
+        # 3. 读/检索类成功 → 记录证据，交给 audit
+        if result.success:
+            if "read" in (tool_name or "").lower() or _is_read_like(tool_name):
+                p = self._extract_path_from_params(params)
+                if p:
+                    state.read_paths.add(p)
+            audit = run_audit(goal, state, evidence=collect_evidence(state))
+            if audit.satisfied:
                 return AssessResult(
-                    sufficient=False, stop_reason=StopReason.QUALITY_FAIL,
-                    gap=(
-                        f"tests 未通过（{payload.get('failed', '?')} failed）："
-                        f"{fail_desc}"
-                    ),
-                    next_hint="根据失败用例修代码，再次运行 tests",
-                    verify_detail=payload,
+                    sufficient=True, stop_reason=StopReason.DONE,
                 )
             return AssessResult(
-                sufficient=False, stop_reason=StopReason.NEEDS_USER,
-                gap="run_tests 执行失败",
-                next_hint="检查 project_dir 与 pytest 是否可用",
+                sufficient=False,
+                stop_reason=StopReason.NEEDS_USER,
+                gap=audit.gap,
+                gap_kind=audit.gap_kind,
+                next_hint=audit.next_hint,
             )
 
-        if tt == TaskType.WEB_RESEARCH:
-            err_text = str(getattr(result, "error", "") or "")
-            preview_hint = str(result.result)[:2000] if result.result else ""
-            for marker in ("401", "403", "Unauthorized", "Forbidden",
-                           "login", "登录", "付费", "captcha", "验证码"):
-                if marker in err_text or marker in preview_hint:
-                    return AssessResult(
-                        sufficient=False, stop_reason=StopReason.BLOCKED,
-                        gap=f"外部阻塞：命中 {marker}",
-                        next_hint="需用户提供凭证或换数据源",
-                    )
-            from .validator import check_web_query_completion
-            reject = check_web_query_completion(state)
-            if reject:
-                return AssessResult(
-                    sufficient=False, stop_reason=StopReason.NEEDS_USER, gap=reject,
-                )
-            return AssessResult(sufficient=True, stop_reason=StopReason.DONE)
+        return None
 
-        payload = result.result
-        preview = ""
-        if isinstance(payload, dict):
-            blocks = payload.get("content") or []
-            if isinstance(blocks, list):
-                texts = [
-                    b.get("text", "") for b in blocks
-                    if isinstance(b, dict) and b.get("type") == "text"
-                ]
-                preview = "\n".join(t for t in texts if t)
-            if not preview:
-                chunks = payload.get("chunks") or []
-                if isinstance(chunks, list):
-                    texts = []
-                    for c in chunks:
-                        if not isinstance(c, dict):
-                            continue
-                        fn = c.get("filename") or ""
-                        text = c.get("text") or ""
-                        texts.append(f'"filename": "{fn}"\n{text}' if fn else text)
-                    preview = "\n".join(texts)
-                if not preview:
-                    _ECHO_KEYS = frozenset({
-                        "success", "query", "mode", "top_k", "error",
-                        "paths", "warnings", "resources", "chunks",
-                    })
-                    flat = [
-                        f"{k}: {v}" for k, v in payload.items()
-                        if k not in _ECHO_KEYS
-                        and isinstance(v, (str, int, float))
-                        and not isinstance(v, bool) and v
-                    ]
-                    preview = "\n".join(flat)
-        elif isinstance(payload, str):
-            preview = payload
-        else:
-            preview = str(payload) if payload is not None else ""
-
-        if tt == TaskType.FILE_OP:
-            if result.success:
-                return AssessResult(sufficient=True, stop_reason=StopReason.DONE)
-            return AssessResult(
-                sufficient=False, stop_reason=StopReason.PARTIAL,
-                gap="文件操作未成功",
-                next_hint="检查路径与权限；不要反复重试",
-            )
-
-        if tt == TaskType.GENERATE:
-            has_write = any(
-                SecurityGateway.is_write_operation(name)
-                for name in state.succeeded_tool_names
-            )
-            if has_write:
-                return AssessResult(sufficient=True, stop_reason=StopReason.DONE)
-            return AssessResult(
-                sufficient=False, stop_reason=StopReason.NEEDS_USER,
-                gap="尚未生成输出文件",
-                next_hint="输入已就绪，调用 write_* / save_* 生成结果",
-            )
-
-        deterministic = self._deterministic_assess(
-            goal, tool_name, preview, state=state,
-        )
-        if deterministic is not None:
-            if deterministic["sufficient"]:
-                return AssessResult(sufficient=True, stop_reason=StopReason.DONE)
-            if tt == TaskType.DOC_SURVEY and not state.covered_documents:
-                return AssessResult(
-                    sufficient=False, stop_reason=StopReason.BLOCKED,
-                    gap=deterministic.get("gap", ""),
-                    next_hint=deterministic.get("next_hint", ""),
-                )
-            return AssessResult(
-                sufficient=False, stop_reason=StopReason.NEEDS_USER,
-                gap=deterministic.get("gap", ""),
-                next_hint=deterministic.get("next_hint", ""),
-            )
-
-        # preview 放宽到 12000，避免实体被截断
-        if len(preview) > 12000:
-            preview = preview[:12000] + "\n... (truncated)"
-
-        prompt = (
-            "你是结果评估助手。判断最近一次工具返回是否足以回答用户目标。\n\n"
-            f"## 用户目标\n{goal}\n\n"
-            f"## 刚刚执行\n工具：{tool_name}\n参数：{params}\n\n"
-            f"## 返回内容摘要\n{preview}\n\n"
-            "## 判断标准\n"
-            "- 用户问「某个页面上的具体内容」，返回的是「关于该页面的分析文章」"
-            "→ 不达标。\n"
-            "- 用户问「实时/最新数据」，返回的是「历史数据」→ 不达标。\n"
-            "- 用户问「列表」，返回的只是「分类概览」→ 不达标。\n"
-            "- 用户问「页面 A 的内容」，返回的是「页面 B 的内容」→ 不达标。\n"
-            "- 返回内容包含用户要的具体信息 → 达标。\n\n"
-            "## 输出（严格 JSON，不要额外解释）\n"
-            "{\n"
-            '    "sufficient": true 或 false,\n'
-            '    "gap": "缺少什么（sufficient=false 时必填）",\n'
-            '    "next_hint": "下一步建议（sufficient=false 时必填）"\n'
-            "}\n"
-        )
-
-        import time as _time
-        _t0 = _time.time()
-
-        try:
-            raw = await asyncio.wait_for(
-                asyncio.to_thread(
-                    self._llm_provider().generate,
-                    [{"role": "user", "content": prompt}],
-                    mode="quick",
-                    timeout=55.0,
-                ),
-                timeout=60.0,
-            )
-            duration_ms = (_time.time() - _t0) * 1000
-            logger.info(
-                "[dsh][orchestrator] _assess_result raw response: %r", raw
-            )
-            dump_llm_call(
-                kind="assess_result",
-                prompt=prompt,
-                response=raw,
-                model=getattr(self._llm_provider(), "model", None),
-                duration_ms=duration_ms,
-                tool_name=tool_name,
-                extra={"goal": goal[:200]},
-            )
-        except asyncio.TimeoutError:
-            logger.warning("[dsh][orchestrator] _assess_result timed out (60s)")
+    @staticmethod
+    def _extract_path_from_params(params: Dict[str, Any]) -> Optional[str]:
+        """从参数里抽文件路径，供 read_paths/written_paths 证据用。"""
+        if not isinstance(params, dict):
             return None
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("_assess_result LLM call failed")
-            return None
-
-        data = self._parse_json(raw)
-        if not isinstance(data, dict):
-            return None
-        suf = bool(data.get("sufficient", True))
-        return AssessResult(
-            sufficient=suf,
-            stop_reason=StopReason.DONE if suf else StopReason.NEEDS_USER,
-            gap=str(data.get("gap", "")),
-            next_hint=str(data.get("next_hint", "")),
-        )
+        for key in ("file_path", "path", "output_path", "new_path", "old_path"):
+            v = params.get(key)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        return None
 
     async def run(
         self,
@@ -1740,7 +1795,6 @@ class AgentOrchestrator:
         task_id: Optional[str] = None,
         task_type: Optional[TaskType] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
-        # ── 调试：确认 session_id 是否传进来 ──
         logger.info(
             "[dsh][orchestrator] run() session_id=%r, "
             "resume_state=%r, goal=%r",
@@ -1749,7 +1803,7 @@ class AgentOrchestrator:
             goal[:100],
         )
 
-        # ── 等 mem0 ready，避免冷启动首轮写入丢失 ──
+        # ── 等 mem0 ready ──
         try:
             from core.memory.mem0_layer import wait_until_ready
             ready = await wait_until_ready(timeout=30.0)
@@ -1757,7 +1811,7 @@ class AgentOrchestrator:
         except Exception:
             logger.exception("wait_until_ready 失败，继续执行")
 
-        # 每个任务开始重置"已试过的 MCP 服务器"
+        # 重置 tried servers
         try:
             from tools.mcp_discovery import reset_tried_servers
             reset_tried_servers()
@@ -1766,12 +1820,7 @@ class AgentOrchestrator:
 
         agent = self._agent_provider()
 
-        # ── Skills：注入 prompt 引导（不裁剪工具集） ──
-        # 设计：skills 是「工具组合 + prompt 约束」，只通过 prompt 引导 LLM，
-        # 不调用 set_available_tools、不修改 _refresh_tools 的过滤逻辑，
-        # 保证工具集完整，_select_shortlist / force_keep / 快速路径均不受影响。
-
-        # 保留原始 goal（不含 skills 注入），供 _fill_params 使用
+        # ── Skills 注入 ──
         raw_goal = goal
         try:
             from tools.skills.session_skills import build_skills_prompt_block
@@ -1786,11 +1835,6 @@ class AgentOrchestrator:
             logger.exception("[dsh][skills] 注入 skills prompt 失败，继续执行")
 
         def _refresh_tools() -> Dict[str, Any]:
-            """重新从 registry 拉取工具列表。
-
-            MCP discovery 会在任务执行中途动态注册工具，
-            因此必须每步刷新，而不是只在开头取一次。
-            """
             t = agent.list_all_tools(allowed_danger_levels=allowed_danger_levels)
             if not allow_mcp_discovery:
                 t = {
@@ -1857,24 +1901,25 @@ class AgentOrchestrator:
             tools = _refresh_tools()
 
             # ── L1→L4 自动发现流水线（LLM 不参与） ──
-            try:
-                from tools.capability.pipeline import maybe_discover
-                from tools.mcp_discovery import _get_manager as _get_mcp_manager
-                tools = await maybe_discover(
-                    goal=goal,
-                    tools=tools,
-                    manager=_get_mcp_manager(),
-                    register_tool=agent.register_dynamic_tool,
-                    unregister_tool=agent.unregister_dynamic_tool,
-                    allowed_danger_levels=allowed_danger_levels,
-                    state=state,
-                )
-            except Exception:
-                logger.exception(
-                    "[dsh][orchestrator] capability pipeline failed, "
-                    "continue with current tools"
-                )
-
+            if allow_mcp_discovery:
+                try:
+                    from tools.capability.pipeline import maybe_discover
+                    from tools.mcp_discovery import _get_manager as _get_mcp_manager
+                    tools = await maybe_discover(
+                        goal=goal,
+                        tools=tools,
+                        manager=_get_mcp_manager(),
+                        register_tool=agent.register_dynamic_tool,
+                        unregister_tool=agent.unregister_dynamic_tool,
+                        allowed_danger_levels=allowed_danger_levels,
+                        state=state,
+                    )
+                except Exception:
+                    logger.exception(
+                        "[dsh][orchestrator] capability pipeline failed, "
+                        "continue with current tools"
+                    )
+                    
             decision = self._try_fast_path(goal, state, tools)
             if decision is None:
                 decision = await self._decide(
@@ -1896,6 +1941,33 @@ class AgentOrchestrator:
                     "[dsh][orchestrator] filled params for %s: %r",
                     decision.tool_name, decision.parameters,
                 )
+                # ── 必填参数校验：缺失则跳过本步，让 LLM 重选 ──
+                _meta = tools.get(decision.tool_name)
+                _props, _required = (
+                    self._read_tool_schema(_meta) if _meta else ({}, [])
+                )
+                _params = decision.parameters or {}
+                _missing = [
+                    k for k in _required
+                    if k not in _params or _params.get(k) in (None, "")
+                ]
+                if _missing:
+                    state.add_history(
+                        f"Step {step_index}: {decision.tool_name} "
+                        f"缺少必填参数 {_missing}，已跳过"
+                    )
+                    logger.warning(
+                        "[dsh][orchestrator] %s missing required %r, skip step",
+                        decision.tool_name, _missing,
+                    )
+                    yield {
+                        "type": "thinking",
+                        "step": step_index,
+                        "thought": (
+                            f"[参数缺失] {decision.tool_name} 缺 {_missing}，跳过"
+                        ),
+                    }
+                    continue
                 # 记录已搜 query
                 if decision.tool_name == "search_knowledge":
                     q = decision.parameters.get("query")
@@ -1908,6 +1980,9 @@ class AgentOrchestrator:
                 "thought": decision.thought,
                 "log": decision.thought,
             }
+            # 短上下文下保留"上一步计划"，供下一轮 _decide 参考
+            if decision.thought:
+                state.last_thinking = str(decision.thought)[:1000]
 
             if decision.done:
                 reject = self._validate_done(goal, state)
@@ -2069,21 +2144,70 @@ class AgentOrchestrator:
                 ),
             )
 
+            def _strip_format_noise(log: str) -> str:
+                """剥掉 format_tool_result 的展示性噪声，只留内容。"""
+                if not log:
+                    return ""
+                lines = []
+                for line in log.split("\n"):
+                    s = line.strip()
+                    if s.startswith("✅ 工具 [") or s.startswith("⏱️ 耗时:"):
+                        continue
+                    if s in ("📦 其他数据:", "📊 结构化数据:", "📄 MCP 返回:",
+                            "📊 MCP 数据:", "🔧 已连接 MCP 服务器。"):
+                        continue
+                    lines.append(line)
+                return "\n".join(lines).strip()
+
             log = agent.format_tool_result(result)
             status = self._classify_status(log, result.success)
-            limit_chars = self._HISTORY_LIMITS.get(tool_name, 600)
+            limit_chars = self._HISTORY_LIMITS.get(
+                tool_name, self._DEFAULT_HISTORY_LIMIT
+            )
+            log_for_history = _strip_format_noise(log)
             state.add_history(
-                f"Step {step_index}: {tool_name}({params}) → {status}: {log[:limit_chars]}"
+                f"Step {step_index}: {tool_name}({params}) → {status}: "
+                f"{log_for_history[:limit_chars]}"
             )
 
             if result.success:
                 state.mark_success(tool_name, params, step_index)
+                # 连续失败计数清零
+                _fk = (tool_name, params_key(params))
+                state._consecutive_failures.pop(_fk, None)
 
-                # CODE_FIX：写完代码后主动跑测试校验
-                if state.task_type == TaskType.CODE_FIX:
-                    from tools.security.gateway import SecurityGateway
-                    if SecurityGateway.is_write_operation(tool_name):
-                        verify = await self._verify_code_fix(goal, state, tools)
+                # ── discovery 成功：记录新注册的工具名（供下一步 _decide 补进候选） ──
+                if tool_name in self._MCP_DISCOVERY_TOOLS:
+                    try:
+                        payload = result.result
+                        new_tools = []
+                        if isinstance(payload, dict):
+                            tl = payload.get("tools") or []
+                            if isinstance(tl, list):
+                                new_tools = [t for t in tl if isinstance(t, str)]
+                        if new_tools:
+                            state.recent_discovered_tools.update(new_tools)
+                            # 只保留最近 10 个，避免累积
+                            if len(state.recent_discovered_tools) > 10:
+                                state.recent_discovered_tools = set(
+                                    sorted(state.recent_discovered_tools)[-10:]
+                                )
+                            logger.info(
+                                "[dsh][orchestrator] discovery registered %d tools: %r",
+                                len(new_tools), new_tools,
+                            )
+                    except Exception:
+                        logger.exception("record discovered tools failed")
+
+                # ── 通用写证据 + 验证采集（不按 task_type） ──
+                from tools.security.gateway import SecurityGateway
+                if SecurityGateway.is_write_operation(tool_name):
+                    _wp = self._extract_path_from_params(params)
+                    if _wp:
+                        state.written_paths.add(_wp)
+
+                    if self._goal_needs_verification(goal):
+                        verify = await self._collect_verification(goal, state, tools)
                         if verify is not None:
                             if verify.should_terminate:
                                 state.stop_reason = verify.stop_reason.value
@@ -2099,11 +2223,31 @@ class AgentOrchestrator:
                                     "detail": verify.gap,
                                 }
                                 return
+                            # 不自动执行；把"该验证了"写进 history，LLM 下一步决策
                             if verify.gap:
                                 state.add_history(
-                                    f"Step {step_index} 测试未过：{verify.gap}\n"
+                                    f"Step {step_index} 验证提示：{verify.gap}\n"
                                     f"建议：{verify.next_hint}"
                                 )
+                                logger.info(
+                                    "[dsh][orchestrator] verification hint: %s",
+                                    verify.gap[:120],
+                                )
+                                # 连续 3 次验证提示未响应 → 强制 partial done
+                                state._verification_hint_count += 1
+                                if state._verification_hint_count >= 3:
+                                    state.stop_reason = StopReason.PARTIAL.value
+                                    state.stop_detail = (
+                                        "已修改但未能自动验证"
+                                        "（连续 3 次验证提示未响应）"
+                                    )
+                                    yield {
+                                        "type": "done",
+                                        "steps": step_index,
+                                        "reason": StopReason.PARTIAL.value,
+                                        "detail": state.stop_detail,
+                                    }
+                                    return
 
                 # ── 缓存目标文档集（knowledge_stats / list_knowledge_sources） ──
                 if tool_name in ("knowledge_stats", "list_knowledge_sources"):
@@ -2216,6 +2360,11 @@ class AgentOrchestrator:
                         logger.exception("记录读取内容失败")
             else:
                 state.mark_failure(tool_name, params, result.error or "")
+                # 连续失败计数 +1
+                _fk = (tool_name, params_key(params))
+                state._consecutive_failures[_fk] = (
+                    state._consecutive_failures.get(_fk, 0) + 1
+                )
 
             yield {
                 "type": "tool_result",

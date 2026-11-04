@@ -84,11 +84,16 @@ def save_bm25_cache(metadata: List[Dict]) -> str:
 
     slim: List[Dict] = []
     for d in metadata:
-        meta = d.get("metadata") if isinstance(d.get("metadata"), dict) else {}
+        # chunk_id 在 vector_store.metadata 的顶层；
+        # 兼容嵌套在 metadata 子字典里的情况
+        cid = d.get("chunk_id")
+        if not cid:
+            meta = d.get("metadata") if isinstance(d.get("metadata"), dict) else {}
+            cid = meta.get("chunk_id")
         slim.append({
             "text": d.get("text", ""),
             "filename": d.get("filename", "unknown"),
-            "chunk_id": meta.get("chunk_id"),
+            "chunk_id": cid,
         })
 
     with open(tok_path, "w", encoding="utf-8") as f:
@@ -220,45 +225,42 @@ class BM25Store:
                 if idx >= len(self._docs):
                     continue
                 doc = self._docs[idx]
+                cid = doc.get("chunk_id")
+                if not cid and isinstance(doc.get("metadata"), dict):
+                    cid = doc["metadata"].get("chunk_id")
                 results.append({
                     "text": doc.get("text", ""),
                     "filename": doc.get("filename", "unknown"),
                     "score": float(score),
                     "metadata": {
-                        k: v for k, v in doc.items() if k != "text"
+                        "chunk_id": cid,
+                        "filename": doc.get("filename", "unknown"),
                     },
                 })
             return results
 
 
-def rrf_fuse(*result_lists, k=60, limit=10, weights=None):
-    if weights is None:
-        weights = [1.0] * len(result_lists)
-    if len(weights) != len(result_lists):
-        raise ValueError("weights 数量必须与 result_lists 一致")
+def rrf_fuse(*lists, k=60, limit=10, weights=None):
+    scores: Dict[str, float] = {}
+    items_by_id: Dict[str, Dict] = {}
+    for i, lst in enumerate(lists):
+        w = weights[i] if weights else 1.0
+        for rank, item in enumerate(lst):
+            cid = item.get("metadata", {}).get("chunk_id")
+            if not cid:
+                continue
+            scores[cid] = scores.get(cid, 0) + w / (k + rank + 1)
+            # 保留有 text 的那一路
+            existing = items_by_id.get(cid)
+            if existing is None or (
+                not existing.get("text") and item.get("text")
+            ):
+                items_by_id[cid] = item
 
-    def _key(item: dict):
-        cid = (item.get("metadata") or {}).get("chunk_id")
-        if cid:
-            return ("chunk", cid)
-        import hashlib
-        text = item.get("text", "")
-        digest = hashlib.md5(text.encode("utf-8", "ignore")).hexdigest()
-        return ("text", item.get("filename", ""), digest)
-
-    scores: Dict[tuple, float] = {}
-    items: Dict[tuple, dict] = {}
-    for results, weight in zip(result_lists, weights):
-        for rank, item in enumerate(results):
-            key = _key(item)
-            scores[key] = scores.get(key, 0.0) + weight / (k + rank + 1)
-            if key not in items:
-                items[key] = item
-
-    fused = sorted(scores.items(), key=lambda x: -x[1])[:limit]
-    out = []
-    for key, rrf_score in fused:
-        item = dict(items[key])
-        item["rrf_score"] = rrf_score
-        out.append(item)
-    return out
+    sorted_ids = sorted(scores.keys(), key=lambda x: -scores[x])[:limit]
+    result = []
+    for cid in sorted_ids:
+        item = dict(items_by_id.get(cid, {}))
+        item["rrf_score"] = scores[cid]
+        result.append(item)
+    return result

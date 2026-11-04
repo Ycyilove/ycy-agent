@@ -27,9 +27,9 @@ class ToolShortlister:
     def __init__(
         self,
         model_name: str = "BAAI/bge-small-zh-v1.5",
-        top_k: int = 15,
-        min_score: float = 0.10,
-        min_keep: int = 3,
+        top_k: int = 8,
+        min_score: float = 0.25,
+        min_keep: int = 5,
     ):
         self._model_name = model_name
         self._top_k = top_k

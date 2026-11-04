@@ -23,6 +23,13 @@ from backend.config import (
 from .local_model import get_local_model_service, ModelSource
 
 
+class ContextLengthExceeded(RuntimeError):
+    """prompt 超出模型 context 上限。
+
+    由 provider 层抛，上层（_decide / _fill_params）catch 后降级重试。
+    """
+
+
 class ModelScopeLLM:
     """OpenAI-compatible online model or local model adapter.
 
@@ -85,10 +92,24 @@ class ModelScopeLLM:
             return self.local_service.generate(processed_messages)
 
         self._ensure_llm()
-        return self.llm.invoke(
-            self._convert_to_langchain(processed_messages),
-            config=self._langchain_config(timeout=timeout),
-        ).content
+        try:
+            return self.llm.invoke(
+                self._convert_to_langchain(processed_messages),
+                config=self._langchain_config(timeout=timeout),
+            ).content
+        except Exception as e:
+            err = str(e).lower()
+            if (
+                "context_length" in err
+                or "maximum context" in err
+                or "too many tokens" in err
+                or "reduce the length" in err
+                or "prompt is too long" in err
+            ):
+                raise ContextLengthExceeded(
+                    f"prompt 超模型 context 上限：{str(e)[:200]}"
+                ) from e
+            raise
 
     def stream_generate(self, messages: List[Dict[str, str]], mode: str = 'quick', timeout: float | None = None,):
         processed_messages = self._add_mode_prompt(messages, mode)
@@ -109,7 +130,19 @@ class ModelScopeLLM:
                 if chunk.content:
                     yield f"data: {json.dumps({'text': chunk.content}, ensure_ascii=False)}\n\n"
         except Exception as error:
-            yield f"data: {json.dumps({'text': f'生成响应时发生错误: {error}', 'error': True}, ensure_ascii=False)}\n\n"
+            err = str(error).lower()
+            if (
+                "context_length" in err
+                or "maximum context" in err
+                or "too many tokens" in err
+                or "reduce the length" in err
+                or "prompt is too long" in err
+            ):
+                yield (
+                    f"data: {json.dumps({'text': 'prompt 超模型 context 上限，请缩短任务或减少历史', 'error': True}, ensure_ascii=False)}\n\n"
+                )
+            else:
+                yield f"data: {json.dumps({'text': f'生成响应时发生错误: {error}', 'error': True}, ensure_ascii=False)}\n\n"
         finally:
             yield 'data: [DONE]\n\n'
 

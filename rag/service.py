@@ -520,10 +520,14 @@ class LocalRAGService:
                 bm25_results,
                 k=RAG_RRF_K,
                 limit=top_k,
-                weights=[1.0, 1.5],
+                weights=[1.0, 2.0],
             )
         else:
             fused = vector_results[:top_k]
+        logger.info(
+            "[dsh][rag] vector=%d bm25=%d fused=%d",
+            len(vector_results), len(bm25_results), len(fused),
+        )
         _fuse_ms = (_time.perf_counter() - _t_fuse0) * 1000
 
         _total_ms = (_time.perf_counter() - _t_search0) * 1000
@@ -563,6 +567,20 @@ class LocalRAGService:
 
             headings = meta.get("headings", []) or []
             indexed_text = item.get("text", "") or ""
+            original_text = meta.get("original_text") or ""
+
+            # 优先返回 original_text（索引原文，含所有实体）；
+            # enriched（indexed_text）作为补充上下文。
+            # 但若 original_text 为空（旧索引），退回 indexed_text。
+            if original_text:
+                if indexed_text and original_text not in indexed_text:
+                    # enriched 和原文不同（如 contextual 摘要）→ 双份
+                    indexed_text = (
+                        original_text + "\n\n【上下文】\n" + indexed_text
+                    )
+                else:
+                    indexed_text = original_text
+            # original_text 为空时保持 indexed_text
 
             if headings and not indexed_text.startswith(headings[0]):
                 prefix = " > ".join(headings) + "\n"
@@ -579,7 +597,6 @@ class LocalRAGService:
         if fallback_warning:
             for item in enriched:
                 item.setdefault("warnings", []).append(fallback_warning)
-
         # 把分段耗时挂到第一条结果的 metadata 上（不污染每条）
         enriched = self.resource_manager.enrich_search_results(enriched)
         if enriched:
@@ -589,6 +606,46 @@ class LocalRAGService:
                 "fuse": round(_fuse_ms, 1),
                 "total": round(_total_ms, 1),
             }
+
+        # ── 实体兜底：向量对生僻实体不敏感，BM25 召回的含实体 chunk
+        #    在 RRF 融合后可能排后。如果 top_k 里没有含 query 实体的 chunk，
+        #    把 BM25 的含实体 chunk 追加到最前。 ──
+        ents = [m.surface for m in self._extractor.extract(query)]
+        if ents:
+            has_entity = any(
+                any(e in (r.get("text") or "") for e in ents)
+                for r in enriched[:top_k]
+            )
+            if not has_entity:
+                for item in bm25_results:
+                    text = item.get("text") or ""
+                    if not any(e in text for e in ents):
+                        continue
+                    cid = (item.get("metadata") or {}).get("chunk_id")
+                    full_meta = chunk_meta_map.get(cid) if cid else None
+                    if not full_meta:
+                        continue
+                    new_item = dict(item)
+                    new_item["metadata"] = full_meta
+                    headings = full_meta.get("headings") or []
+                    original_text = full_meta.get("original_text") or ""
+                    indexed_text = original_text or text
+                    if headings and not indexed_text.startswith(headings[0]):
+                        indexed_text = " > ".join(headings) + "\n" + indexed_text
+                    new_item["text"] = indexed_text
+                    new_item["headings"] = headings
+                    new_item["heading_levels"] = full_meta.get("heading_levels") or []
+                    new_item["page_numbers"] = full_meta.get("page_numbers") or []
+                    new_item["has_contextual"] = full_meta.get("has_contextual", False)
+                    new_item["score"] = new_item.get("score", 0.0) or 0.0
+                    enriched.insert(0, new_item)
+                    logger.info(
+                        "[dsh][rag] 实体兜底：追加含 %r 的 chunk cid=%s",
+                        ents, cid,
+                    )
+                    break
+
+        enriched = enriched[:top_k]
         return enriched
 
     def _bm25_queries_for(self, text: str) -> List[str]:
@@ -608,7 +665,6 @@ class LocalRAGService:
     _RELATION_HINTS = ("属于", "队友", "成员", "团队", "关联", "同队", "所在", "获得")
 
     def _should_use_record(self, query: str) -> bool:
-        """auto 模式判定：有记录 + 命中记录 BM25 或含关系词。"""
         if not self.record_store.stats().get("total_records"):
             return False
         if any(h in query for h in self._RELATION_HINTS):
@@ -616,8 +672,20 @@ class LocalRAGService:
         rec_hits = self.record_store.search(query, top_k=1)
         if not rec_hits:
             return False
-        # 记录 BM25 命中即走 record；否则 flat 更稳
-        return True
+        # ── 额外判断：query 里的实体必须出现在 record 的文本里 ──
+        # 避免 BM25 单字匹配（如"天梯赛"匹配到含"天"的财务表格）
+        ents = [m.surface for m in self._extractor.extract(query)]
+        if not ents:
+            return False  # 无实体 → 不走 record
+        top = rec_hits[0]
+        record_text = ""
+        if isinstance(top, dict):
+            record_text = top.get("text") or ""
+            if not record_text and top.get("record") is not None:
+                rec = top["record"]
+                record_text = getattr(rec, "to_index_text", lambda: "")()
+        # 实体必须命中至少一个
+        return any(e in record_text for e in ents)
 
     def _record_search(self, query: str, top_k: int) -> List[Dict]:
         """记录级检索 → 转成与 flat search 同构的 dict 列表。"""

@@ -116,3 +116,28 @@ RAG_CONTEXTUAL_TIMEOUT = float(os.getenv('RAG_CONTEXTUAL_TIMEOUT', '30'))
 
 # 短于此字符数的 chunk 跳过摘要（本身已带上下文）
 RAG_CONTEXTUAL_MIN_CHARS = int(os.getenv('RAG_CONTEXTUAL_MIN_CHARS', '80'))
+
+# ─────────────────────────────────────────────────────────────
+# 上下文预算（短上下文模型友好）
+# ─────────────────────────────────────────────────────────────
+# 设计：单次 LLM 调用的 prompt 总量有上限，各 block 按优先级分配。
+# 短上下文模型（8K context）在 .env 里覆盖：
+#   LLM_PROMPT_BUDGET_CHARS=12000
+#   LLM_HISTORY_BUDGET_RATIO=0.35
+#   LLM_HISTORY_ENTRY_CHARS=800
+
+# 单次 prompt 的字符预算（字符比 token 好估算）
+# 24000 字符 ≈ 中文 16000 token / 英文 6000 token
+LLM_PROMPT_BUDGET_CHARS = int(os.getenv('LLM_PROMPT_BUDGET_CHARS', '24000'))
+
+# history 占总预算的比例（history 是最大变量）
+LLM_HISTORY_BUDGET_RATIO = float(os.getenv('LLM_HISTORY_BUDGET_RATIO', '0.4'))
+
+# 单步工具结果进 history 的默认字符上限（覆盖 _HISTORY_LIMITS 缺省）
+LLM_HISTORY_ENTRY_CHARS = int(os.getenv('LLM_HISTORY_ENTRY_CHARS', '1000'))
+
+# 触发 L2 摘要压缩的阈值（prompt / budget 超过此比例时压缩）
+LLM_COMPACT_TRIGGER_RATIO = float(os.getenv('LLM_COMPACT_TRIGGER_RATIO', '0.8'))
+
+# 压缩时保留最近 N 步原文
+LLM_COMPACT_KEEP_RECENT = int(os.getenv('LLM_COMPACT_KEEP_RECENT', '5'))

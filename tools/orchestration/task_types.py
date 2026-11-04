@@ -15,6 +15,15 @@ class TaskType(str, Enum):
     GENERATE = "generate"
 
 
+class GapKind(str, Enum):
+    """assess / audit 产出的缺口类型。驱动"下一步该做什么"，不驱动任务分类。"""
+    NONE = "none"
+    MISSING_CONTENT = "missing_content"            # 该去读/检索
+    MISSING_ACTION = "missing_action"              # 该去写/改/执行
+    MISSING_VERIFICATION = "missing_verification"  # 该去跑测试/校验
+    BLOCKED = "blocked"                            # 外部阻塞，需用户
+
+
 _PRIORITY = {
     TaskType.CHITCHAT: 0,
     TaskType.INFO_QUERY: 1,
@@ -55,6 +64,7 @@ class AssessResult:
     stop_reason: StopReason = StopReason.DONE
     gap: str = ""
     next_hint: str = ""
+    gap_kind: GapKind = GapKind.NONE
     verify_detail: Optional[dict] = field(default=None)
 
     @property
@@ -72,5 +82,6 @@ class AssessResult:
             "sufficient": self.sufficient,
             "stop_reason": self.stop_reason.value,
             "gap": self.gap,
+            "gap_kind": self.gap_kind.value,
             "next_hint": self.next_hint,
         }
