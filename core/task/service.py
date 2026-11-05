@@ -885,6 +885,26 @@ class AgentTaskService:
         )
         yield self._emit_step(task_id, initial_step)
 
+        # ── 长期记忆：把本会话已知事实作为一条 tool_context 注入最终回答 ──
+        try:
+            from core.memory.mem0_layer import recall_recent_facts
+            _facts = recall_recent_facts(session_id, limit=6) if session_id else []
+            if _facts:
+                _mem_lines = ["## 本会话已知事实（长期记忆）"]
+                for f in _facts[:6]:
+                    _mem_lines.append(f"- {f[:300]}")
+                _mem_lines.append(
+                    "\n**注意**：这些是历史事实，可能已过时；"
+                    "与当前问题无关时忽略。"
+                )
+                tool_context = list(tool_context or []) + ["\n".join(_mem_lines)]
+                logger.info(
+                    "[dsh][task_service] injected %d memory facts into stream_answer",
+                    len(_facts),
+                )
+        except Exception:
+            logger.exception("recall_recent_facts (stream_answer) failed")
+            
         # 隐式兜底：把检索到的资源作为时间线步骤展示
         if rag_resources:
             resource_step = self._step(
@@ -995,6 +1015,70 @@ class AgentTaskService:
 
         if not answer_text:
             answer_text = "未生成有效回答。"
+
+        # ── 反向兜底触发器：模型承认信息缺失，且本 turn 未调用过搜索工具 ──
+        # 设计：不预测“哪些问题该搜”，而是检测“模型承认答不了”这个信号。
+        # 只对 ask 模式生效；agent 模式由 orchestrator 的 audit 负责。
+        if mode == MODE_ASK:
+            _MISSING_INFO_PHRASES = (
+                "没有权限访问", "无法访问", "没有相关信息",
+                "无法提供", "建议通过官方渠道", "建议您通过官方",
+                "我无法", "我不知道", "没有足够的信息",
+                "无法获取", "不在我的知识",
+            )
+            _answer_lower = (answer_text or "").lower()
+            _admits_missing = any(p in _answer_lower for p in _MISSING_INFO_PHRASES)
+            _has_search_evidence = any(
+                ("返回" in t and ("tavily" in t.lower() or "fetch" in t.lower()
+                                 or "search" in t.lower() or "knowledge" in t.lower()))
+                for t in (tool_context or [])
+            )
+            if _admits_missing and not _has_search_evidence:
+                logger.info(
+                    "[dsh][ask] answer admits missing info; triggering fallback search"
+                )
+                try:
+                    from tools.mcp_discovery import _get_manager as _get_mcp_manager
+                    manager = _get_mcp_manager()
+                    fallback_results: List[str] = []
+                    # 1) 优先 tavily 搜索
+                    for srv in ("tavily", "fetch"):
+                        if srv not in getattr(manager, "configs", {}):
+                            continue
+                        try:
+                            if srv not in manager.connections:
+                                await manager.connect(srv)
+                                await manager.discover(srv, self._agent_provider().register_dynamic_tool)
+                            if srv == "tavily":
+                                payload = await manager.call_tool(
+                                    "mcp__tavily__tavily_search",
+                                    {"query": message, "max_results": 5},
+                                )
+                            else:
+                                payload = await manager.call_tool(
+                                    "mcp__fetch__fetch",
+                                    {"url": message},
+                                )
+                            fallback_results.append(
+                                f"【兜底搜索 {srv} 返回】\n"
+                                f"{json.dumps(payload, ensure_ascii=False, default=str)[:6000]}"
+                            )
+                            break
+                        except Exception:
+                            logger.exception("[dsh][ask] fallback search via %s failed", srv)
+                    if fallback_results:
+                        # 用搜索结果重新生成一次回答
+                        retry_context = list(tool_context or []) + fallback_results
+                        async for evt in self._stream_answer(
+                            task_id, session_id, prior_messages, message, mode,
+                            attachments, turn_id,
+                            rag_context=None, rag_resources=None,
+                            tool_context=retry_context,
+                        ):
+                            yield evt
+                        return
+                except Exception:
+                    logger.exception("[dsh][ask] fallback search failed")
 
         # [[asset:xxx]] 解析
         if rag_resources:
@@ -1373,6 +1457,43 @@ class AgentTaskService:
                 except Exception:
                     logger.exception("累积工具结果失败")
 
+            # ── web 结果按来源类型分层，注入 context（供最终回答引用） ──
+            _is_web_tool = (
+                tool_call.tool_name.startswith("mcp__tavily")
+                or tool_call.tool_name == "fetch_url"
+                or tool_call.tool_name.startswith("mcp__fetch")
+            )
+            if _is_web_tool and isinstance(result.result, dict):
+                try:
+                    from tools.orchestration.core import AgentOrchestrator
+                    _buckets = AgentOrchestrator._bucket_web_results(result.result)
+                    if _buckets:
+                        _labels = AgentOrchestrator._TIER_LABELS
+                        _lines = [
+                            "## 搜索结果按来源类型分层（供引用/判断权威度）"
+                        ]
+                        for b in ("official", "news", "forum", "blog", "unknown"):
+                            if b not in _buckets:
+                                continue
+                            _lines.append(
+                                f"\n### {_labels.get(b, b)}（{len(_buckets[b])} 条）"
+                            )
+                            for it in _buckets[b][:5]:
+                                _title = it.get("title") or it.get("url") or ""
+                                _lines.append(
+                                    f"- [{_title}]({it['url']})\n"
+                                    f"  {str(it.get('content') or '')[:300]}"
+                                )
+                        _lines.append(
+                            "\n**引用规则**：official/news 可作为事实依据并注明来源；"
+                            "forum/blog 仅作为补充细节或争议观点，"
+                            "必须标注“来自社区讨论/个人博客”，不得当作权威事实。"
+                            "不同层级来源说法矛盾时，并列呈现并标注来源类型。"
+                        )
+                        tool_execution_context.append("\n".join(_lines))
+                except Exception:
+                    logger.exception("web source bucketing failed")
+                    
             file_log = self._file_log_entry(tool_call, result)
             if file_log:
                 yield self._emit_file_log(session_id, file_log)
@@ -1558,14 +1679,59 @@ class AgentTaskService:
             tool_execution_context: List[str] = []
 
             if mode == MODE_ASK:
+                # ── ask 模式：只读，但必须能获取信息 ──
+                # 设计：
+                #   1. 仍然只允许 safe 级工具（不能写/删/执行）
+                #   2. 不允许 MCP discovery（ask 不主动扩展能力）
+                #   3. 走 orchestrator，让模型自主决定是否调用只读搜索工具
+                #   4. 如果 orchestrator 不可用，退化为“注入只读工具目录”直答
                 yield self._emit_step(
                     task_id,
-                    self._step(analysis_step_id, "对话模式", "done", "think"),
+                    self._step(analysis_step_id, "对话模式（只读检索）", "done", "think"),
                 )
+
+                ask_allowed_dangers = {"safe"}
+                ask_workspace_roots = None
+                ask_workspace_trusted = False
+
+                used_ask_orchestrator = False
+                if self._orchestrator_provider is not None:
+                    used_ask_orchestrator = True
+                    orchestrator = self._orchestrator_provider()
+                    ask_tool_context: List[str] = []
+                    ask_resources: List[Dict[str, Any]] = []
+                    async for event in orchestrator.run(
+                        message,
+                        allowed_danger_levels=ask_allowed_dangers,
+                        allow_mcp_discovery=False,
+                        workspace_paths=ask_workspace_roots,
+                        prior_messages=prior_messages,
+                        session_id=session_id,
+                        task_id=task_id,
+                    ):
+                        async for evt in self._process_orchestrator_event(
+                            event,
+                            task_id=task_id, session_id=session_id, turn_id=turn_id,
+                            message=message, mode=mode, workspace=None,
+                            workspace_trusted=ask_workspace_trusted,
+                            auto_discover_mcp=False,
+                            analysis_step_id=analysis_step_id,
+                            tool_execution_context=ask_tool_context,
+                            accumulated_resources=ask_resources,
+                            event_prefix="ask",
+                        ):
+                            yield evt
+                        if event.get("type") == "approval_required":
+                            # ask 模式不应产生写审批；防御性返回
+                            return
+
+                # 无论 orchestrator 是否可用，最终都基于已获取的工具结果生成回答
                 async for evt in self._stream_answer(
                     task_id, session_id, prior_messages, message, mode,
                     attachments, turn_id,
-                    rag_context=None, rag_resources=None, tool_context=None,
+                    rag_context=None,
+                    rag_resources=None,
+                    tool_context=ask_tool_context if used_ask_orchestrator else None,
                 ):
                     yield evt
                 return
@@ -1931,11 +2097,16 @@ class AgentTaskService:
             # ── Mem0：审批后成功也写事实 ──
             try:
                 from core.memory.mem0_layer import remember_tool_success
+                _meta_for_origin = self._agent_provider().list_all_tools().get(
+                    tool_call.tool_name
+                )
+                _origin = getattr(_meta_for_origin, "origin", None) or "builtin"
                 remember_tool_success(
                     session_id=state.session_id or pending.session_id,
                     tool_name=tool_call.tool_name,
                     params=tool_call.parameters,
                     result=result.result,
+                    origin=_origin,
                 )
             except Exception:
                 logger.exception("remember_tool_success (approval) 失败")

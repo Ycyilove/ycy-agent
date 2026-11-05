@@ -73,6 +73,9 @@ class OrchestratorStep:
     tool_name: Optional[str] = None
     parameters: Dict[str, Any] = field(default_factory=dict)
     done: bool = False
+    # 模型自主声明的搜索覆盖策略（仅外部搜索类工具使用）
+    # {"source_tiers": ["official","forum"], "breadth": "medium", "queries": [...]}
+    search_plan: Optional[Dict[str, Any]] = None
 
 
 # ─────────────────────────────────────────────────────────────
@@ -564,6 +567,112 @@ class AgentOrchestrator:
                 "search_content", "search_files"},
     }
 
+    @staticmethod
+    def _is_external_fact_query(goal: str) -> bool:
+        """结构化判断是否需要外部信息，不依赖窄词表。
+
+        与 validator._looks_like_external_fact_query 保持同口径，
+        但额外包含明确时效词（实时/最新/今天/现在）。
+        """
+        if not goal:
+            return False
+        g = goal.lower()
+        _TIME_SENSITIVE = (
+            "实时", "最新", "今天", "现在", "当前", "刚刚",
+            "news", "latest", "realtime", "today", "now",
+        )
+        if any(k in g for k in _TIME_SENSITIVE):
+            return True
+        from tools.orchestration.validator import _looks_like_external_fact_query
+        return _looks_like_external_fact_query(goal)
+
+    # ── 外部搜索结果的来源分桶（供呈现和偏差提示，不做硬性覆盖检查） ──
+    _SOURCE_BUCKET_RULES = (
+        ("official", (
+            "gov", "edu", "official", "docs.", "/docs/", "/api/",
+            "openai.com", "anthropic.com", "deepseek.com", "github.com",
+            "arxiv.org", "nature.com", "science.org",
+        )),
+        ("news", (
+            "news", "reuters", "bloomberg", "techcrunch", "theverge",
+            "36kr", "sina", "sohu", "163.com", "bbc", "cnn",
+        )),
+        ("forum", (
+            "reddit", "stackoverflow", "zhihu", "v2ex", "discourse",
+            "forum", "bbs", "community", "discuss", "hackernews",
+            "news.ycombinator", "stackexchange", "github.com/issues",
+        )),
+        ("blog", (
+            "medium.com", "substack", "blog", "wordpress", "csdn",
+            "juejin", "cnblogs", "dev.to", "hashnode",
+        )),
+    )
+
+    _TIER_LABELS = {
+        "official": "官方/一手（权威最高）",
+        "news": "新闻/媒体（时效强，权威中）",
+        "forum": "论坛/社区（一手经验，权威低但细节多）",
+        "blog": "博客/个人（主观，权威低）",
+        "unknown": "其他/未分类",
+    }
+
+    @classmethod
+    def _bucket_source_url(cls, url: str) -> str:
+        """把 URL 归到 official/news/forum/blog/unknown 之一。"""
+        if not url:
+            return "unknown"
+        low = url.lower()
+        for bucket, keywords in cls._SOURCE_BUCKET_RULES:
+            if any(k in low for k in keywords):
+                return bucket
+        return "unknown"
+
+    @classmethod
+    def _extract_web_results(cls, payload: Any) -> List[Dict[str, Any]]:
+        """从 tavily/fetch 的返回里抽出带 url 的结果条目。"""
+        items: List[Dict[str, Any]] = []
+        if not isinstance(payload, dict):
+            return items
+
+        def _collect(seq):
+            if not isinstance(seq, list):
+                return
+            for r in seq:
+                if isinstance(r, dict) and r.get("url"):
+                    items.append({
+                        "url": r["url"],
+                        "title": r.get("title") or "",
+                        "content": str(r.get("content") or "")[:800],
+                        "score": r.get("score"),
+                    })
+
+        # tavily_search: {"results": [...]}
+        _collect(payload.get("results"))
+        # 部分 MCP 包装：{"structuredContent": {"results": [...]}}
+        sc = payload.get("structuredContent")
+        if isinstance(sc, dict):
+            _collect(sc.get("results"))
+        # fetch: {"url": ..., "content": ...} 单条
+        if payload.get("url") and payload.get("content"):
+            items.append({
+                "url": payload["url"],
+                "title": payload.get("title") or "",
+                "content": str(payload["content"])[:800],
+                "score": None,
+            })
+        return items
+
+    @classmethod
+    def _bucket_web_results(
+        cls, payload: Any
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """把一次 web 工具返回按来源类型分桶。"""
+        bucketed: Dict[str, List[Dict[str, Any]]] = {}
+        for it in cls._extract_web_results(payload):
+            b = cls._bucket_source_url(it["url"])
+            bucketed.setdefault(b, []).append(it)
+        return bucketed
+
     @classmethod
     def _filter_builtin_by_scene(
         cls, goal: str, tools: Dict[str, Any]
@@ -654,10 +763,7 @@ class AgentOrchestrator:
                     # 2. 本地任务 → 不保留任何 MCP，只留 discovery 入口
                     # 3. 最近 discovery 注册的由 _decide 补回
                     goal_low = (goal or "").lower()
-                    is_web_task = any(k in goal_low for k in (
-                        "网页", "网站", "新闻", "最新", "实时",
-                        "url", "web", "news", "latest",
-                    ))
+                    is_web_task = self._is_external_fact_query(goal)
                     if is_web_task:
                         static_mcp = {
                             n: m for n, m in mcp_tools.items()
@@ -681,10 +787,7 @@ class AgentOrchestrator:
                     "fallback by task scene"
                 )
                 goal_low = (goal or "").lower()
-                is_web_task = any(k in goal_low for k in (
-                    "网页", "网站", "新闻", "最新", "实时",
-                    "url", "web", "news", "latest",
-                ))
+                is_web_task = self._is_external_fact_query(goal)
                 if is_web_task:
                     static_mcp = {
                         n: m for n, m in mcp_tools.items()
@@ -694,6 +797,22 @@ class AgentOrchestrator:
                     if static_mcp:
                         picked.update(static_mcp)
 
+        # ── 诊断：web 任务但没有任何 MCP 搜索/抓取工具 ──
+        if self._is_external_fact_query(goal):
+            _mcp_web = [
+                n for n in picked
+                if n.startswith("mcp__") and (
+                    "search" in n.lower() or "tavily" in n.lower()
+                    or "fetch" in n.lower()
+                )
+            ]
+            if not _mcp_web:
+                logger.warning(
+                    "[dsh][orchestrator] web task but no MCP search/fetch tool "
+                    "in shortlist (tavily may be disconnected); "
+                    "fallback to http_get + fetch"
+                )
+                
         if not picked:
             picked = dict(tools)
 
@@ -718,8 +837,15 @@ class AgentOrchestrator:
 
         优先级：goal > tool_directory > conversation > history
         history 从尾部倒序保留（近期步比早期步重要）。
+
+        关键：prompt 必须与实际工具目录一致。
+        如果 shortlist 里没有 search_and_connect_mcp（ask 模式 / 关闭 discovery），
+        就把 prompt 里所有引导调用它的段落替换为"当前不可用"的说明，
+        避免模型反复选一个不存在的工具。
         """
         budget = getattr(self, "_prompt_budget_chars", 24000)
+
+        has_discovery = "search_and_connect_mcp" in shortlist
 
         # 骨架（不含可变块）
         skeleton = (
@@ -727,6 +853,38 @@ class AgentOrchestrator:
             .replace("{goal}", goal)
             .replace("{max_steps}", str(self._max_steps))
         )
+
+        # ── 条件化：无 discovery 工具时，替换所有引导调用它的段落 ──
+        if not has_discovery:
+            skeleton = skeleton.replace(
+                "## 关于 search_and_connect_mcp 的返回",
+                "## 关于外部搜索（当前无 discovery 工具）\n\n"
+                "当前工具目录里**没有** `search_and_connect_mcp`，"
+                "**不要选它**。你只能用目录里实际存在的工具：\n"
+                "- 有名字含 search / query 的 MCP 工具 → 直接用它搜关键词；\n"
+                "- 只有 `fetch` / `http_get` / `fetch_url`：\n"
+                "  * 有已知 URL → 用 `fetch` 抓取；\n"
+                "  * 只有关键词 → 用 `http_get` 请求 "
+                "`https://www.bing.com/search?q=<URL编码关键词>` 或 "
+                "`https://duckduckgo.com/html/?q=<关键词>`，"
+                "从返回 HTML 里提取候选 URL，再用 `fetch` 抓最相关的 1~2 个；\n"
+                "  * 不要因为“没有 search 工具”就 done=true——先用 http_get 试一次；\n"
+                "- 有 `search_knowledge` → 外部搜不到时再查本地知识库。\n\n"
+                "（以下原始 discovery 说明已停用）\n"
+                "## 关于 search_and_connect_mcp 的返回",
+            )
+            skeleton = skeleton.replace(
+                "   - **需要新外部服务** → 调 `search_and_connect_mcp`：",
+                "   - **需要新外部服务**（当前模式不可用，跳过本项）：",
+            )
+            skeleton = skeleton.replace(
+                "     用 `search_and_connect_mcp` 发现一个搜索服务，\n"
+                "       或如果有已知 URL，直接用 `fetch_url` 读取；",
+                "     用 `http_get` 请求一个搜索页（如 Bing / DuckDuckGo），"
+                "从 HTML 提取候选 URL，再用 `fetch` 抓取；\n"
+                "       如果有已知 URL，直接用 `fetch` 读取；",
+            )
+
         # 减去占位符本身的长度（替换后会被实际内容替代）
         skeleton_len = len(skeleton) - len("{tool_directory}") - len("{history}")
         remaining = max(2000, budget - skeleton_len)
@@ -753,7 +911,6 @@ class AgentOrchestrator:
         if not history_text:
             history_text = "(尚无步骤)"
         elif remaining <= 0:
-            # 预算耗尽：只留最后 500 字符
             history_text = (
                 "...(早期历史已省略)\n" + history_text[-500:]
             )
@@ -808,6 +965,28 @@ class AgentOrchestrator:
                     "重新审视当前工具目录再决策。\n\n"
                 )
 
+        # ── 长期记忆：注入本会话已知事实（供决策参考） ──
+        memory_facts_block = ""
+        if state is not None and getattr(state, "session_id", None):
+            try:
+                from core.memory.mem0_layer import recall_recent_facts
+                _facts = recall_recent_facts(state.session_id, limit=8)
+                if _facts:
+                    _lines = ["## 本会话已知事实（长期记忆，供决策参考）"]
+                    for f in _facts[:8]:
+                        _lines.append(f"- {f[:300]}")
+                    _lines.append(
+                        "\n**注意**：以上是历史事实，可能已过时；"
+                        "如果与当前目标无关，忽略即可。"
+                    )
+                    memory_facts_block = "\n".join(_lines) + "\n\n"
+                    logger.info(
+                        "[dsh][orchestrator] injected %d memory facts into decide",
+                        len(_facts),
+                    )
+            except Exception:
+                logger.exception("[dsh][orchestrator] recall_recent_facts failed")
+
         # 如果之前读过文件，把它放进 prompt 的 history 部分
         history_text = self._format_history(state.history, goal, state)
 
@@ -830,7 +1009,7 @@ class AgentOrchestrator:
             )
 
         prompt = self._assemble_decide_prompt(
-            shortlist, history_text, goal, conversation_block
+            shortlist, history_text, goal, conversation_block + memory_facts_block
         )
         
         import time as _time
@@ -913,6 +1092,7 @@ class AgentOrchestrator:
                 tool_name=resolved_name,
                 parameters={},
                 done=bool(data.get("done", False)),
+                search_plan=None,
             )
         except asyncio.TimeoutError:
             duration_ms = (_time.time() - _t0) * 1000
@@ -958,12 +1138,45 @@ class AgentOrchestrator:
                     raw_name, resolved_name,
                 )
 
+        # ── 解析模型声明的搜索覆盖策略（仅外部搜索类工具会用到） ──
+        search_plan = None
+        raw_plan = data.get("search_plan")
+        if isinstance(raw_plan, dict):
+            tiers = raw_plan.get("source_tiers")
+            if isinstance(tiers, list):
+                tiers = [
+                    str(t).strip().lower() for t in tiers
+                    if str(t).strip().lower() in
+                    ("official", "news", "forum", "blog")
+                ]
+            else:
+                tiers = []
+            breadth = str(raw_plan.get("breadth") or "").strip().lower()
+            if breadth not in ("narrow", "medium", "wide"):
+                breadth = ""
+            queries = raw_plan.get("queries")
+            if isinstance(queries, list):
+                queries = [str(q).strip() for q in queries if str(q).strip()]
+            else:
+                queries = []
+            if tiers or breadth or queries:
+                search_plan = {
+                    "source_tiers": tiers,
+                    "breadth": breadth,
+                    "queries": queries,
+                }
+                logger.info(
+                    "[dsh][orchestrator] model-declared search_plan: %r",
+                    search_plan,
+                )
+
         return OrchestratorStep(
             step_index=len(state.history) + 1,
             thought=str(data.get("thought", "")),
             tool_name=resolved_name,
             parameters={},   # ← 参数一律交给 _fill_params
             done=bool(data.get("done", False)),
+            search_plan=search_plan,
         )
 
     # ── 决策校验（策略 B） ──
@@ -1088,6 +1301,7 @@ class AgentOrchestrator:
         state: Optional[OrchestratorState] = None,
         prior_messages: Optional[List[Dict[str, str]]] = None,
         raw_goal: Optional[str] = None,
+        search_plan: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """阶段 2：给单个工具填参数。
 
@@ -1301,6 +1515,41 @@ class AgentOrchestrator:
                 "\"capability\": \"news,sports\", \"limit\": 100}}\n\n"
             )
 
+        # ── 搜索计划块：仅对 web 类工具注入，让 LLM 按计划填参 ──
+        search_plan_block = ""
+        _is_web_tool = (
+            tool_name.startswith("mcp__tavily")
+            or tool_name == "fetch_url"
+            or tool_name.startswith("mcp__fetch")
+        )
+        if _is_web_tool and search_plan:
+            _tiers = search_plan.get("source_tiers") or []
+            _breadth = search_plan.get("breadth") or ""
+            _queries = search_plan.get("queries") or []
+            _lines = ["## 搜索覆盖计划（你上一步声明的，填参时请遵循）"]
+            if _tiers:
+                _lines.append(
+                    f"- 目标来源类型：{_tiers}（official=官方/一手，"
+                    f"news=新闻/媒体，forum=论坛/社区，blog=博客/个人）"
+                )
+            if _breadth:
+                _lines.append(
+                    f"- 覆盖深度：{_breadth}"
+                    f"（narrow=1~2 次，medium=3~5 次，wide=6+ 次）"
+                )
+            if _queries:
+                _lines.append(f"- 计划查询词：{_queries}")
+                _lines.append(
+                    "- **如果工具 schema 支持 `queries` 数组，直接填这个数组；"
+                    "如果只支持单个 `query`，填第一个查询词**，"
+                    "其余由编排层在后续步按计划继续搜。"
+                )
+            _lines.append(
+                "- 如果 schema 有 domain 过滤参数，可把 official 类域名"
+                "（如官方文档站）放进 include_domains。"
+            )
+            search_plan_block = "\n".join(_lines) + "\n\n"
+
         task_text = raw_goal or goal
         prompt = (
             f"## 任务\n{task_text}\n\n"
@@ -1313,6 +1562,7 @@ class AgentOrchestrator:
             f"## 你要调用的工具\n"
             f"`{tool_name}`：{tool_desc}\n\n"
             f"{discovery_block}"
+            f"{search_plan_block}"
             f"## 参数表\n{schema_text}\n\n"
             f"## 路径参数规则（重要）\n"
             f"1. **如果任务里给的路径是相对路径或不完整，"
@@ -1932,10 +2182,14 @@ class AgentOrchestrator:
 
             # 决策要调工具 → 必填参数（渐进式披露第 2 阶段）
             if decision.tool_name and not decision.done:
+                # 记录模型声明的搜索计划（供 _fill_params 和最终呈现使用）
+                if decision.search_plan:
+                    state.last_search_plan = decision.search_plan
                 decision.parameters = await self._fill_params(
                     goal, decision.tool_name, tools, state,
                     prior_messages=prior_messages,
                     raw_goal=raw_goal,
+                    search_plan=decision.search_plan,
                 )
                 logger.info(
                     "[dsh][orchestrator] filled params for %s: %r",
@@ -2015,20 +2269,30 @@ class AgentOrchestrator:
 
             if tool_name not in tools:
                 available = ", ".join(list(tools.keys())[:10])
+                hint = ""
+                if tool_name in self._MCP_DISCOVERY_TOOLS:
+                    hint = (
+                        f"（`{tool_name}` 在当前模式下不可用——"
+                        f"ask / 关闭 discovery 时不扩展外部能力。"
+                        f"请从目录里选实际存在的工具："
+                        f"fetch / http_get / search_knowledge 等）"
+                    )
                 state.add_history(
                     f"Step {step_index}: 尝试调用无效工具 {tool_name}，已忽略。"
-                    f"可用工具（前 10 个）：{available}..."
+                    f"{hint}可用工具（前 10 个）：{available}..."
                 )
                 logger.warning(
-                    "[dsh][orchestrator] unresolved tool name %r; available=%r",
+                    "[dsh][orchestrator] unresolved tool name %r; available=%r; "
+                    "is_discovery=%r",
                     tool_name, list(tools.keys()),
+                    tool_name in self._MCP_DISCOVERY_TOOLS,
                 )
                 yield {
                     "type": "thinking",
                     "step": step_index,
                     "thought": (
                         f"[决策错误] 模型选择了不存在的工具 {tool_name}，已忽略。"
-                        f"可用工具：{available}"
+                        f"{hint}可用工具：{available}"
                     ),
                 }
                 continue
@@ -2176,6 +2440,39 @@ class AgentOrchestrator:
                 _fk = (tool_name, params_key(params))
                 state._consecutive_failures.pop(_fk, None)
 
+                # ── web 结果分桶：记录实际命中的来源类型（供呈现/偏差提示） ──
+                _is_web_tool_now = (
+                    tool_name.startswith("mcp__tavily")
+                    or tool_name == "fetch_url"
+                    or tool_name.startswith("mcp__fetch")
+                )
+                if _is_web_tool_now:
+                    try:
+                        _buckets = self._bucket_web_results(result.result)
+                        state.web_source_buckets = _buckets
+                        _counts = {k: len(v) for k, v in _buckets.items()}
+                        logger.info(
+                            "[dsh][orchestrator] web source buckets: %r",
+                            _counts,
+                        )
+                        _plan = getattr(state, "last_search_plan", None) or {}
+                        _wanted = set(_plan.get("source_tiers") or [])
+                        _missing = _wanted - set(_buckets.keys())
+                        if _wanted and _missing:
+                            state.add_history(
+                                f"Step {step_index} 搜索覆盖提示："
+                                f"计划覆盖 {sorted(_wanted)}，"
+                                f"实际缺少 {sorted(_missing)}"
+                                f"（实际分桶：{_counts}）"
+                            )
+                            logger.info(
+                                "[dsh][orchestrator] search plan deviation: "
+                                "wanted=%r missing=%r actual=%r",
+                                sorted(_wanted), sorted(_missing), _counts,
+                            )
+                    except Exception:
+                        logger.exception("bucket web results failed")
+                        
                 # ── discovery 成功：记录新注册的工具名（供下一步 _decide 补进候选） ──
                 if tool_name in self._MCP_DISCOVERY_TOOLS:
                     try:
@@ -2322,14 +2619,15 @@ class AgentOrchestrator:
 
                 # ── Mem0 写入：工具成功后提取结构化事实 ──
                 try:
-                    from core.memory.mem0_layer import (
-                        remember_tool_success,
-                    )
+                    from core.memory.mem0_layer import remember_tool_success
+                    _meta_for_origin = tools.get(tool_name)
+                    _origin = getattr(_meta_for_origin, "origin", None) or "builtin"
                     remember_tool_success(
                         session_id=state.session_id or "",
                         tool_name=tool_name,
                         params=params,
                         result=result.result,
+                        origin=_origin,
                     )
                 except Exception:
                     logger.exception("remember_tool_success 失败")

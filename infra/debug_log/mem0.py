@@ -129,6 +129,21 @@ def begin_task(
             logger.exception("[dsh][mem0-debug] 清空 events.jsonl 失败")
 
         _current_task.set(ctx)
+
+        # ── 写一条 begin event，保证 events.json 至少非空 ──
+        try:
+            idx = ctx.next_index()
+            record = {
+                "timestamp": datetime.now().isoformat(),
+                "index": idx,
+                "event": "begin",
+                "session_id": sid,
+                "task_id": tid,
+            }
+            _append(ctx, record)
+        except Exception:
+            logger.exception("[dsh][mem0-debug] write begin event failed")
+            
         logger.info(
             "[dsh][mem0-debug] task started: %s / %s", sid, tid,
         )

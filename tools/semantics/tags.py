@@ -113,6 +113,12 @@ _TOOL_INTENT_TAGS_BY_SUFFIX: Dict[str, List[str]] = {
     "search_content": ["search_content"],
     "search_files": ["search_name"],
     "read_file_range": ["read_text"],
+
+    # MCP 搜索/抓取（显式声明，避免依赖 fallback 推断）
+    "tavily_search": ["search_name", "network_read"],
+    "tavily_extract": ["network_read"],
+    "tavily_research": ["search_name", "network_read"],
+    "fetch": ["network_read"],
 }
 
 

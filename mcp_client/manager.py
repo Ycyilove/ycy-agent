@@ -279,11 +279,62 @@ class MCPClientManager:
                 unregister_tool(old_name)
                 self.tools.pop(old_name, None)
 
+        # 只读能力推断：MCP server 不一定声明 readOnlyHint，
+        # 按 remote_name 的语义补一个兜底，避免 ask 模式（只允许 safe）
+        # 把所有搜索/抓取/读取类工具都过滤掉。
+        _READ_ONLY_NAME_HINTS = (
+            "search", "query", "fetch", "extract", "crawl", "map",
+            "read", "get", "list", "info", "stat", "research",
+            "news", "lookup", "find",
+        )
+        _WRITE_NAME_HINTS = (
+            "write", "create", "update", "delete", "remove",
+            "move", "rename", "edit", "patch", "save", "insert",
+            "append", "upload", "post", "put",
+        )
+
+        def _infer_read_only(remote_name: str, declared: bool) -> bool:
+            if declared:
+                return True
+            low = (remote_name or "").lower()
+            if any(h in low for h in _WRITE_NAME_HINTS):
+                return False
+            return any(h in low for h in _READ_ONLY_NAME_HINTS)
+
         for tool in getattr(result, "tools", []):
             raw = tool.model_dump(by_alias=True)
             annotations = raw.get("annotations") or {}
             public_name = f"mcp__{server_name}__{tool.name}"
-            _read_only = bool(annotations.get("readOnlyHint", False))
+            _declared_read_only = bool(annotations.get("readOnlyHint", False))
+            _read_only = _infer_read_only(tool.name, _declared_read_only)
+            if _read_only and not _declared_read_only:
+                logger.info(
+                    "[dsh][mcp] inferred read-only tool: %s (server=%s, "
+                    "no readOnlyHint declared)",
+                    public_name, server_name,
+                )
+            spec = MCPToolSpec(
+                public_name=public_name,
+                server_name=server_name,
+                remote_name=tool.name,
+                description=tool.description or "MCP 外部工具",
+                input_schema=raw.get("inputSchema", {}),
+                read_only_hint=_read_only,
+                idempotent_hint=bool(annotations.get("idempotentHint", False)),
+            )
+            
+        for tool in getattr(result, "tools", []):
+            raw = tool.model_dump(by_alias=True)
+            annotations = raw.get("annotations") or {}
+            public_name = f"mcp__{server_name}__{tool.name}"
+            _declared_read_only = bool(annotations.get("readOnlyHint", False))
+            _read_only = _infer_read_only(tool.name, _declared_read_only)
+            if _read_only and not _declared_read_only:
+                logger.info(
+                    "[dsh][mcp] inferred read-only tool: %s (server=%s, "
+                    "no readOnlyHint declared)",
+                    public_name, server_name,
+                )
             spec = MCPToolSpec(
                 public_name=public_name,
                 server_name=server_name,

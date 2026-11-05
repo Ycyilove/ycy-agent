@@ -115,6 +115,15 @@ def classify_task(goal: str, attachments: Optional[List] = None) -> TaskType:
     ):
         return TaskType.CHITCHAT
 
+    # 1.5 外部事实查询：结构化信号（不靠窄词表）
+    if not has_web:
+        try:
+            from .validator import _looks_like_external_fact_query
+            if _looks_like_external_fact_query(goal):
+                return TaskType.WEB_RESEARCH
+        except Exception:
+            pass
+            
     # 2. 网页检索：有 web 信号优先（后续需要生成由运行时升级）
     if has_web:
         return TaskType.WEB_RESEARCH

@@ -1,0 +1,42 @@
+fix(tools/orchestration): ask 模式接入只读编排并条件化 discovery 引导
+
+ask 模式此前直接跳过编排，模型看不到任何工具，外部事实问题只能回复
+无权限。改为走 orchestrator，仅允许 safe 工具并禁用 discovery；prompt
+按实际工具目录条件化 discovery 段落，无 discovery 时给出 http_get +
+fetch 的降级搜索路径，无效工具反馈补充不可用原因。
+
+---
+
+fix(mcp_client): 按工具语义推断只读，修复只读 MCP 工具被危险等级过滤
+
+MCP server 未声明 readOnlyHint 时，搜索/抓取类工具被注册为 high，
+ask 模式仅允许 safe，导致 tavily、fetch 全部不可见。改为在 discover
+时按 remote_name 语义推断只读：含 search/fetch/extract/crawl 等判为
+safe，含 write/create/delete 等仍为 high，既恢复只读工具可见性，又不
+放宽写类工具。
+
+---
+
+feat(tools/orchestration): 由模型声明搜索覆盖策略并按来源类型分层呈现
+
+搜索是否联网、覆盖哪些来源此前由窄关键词表硬编码，未命中即退化。改为
+在决策阶段由模型输出 search_plan（来源类型、覆盖深度、查询词），填参
+阶段按计划构造查询，结果按官方/媒体/社区/博客分层注入回答上下文，不做
+强制多源校验，仅在计划与实际不符时提示偏差。
+
+---
+
+fix(core/memory): 长期记忆补充用户意图、召回前置与诊断事件
+
+长期记忆仅提取文件路径，普通对话无任何记录，events 为空且无法区分未
+启用与无事实。改为无路径时写入 user_intent，召回前置到决策与回答阶段，
+未启用或去重时记录 skip 事件，工具写入显式传入 origin，begin_task 写
+入 begin 事件。
+
+---
+
+fix(tools/orchestration): 搜索计划注入填参，修正搜索 URL 构造
+
+搜索工具填参阶段未接收 search_plan，模型反复填写同一无效地址。改为将
+search_plan 注入填参提示，对 http_get 特化要求用计划查询词构造
+Bing/DuckDuckGo 搜索地址，连续同参数失败后引导更换工具。

@@ -47,6 +47,14 @@ class OrchestratorState:
     written_paths: set = field(default_factory=set)
     verification_evidence: Optional[dict] = None
 
+    # 模型声明的最近一次搜索覆盖计划
+    # {"source_tiers": [...], "breadth": "...", "queries": [...]}
+    last_search_plan: Optional[dict] = None
+
+    # 最近一次 web 工具返回按来源类型分桶的结果
+    # {"official": [...], "news": [...], "forum": [...], ...}
+    web_source_buckets: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
+
     # 最近 discovery 注册的工具名（供 _decide 补进候选，最多 10 个）
     recent_discovered_tools: set = field(default_factory=set)
 
@@ -135,6 +143,10 @@ class OrchestratorState:
             "read_paths": list(self.read_paths),
             "written_paths": list(self.written_paths),
             "verification_evidence": self.verification_evidence,
+            "last_search_plan": self.last_search_plan,
+            "web_source_buckets": {
+                k: list(v) for k, v in self.web_source_buckets.items()
+            },
             "recent_discovered_tools": list(self.recent_discovered_tools),
             "successful_tool_sequence": list(self.successful_tool_sequence),
             "covered_documents": list(self.covered_documents),
@@ -169,6 +181,11 @@ class OrchestratorState:
         st.read_paths = set(snap.get("read_paths", []))
         st.written_paths = set(snap.get("written_paths", []))
         st.verification_evidence = snap.get("verification_evidence")
+        st.last_search_plan = snap.get("last_search_plan")
+        st.web_source_buckets = {
+            k: list(v)
+            for k, v in (snap.get("web_source_buckets") or {}).items()
+        }
         st.recent_discovered_tools = set(snap.get("recent_discovered_tools", []))
         st.successful_tool_sequence = list(
             snap.get("successful_tool_sequence", [])

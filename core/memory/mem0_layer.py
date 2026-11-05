@@ -312,6 +312,11 @@ def _add_fact(session_id: str, fact: str, fact_type: str) -> None:
             "[mem0] _add_fact 跳过：enabled=%r memory=%r",
             _enabled, _memory is not None,
         )
+        record_skip(
+            reason="mem0_disabled" if not _enabled else "memory_none",
+            tool_name=None,
+            params={"fact_type": fact_type, "fact": (fact or "")[:200]},
+        )
         return
     if not session_id or not fact:
         logger.warning(
@@ -320,10 +325,31 @@ def _add_fact(session_id: str, fact: str, fact_type: str) -> None:
         )
         record_skip(
             reason="empty_session_or_fact",
-            fact=fact, fact_type=fact_type, session_id=session_id,
+            tool_name=None,
+            params={"fact_type": fact_type, "fact": (fact or "")[:200]},
         )
         return
     try:
+        # 去重：同一 session 下同类型同内容只写一次
+        try:
+            existing = _memory.get_all(
+                filters={"user_id": session_id}, limit=200,
+            )
+            for t in _iter_results(existing):
+                if t == fact:
+                    logger.info(
+                        "[mem0] _add_fact 去重跳过: type=%s fact=%r",
+                        fact_type, fact[:120],
+                    )
+                    record_skip(
+                        reason="duplicate_fact",
+                        tool_name=None,
+                        params={"fact_type": fact_type, "fact": fact[:200]},
+                    )
+                    return
+        except Exception:
+            logger.exception("[mem0] dedup check failed, continue add")
+
         logger.info(
             "[mem0] _add_fact 写入: session=%s type=%s fact=%r",
             session_id, fact_type, fact,
@@ -352,7 +378,6 @@ def _add_fact(session_id: str, fact: str, fact_type: str) -> None:
             error=str(exc),
         )
 
-
 # 允许写入 mem0 的工具：内置 + 只读
 _MEM0_WRITABLE_ORIGINS = frozenset({"builtin", "skill"})
 _MEM0_READ_HINTS = ("read", "search", "list", "get", "info", "stats", "knowledge")
@@ -364,12 +389,13 @@ def remember_tool_success(
     params: Dict[str, Any],
     result: Any,
     *,
-    origin: str = "builtin",
+    origin: str,
 ) -> None:
     """工具成功后提取事实。
 
     ⚠️ 安全：只对内置/技能来源、且非写类的工具写 mem0。
     外部 MCP 工具的返回内容不可信，写入会污染后续 prompt。
+    origin 必须由调用方从工具元数据显式传入，不能默认 builtin。
     """
     if not _enabled:
         record_skip(reason="mem0_disabled", tool_name=tool_name, params=params)
@@ -381,13 +407,13 @@ def remember_tool_success(
     # ── origin 过滤：外部 MCP 不写 ──
     if origin not in _MEM0_WRITABLE_ORIGINS:
         record_skip(
-            reason="origin_not_writable", tool_name=tool_name, origin=origin
+            reason="origin_not_writable", tool_name=tool_name,
+            params={"origin": origin, **dict(params or {})},
         )
         return
 
-    # ── 写类工具不写（避免把"删了 X"记成事实） ──
+    # 写类工具不写（避免把"删了 X"记成事实）
     if _is_write_tool(tool_name):
-        # 写类只记 file_modified（这是有用的），但要排除外部 MCP
         params_paths = _extract_paths_from_params(tool_name, params)
         result_paths = _extract_paths_from_result(result)
         for p in _dedup(params_paths + result_paths):
@@ -398,13 +424,37 @@ def remember_tool_success(
     for p in _dedup(_extract_paths_from_params(tool_name, params)):
         _add_fact(session_id, p, "file_path")
 
-
 def remember_user_message(session_id: str, message: str) -> None:
-    """从用户消息提取路径。"""
+    """从用户消息提取路径 + 用户意图。
+
+    设计：
+        - 有路径 → 写 file_path 事实
+        - 无论有无路径 → 写一条 user_intent 事实（消息截断 500 字符）
+        这样普通对话也能进长期记忆，events.json 至少有记录。
+    """
     if not _enabled or not session_id or not message:
+        record_skip(
+            reason="remember_user_message_skipped",
+            tool_name=None,
+            params={
+                "enabled": _enabled,
+                "has_session": bool(session_id),
+                "has_message": bool(message),
+            },
+        )
         return
-    for p in _dedup(_extract_paths_from_text(message)):
+
+    text = (message or "").strip()
+    if not text:
+        return
+
+    # 1. 路径事实
+    for p in _dedup(_extract_paths_from_text(text)):
         _add_fact(session_id, p, "file_path")
+
+    # 2. 用户意图事实（截断 500 字符，避免超长）
+    intent = text[:500]
+    _add_fact(session_id, intent, "user_intent")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -465,6 +515,54 @@ def recall_file_paths(session_id: str, limit: int = 5) -> List[str]:
         return []
 
     # 去重 + 截断
+    out: List[str] = []
+    seen = set()
+    for t in texts:
+        if t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+        if len(out) >= limit:
+            break
+
+    record_recall(session_id=session_id, limit=limit, results=out)
+    return out
+
+def recall_recent_facts(session_id: str, limit: int = 8) -> List[str]:
+    """检索本会话最近的结构化事实（含 user_intent / file_path / file_modified）。
+
+    与 recall_file_paths 的区别：
+        - recall_file_paths 只返回路径，供 _fill_params 用；
+        - recall_recent_facts 返回全部类型事实，供 _decide / 最终回答用。
+    """
+    if not _enabled or _memory is None or not session_id:
+        record_skip(
+            reason="recall_recent_facts_skipped",
+            tool_name=None,
+            params={"enabled": _enabled, "has_session": bool(session_id)},
+        )
+        return []
+
+    texts: List[str] = []
+    try:
+        if hasattr(_memory, "get_all"):
+            try:
+                hits = _memory.get_all(
+                    filters={"user_id": session_id}, limit=limit * 3,
+                )
+            except TypeError:
+                hits = _memory.get_all(user_id=session_id, limit=limit * 3)
+            texts = _iter_results(hits)
+        else:
+            hits = _memory.search(
+                query="recent facts", user_id=session_id, limit=limit * 3,
+            )
+            texts = _iter_results(hits)
+    except Exception:
+        logger.exception("[mem0] recall_recent_facts 失败")
+        record_recall(session_id=session_id, limit=limit, results=[])
+        return []
+
     out: List[str] = []
     seen = set()
     for t in texts:

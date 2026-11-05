@@ -104,14 +104,49 @@ def classify_request(goal: str) -> str:
 
 
 def requires_tool_call(goal: str) -> bool:
-    """判断请求是否必须调用工具。"""
+    """判断请求是否必须调用工具。
+
+    设计原则：
+        - 不再用“网页/新闻/最新”等窄词表决定是否联网；
+        - action/query 仍强制；
+        - 其他情况交给模型自主决策（工具已暴露），
+          这里只对“明确需要外部事实”的结构化信号做强制。
+    """
     kind = classify_request(goal)
     if kind in ("action", "query"):
         return True
-    # 网页检索也强制要求调用工具
-    if is_web_query(goal):
+    # 结构化信号：外部实体 + 历史/时间词 + 事实疑问句式
+    if _looks_like_external_fact_query(goal):
         return True
     return False
+
+
+# ── 结构化信号：外部事实查询 ──
+# 不用“宕机/故障/事件”这类会不断膨胀的词表，
+# 而用「外部实体 + 时间/历史词 + 疑问句式」的组合信号。
+_EXTERNAL_ENTITY_HINTS = (
+    "deepseek", "openai", "claude", "anthropic", "google", "microsoft",
+    "meta", "xai", "grok", "qwen", "通义", "文心", "豆包", "kimi",
+    "公司", "产品", "平台", "服务", "模型", "官网",
+)
+_HISTORY_TIME_HINTS = (
+    "曾经", "历史", "所有", "发生过", "出现过", "哪些", "几次",
+    "过去", "之前", "以前", "至今", "以来",
+)
+_FACT_QUESTION_HINTS = (
+    "吗", "？", "?", "什么", "哪些", "多少", "是否", "有没有",
+)
+
+
+def _looks_like_external_fact_query(goal: str) -> bool:
+    if not goal:
+        return False
+    g = goal.lower()
+    has_entity = any(k in g for k in _EXTERNAL_ENTITY_HINTS)
+    has_time = any(k in g for k in _HISTORY_TIME_HINTS)
+    has_question = any(k in g for k in _FACT_QUESTION_HINTS)
+    # 三选二即可：外部实体 + 时间词，或外部实体 + 疑问句
+    return has_entity and (has_time or has_question)
 
 
 # ─────────────────────────────────────────────────────────────
