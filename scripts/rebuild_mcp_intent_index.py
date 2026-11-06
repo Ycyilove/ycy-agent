@@ -21,7 +21,7 @@ async def _main():
     from mcp_client import MCPClientManager, load_mcp_config
     from mcp_client.dynamic_store import load_all_servers
     from backend.routes.mcp import _resolve_command
-    from tools.mcp_intent_index import build_index
+    from tools.mcp_intent_index import load_or_build_index
 
     configs = load_mcp_config()
     if not configs:
@@ -55,7 +55,7 @@ async def _main():
             except Exception as exc:
                 logger.warning("connect %s failed, skip: %s: %s", name, type(exc).__name__, exc)
 
-        result = build_index(load_all_servers(), manager, get_llm())
+        result = load_or_build_index(manager)
         logger.info("done: %r", result)
     finally:
         try:

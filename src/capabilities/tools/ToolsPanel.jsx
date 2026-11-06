@@ -14,12 +14,25 @@ function normalizeConfig(name, cfg) {
   }
 
   if (cfg.command) {
+    // 生态方言：env 是「变量名 -> 值」的直接映射；
+    // 本项目语义：env_from 是「子进程变量名 -> 本机环境变量名」。
+    // 两者不能直接混用，这里把 env 归一化成 env_from 的「同名引用」，
+    // 并提示用户：env 里的值不会直接注入，需要本机存在同名环境变量。
+    const envFrom = { ...(cfg.env_from || {}) };
+    if (cfg.env && typeof cfg.env === 'object') {
+      for (const key of Object.keys(cfg.env)) {
+        if (!(key in envFrom)) {
+          // 同名引用：期望本机 os.environ 里存在这个变量
+          envFrom[key] = key;
+        }
+      }
+    }
     return {
       name,
       transport: cfg.transport || 'stdio',
       command: cfg.command,
       args: cfg.args || [],
-      env_from: cfg.env_from || {},
+      env_from: envFrom,
       connect_timeout: cfg.connect_timeout ?? 10,
       call_timeout: cfg.call_timeout ?? 30,
       retries: cfg.retries ?? 2,
@@ -33,6 +46,7 @@ function normalizeConfig(name, cfg) {
       transport: cfg.transport || 'http',
       url: cfg.url,
       header_env: cfg.header_env || {},
+      headers: cfg.headers || {},
       connect_timeout: cfg.connect_timeout ?? 10,
       call_timeout: cfg.call_timeout ?? 30,
       retries: cfg.retries ?? 2,
@@ -57,6 +71,9 @@ export default function ToolsPanel({ isOpen, onClose }) {
   const [importUrl, setImportUrl] = useState('');
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState('');
+  // 认证 header（URL 导入时可选）
+  const [authOpen, setAuthOpen] = useState(false);
+  const [authHeaders, setAuthHeaders] = useState([{ name: '', value: '' }]);
   const [refreshing, setRefreshing] = useState(false);
 
   const [autoDiscover, setAutoDiscover] = useState(() => {
@@ -122,10 +139,17 @@ export default function ToolsPanel({ isOpen, onClose }) {
           throw new Error('JSON 格式错误：' + e.message);
         }
 
-        if (parsed && typeof parsed === 'object' && parsed.servers) {
-          // 批量：{"servers": {"name": {...}}}
-          const entries = Object.entries(parsed.servers);
-          if (entries.length === 0) throw new Error('servers 为空');
+        // 兼容两种顶层键：
+        //   { "servers": {...} }      —— 本项目原有方言
+        //   { "mcpServers": {...} }   —— Cursor / Claude Code / DSH 生态通用
+        const serversMap =
+          parsed && typeof parsed === 'object'
+            ? parsed.servers || parsed.mcpServers
+            : null;
+
+        if (serversMap && typeof serversMap === 'object') {
+          const entries = Object.entries(serversMap);
+          if (entries.length === 0) throw new Error('servers / mcpServers 为空');
 
           const failures = [];
           for (const [name, cfg] of entries) {
@@ -146,10 +170,21 @@ export default function ToolsPanel({ isOpen, onClose }) {
         }
       } else {
         // ── URL 形态 ──
-        await addServer(raw);
+        const headers = {};
+        for (const h of authHeaders) {
+          const n = (h.name || '').trim();
+          const v = (h.value || '').trim();
+          if (n && v) headers[n] = v;
+        }
+        const payload = Object.keys(headers).length
+          ? { url: raw, headers }
+          : raw;
+        await addServer(payload);
       }
 
       setImportUrl('');
+      setAuthHeaders([{ name: '', value: '' }]);
+      setAuthOpen(false);
       await Promise.all([reloadMcp(), refreshTools()]);
     } catch (err) {
       setImportError(err.message || '导入失败');
@@ -291,15 +326,15 @@ export default function ToolsPanel({ isOpen, onClose }) {
                   handleImport();
                 }
               }}
-              rows={2}
+              rows={4}
               spellCheck={false}
               placeholder={
                 '粘贴 MCP 地址，或 JSON 配置（Shift+Enter 换行）：\n' +
                 '• URL：https://mcp.example.com/mcp\n' +
                 '• stdio：{"name":"fs","command":"npx","args":["-y","@mcp/server-filesystem","D:/data"]}\n' +
-                '• 批量：{"servers":{...}}'
+                '• 批量：{"mcpServers":{...}} 或 {"servers":{...}}（两种顶层键都支持）'
               }
-              className="min-h-[52px] flex-1 resize-y rounded-md border border-[var(--border)] bg-[var(--surface-2)] px-3 py-1.5 font-mono text-[11px] leading-snug text-[var(--text)] placeholder-[var(--dim)] transition-colors focus:border-[var(--accent)]/60 focus:outline-none"
+              className="h-[96px] w-full flex-1 flex-shrink-0 resize-y rounded-md border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2 font-mono text-[11px] leading-relaxed text-[var(--text)] placeholder-[var(--dim)] transition-colors focus:border-[var(--accent)]/60 focus:outline-none"
             />
             <button
               type="button"
@@ -309,6 +344,75 @@ export default function ToolsPanel({ isOpen, onClose }) {
             >
               {importing ? '导入中…' : '导入'}
             </button>
+          </div>
+
+          {/* 认证 Header（可选，仅 URL 导入生效） */}
+          <div className="rounded-md border border-[var(--border)] bg-[var(--surface-2)]">
+            <button
+              type="button"
+              onClick={() => setAuthOpen((v) => !v)}
+              className="flex w-full items-center justify-between px-3 py-1.5 text-[11px] text-[var(--muted)] hover:text-[var(--text)]"
+            >
+              <span>认证 Header（可选，仅 URL 导入生效）</span>
+              <span className="text-[10px]">{authOpen ? '▾' : '▸'}</span>
+            </button>
+            {authOpen && (
+              <div className="space-y-1.5 border-t border-[var(--border)] px-3 py-2">
+                {authHeaders.map((h, idx) => (
+                  <div key={idx} className="flex items-center gap-1.5">
+                    <input
+                      type="text"
+                      value={h.name}
+                      onChange={(e) => {
+                        const next = [...authHeaders];
+                        next[idx] = { ...next[idx], name: e.target.value };
+                        setAuthHeaders(next);
+                      }}
+                      placeholder="Header 名（如 Authorization）"
+                      className="h-7 w-1/2 rounded border border-[var(--border)] bg-[var(--surface)] px-2 font-mono text-[11px] text-[var(--text)] placeholder-[var(--dim)] focus:border-[var(--accent)]/60 focus:outline-none"
+                    />
+                    <input
+                      type="password"
+                      value={h.value}
+                      onChange={(e) => {
+                        const next = [...authHeaders];
+                        next[idx] = { ...next[idx], value: e.target.value };
+                        setAuthHeaders(next);
+                      }}
+                      placeholder="值（如 Bearer sk-xxx）"
+                      className="h-7 flex-1 rounded border border-[var(--border)] bg-[var(--surface)] px-2 font-mono text-[11px] text-[var(--text)] placeholder-[var(--dim)] focus:border-[var(--accent)]/60 focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setAuthHeaders(
+                          authHeaders.length > 1
+                            ? authHeaders.filter((_, i) => i !== idx)
+                            : [{ name: '', value: '' }]
+                        )
+                      }
+                      className="rounded p-1 text-[var(--dim)] hover:text-[var(--danger)]"
+                      title="删除此 header"
+                    >
+                      <Icon d={I.close} className="h-3 w-3" />
+                    </button>
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  onClick={() =>
+                    setAuthHeaders([...authHeaders, { name: '', value: '' }])
+                  }
+                  className="text-[10px] text-[var(--accent)] hover:underline"
+                >
+                  + 添加 Header
+                </button>
+                <div className="text-[10px] leading-snug text-[var(--dim)]">
+                  提示：Key 走 Header 而非 URL，避免进入日志与配置文件。
+                  若粘贴的 URL 自带 user:pass@ 或 ?token=，后端会自动提取并脱敏。
+                </div>
+              </div>
+            )}
           </div>
 
           {importError && (

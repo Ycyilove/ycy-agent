@@ -80,6 +80,13 @@ _STEP_META: Dict[str, tuple] = {
     "fill_params":            ("2. 填参数",          "orchestrator"),
     "assess_result":          ("2.5 结果评估",       "orchestrator"),
     "tool_call":              ("3. 调用工具",        "tool"),
+    # ── 新增：工具执行回放 + 审批生命周期 ──
+    "tool_exec":              ("3.5 工具执行",       "tool"),
+    "approval_store":         ("3.6 审批存储",       "approval"),
+    "approval_take":          ("3.7 审批消费",       "approval"),
+    "approval_stale":         ("3.8 审批失效",       "approval"),
+    "approval_decision":      ("3.9 审批决策",       "approval"),
+    # ── 原有 ──
     "stream_answer":          ("4. 生成回答",        "answer"),
     "stream_answer_response": ("5. 回答完成",        "answer"),
 }
@@ -260,6 +267,11 @@ _KIND_ORDER = {
     "fill_params": 20,
     "assess_result": 25,
     "tool_call": 30,
+    "tool_exec": 35,
+    "approval_store": 36,
+    "approval_take": 37,
+    "approval_stale": 38,
+    "approval_decision": 39,
     "stream_answer": 40,
     "stream_answer_response": 50,
 }

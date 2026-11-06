@@ -1,11 +1,9 @@
 {
-  "servers": {
+  "mcpServers": {
     "fetch": {
       "transport": "stdio",
       "command": "uvx",
-      "args": [
-        "mcp-server-fetch"
-      ],
+      "args": ["mcp-server-fetch"],
       "connect_timeout": 15,
       "call_timeout": 60,
       "retries": 2
@@ -13,16 +11,17 @@
     "tavily": {
       "transport": "stdio",
       "command": "npx",
-      "args": [
-        "-y",
-        "tavily-mcp@latest"
-      ],
+      "args": ["-y", "tavily-mcp@latest"],
       "env_from": {
-        "TAVILY_API_KEY": "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"
+        "TAVILY_API_KEY": "TAVILY_API_KEY"
       },
       "connect_timeout": 15,
       "call_timeout": 30,
       "retries": 2
+    },
+    "office-worker": {
+      "transport": "stdio",
+      "command": "office-worker-mcp"
     }
   }
 }

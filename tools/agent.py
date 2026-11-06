@@ -104,26 +104,30 @@ class ToolAgent:
     def register_dynamic_tool(
         self, name, description, parameters=None, handler=None,
         input_schema=None, origin="builtin", danger_level="safe",
-        idempotent=False,
+        idempotent=False, essential_when=(),
+        capability_tags=(),
     ):
         from tools.security.trust import assign_trust_level
         trust_level = assign_trust_level(
             name, origin, self._mcp_client_manager,
         )
         logger.info(
-            "[dsh][mcp] register tool: %s (origin=%s, trust=L%d)",
-            name, origin, trust_level,
+            "[dsh][mcp] register tool: %s (origin=%s, trust=L%d, "
+            "essential_when=%r)",
+            name, origin, trust_level, tuple(essential_when or ()),
         )
         self.registry.register_callable(
             handler, name=name, description=description,
             parameters=parameters, input_schema=input_schema,
             origin=origin, danger_level=danger_level,
             idempotent=idempotent, trust_level=trust_level,
+            essential_when=tuple(essential_when or ()),
+            capability_tags=tuple(capability_tags or ()),
         )
         self.tool_descriptions = self.registry.get_tool_descriptions()
         self.llm_intent_recognizer._tool_descriptions_cache = None
         return handler
-        
+          
     def unregister_dynamic_tool(self, name: str) -> bool:
         metadata = self.registry.get_metadata(name)
         if metadata is None or metadata.origin != "mcp":

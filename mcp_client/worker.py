@@ -77,14 +77,34 @@ class MCPWorker:
     async def stop(self) -> None:
         if self._task is None:
             return
+
+        # 1) 尽量优雅：发 __stop__ 让 worker 自己 close 所有连接。
+        #    硬超时 8s，避免 worker 正在处理长 connect 时排队等太久。
         try:
-            await self.call("__stop__")
+            await asyncio.wait_for(self.call("__stop__"), timeout=8.0)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[dsh][mcp] worker stop: __stop__ did not complete in 8s, "
+                "forcing cancel"
+            )
         except Exception:
             logger.exception("停止 MCP worker 失败")
+
+        # 2) 等 worker task 退出，硬超时 5s。
         try:
-            await self._task
-        except Exception:
+            await asyncio.wait_for(self._task, timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[dsh][mcp] worker task did not exit in 5s, cancelling"
+            )
+            self._task.cancel()
+            try:
+                await self._task
+            except (asyncio.CancelledError, Exception):
+                pass
+        except (asyncio.CancelledError, Exception):
             logger.exception("MCP worker task 退出异常")
+
         self._task = None
 
 

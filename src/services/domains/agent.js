@@ -24,13 +24,23 @@ export const streamAgentTask = async ({
   return openSseStream('/api/agent/tasks/stream', data, signal);
 };
 
-export const approveAgentTask = async (taskId, approvalId, action = 'allow', signal) => (
-  openSseStream(
+export const approveAgentTask = async (
+  taskId,
+  approvalId,
+  action = 'allow',
+  signal,
+  sessionId,
+) => {
+  if (!sessionId) {
+    // 前端调用方必须传 sessionId，否则后端 422（session_id 是必填 Form）
+    throw new Error('approveAgentTask: sessionId 不能为空');
+  }
+  return openSseStream(
     `/api/agent/tasks/${taskId}/approve`,
-    formData({ approval_id: approvalId, action }),
+    formData({ approval_id: approvalId, action, session_id: sessionId }),
     signal,
-  )
-);
+  );
+};
 
 export const listAgentTasks = (sessionId) => requestJson(
   `/api/agent/tasks?session_id=${encodeURIComponent(sessionId)}`

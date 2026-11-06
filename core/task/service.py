@@ -205,6 +205,30 @@ class AgentTaskService:
         with self._lock:
             self._purge_expired_locked()
             self._pending[pending.approval_id] = pending
+        logger.info(
+            "[dsh][pending] stored approval %s: task=%s session=%s tool=%s",
+            pending.approval_id, pending.task_id,
+            pending.session_id, pending.tool_call.tool_name,
+        )
+        try:
+            from infra.debug_log.llm import dump_llm_call
+            dump_llm_call(
+                kind="approval_store",
+                prompt="",
+                response=None,
+                tool_name=pending.tool_call.tool_name,
+                extra={
+                    "approval_id": pending.approval_id,
+                    "task_id": pending.task_id,
+                    "session_id": pending.session_id,
+                    "tool_name": pending.tool_call.tool_name,
+                    "params": pending.tool_call.parameters,
+                    "title": pending.title,
+                    "step_index": pending.step_index,
+                },
+            )
+        except Exception:
+            logger.exception("[dsh][pending] dump approval_store failed")
 
         # ── 同步到服务端权威 ApprovalStore（供网关 verify 用） ──
         try:
@@ -242,7 +266,10 @@ class AgentTaskService:
         for aid in expired:
             self._pending.pop(aid, None)
         if expired:
-            logger.info("[dsh][pending] purged %d expired approvals", len(expired))
+            logger.info(
+                "[dsh][pending] purged %d expired approvals: %r",
+                len(expired), expired,
+            )
 
     # ────────── 持久化 ──────────
 
@@ -1320,6 +1347,8 @@ class AgentTaskService:
                 "path": pending.path,
                 "taskId": task_id,
                 "stepId": tool_step_id,
+                # 前端 approve 时必须回传 session_id（后端 Form 必填）
+                "sessionId": session_id,
             }
             waiting_step = self._step(
                 tool_step_id, title, "waiting", "action",
@@ -1512,6 +1541,35 @@ class AgentTaskService:
                         "deleted_at": datetime.now().isoformat(),
                         "size": 0,
                     })
+
+            # ── 落盘工具执行结果（供事后回放） ──
+            try:
+                from infra.debug_log.llm import dump_llm_call
+                _debug = None
+                if isinstance(result.result, dict):
+                    _debug = result.result.get("_debug")
+                dump_llm_call(
+                    kind="tool_exec",
+                    prompt="",
+                    response=json.dumps(
+                        self._strip_bytes(result.result),
+                        ensure_ascii=False, default=str,
+                    ) if result.result is not None else None,
+                    tool_name=tool_call.tool_name,
+                    duration_ms=(result.execution_time * 1000
+                                 if result.execution_time else None),
+                    error=result.error,
+                    extra={
+                        "step": event.get("step"),
+                        "params": tool_call.parameters,
+                        "success": result.success,
+                        "debug": _debug,
+                        "error_type": type(result.error).__name__
+                            if result.error else None,
+                    },
+                )
+            except Exception:
+                logger.exception("[dsh][task_service] dump tool_exec failed")
 
         elif event_type == "done":
             reason = event.get("reason", "done")
@@ -1893,6 +1951,8 @@ class AgentTaskService:
             except Exception:
                 logger.exception("标记任务 cancelled 失败: %s", task_id)
 
+    # ────────── 审批处理 ──────────
+
     async def stream_approval(
         self,
         task_id: str,
@@ -1907,9 +1967,54 @@ class AgentTaskService:
             )
         pending = self._take_pending(approval_id, task_id)
         if pending is None:
-            logger.info("[dsh][task_service] stream_approval: id 已失效，静默忽略")
+            with self._lock:
+                _exists = approval_id in self._pending
+                _owner = (
+                    self._pending[approval_id].task_id
+                    if _exists else None
+                )
+            logger.warning(
+                "[dsh][task_service] stream_approval stale: approval_id=%r "
+                "task_id=%r exists=%r owner_task=%r",
+                approval_id, task_id, _exists, _owner,
+            )
+            try:
+                from infra.debug_log.llm import dump_llm_call
+                dump_llm_call(
+                    kind="approval_stale",
+                    prompt="",
+                    response=None,
+                    extra={
+                        "approval_id": approval_id,
+                        "task_id": task_id,
+                        "exists": _exists,
+                        "owner_task": _owner,
+                    },
+                )
+            except Exception:
+                logger.exception("[dsh][task_service] dump approval_stale failed")
             yield sse_event("done", task_status="stale")
             return
+
+        # ── 拿到 pending：落盘 approval_take ──
+        try:
+            from infra.debug_log.llm import dump_llm_call
+            dump_llm_call(
+                kind="approval_take",
+                prompt="",
+                response=None,
+                tool_name=pending.tool_call.tool_name,
+                extra={
+                    "approval_id": approval_id,
+                    "task_id": task_id,
+                    "session_id": pending.session_id,
+                    "tool_name": pending.tool_call.tool_name,
+                    "action": action,
+                    "params": pending.tool_call.parameters,
+                },
+            )
+        except Exception:
+            logger.exception("[dsh][task_service] dump approval_take failed")
 
         # ── 同步 ApprovalStore 决策（供网关 verify 用） ──
         try:
@@ -1917,6 +2022,25 @@ class AgentTaskService:
             get_approval_store().decide(approval_id, pending.session_id, action)
         except Exception:
             logger.exception("同步 ApprovalStore.decide 失败: %s", approval_id)
+
+        # ── 落盘审批决策 ──
+        try:
+            from infra.debug_log.llm import dump_llm_call
+            dump_llm_call(
+                kind="approval_decision",
+                prompt="",
+                response=None,
+                tool_name=pending.tool_call.tool_name,
+                extra={
+                    "approval_id": approval_id,
+                    "task_id": task_id,
+                    "session_id": pending.session_id,
+                    "action": action,
+                    "allowed": action in {"allow", "allow-always"},
+                },
+            )
+        except Exception:
+            logger.exception("[dsh][task_service] dump approval_decision failed")
 
         if action not in {"allow", "allow-always"}:
             rejected = self._step(
@@ -2053,7 +2177,7 @@ class AgentTaskService:
 
         file_log = self._file_log_entry(tool_call, result)
         if file_log:
-            yield self._emit_file_log(session_id, file_log)
+            yield self._emit_file_log(pending.session_id, file_log)
             # 删除动作且成功 → 额外发 trash 事件
             if file_log["action"] == "delete" and file_log["status"] == "success":
                 trash_id = None

@@ -92,7 +92,16 @@ class ToolMetadata:
     origin: str = "builtin"
     idempotent: bool = False
     resource_kinds: List[str] = field(default_factory=list)
-    trust_level: int = 0                      # ← 新增：0 内置 / 1 静态 MCP / 2 动态 / 3 拒绝
+    trust_level: int = 0                      # 0 内置 / 1 静态 MCP / 2 动态 / 3 拒绝
+    # essential_when: 声明"我在什么意图场景下是必需工具"。
+    # 与 tools.semantics.intent 的标签取交集，非空则被 _select_shortlist 强制保留。
+    # 例：("generate", "presentation") / ("read", "document") / ("db",)
+    essential_when: tuple = ()
+    # capability_tags: 工具能力标签，用于 search_and_connect_mcp 的声明式检索。
+    # 与 essential_when 的区别：essential_when 决定"是否被 shortlist 保底"，
+    # capability_tags 决定"是否被 search_and_connect_mcp 命中"。
+    # 例：("generate", "presentation", "ppt", "slides", "deck")
+    capability_tags: tuple = ()
 
 
 class ToolRegistry:
@@ -113,13 +122,15 @@ class ToolRegistry:
                  parameters: Dict = None, examples: List[str] = None,
                  category: str = "general", danger_level: str = "safe",
                  resource_kinds: List[str] = None,
-                 required: List[str] = None):
+                 required: List[str] = None,
+                 essential_when: tuple = (),
+                 capability_tags: tuple = ()):
         """工具注册装饰器（支持 required 显式声明）"""
         def decorator(func: Callable):
             tool_name = name or func.__name__
             tool_description = description or func.__doc__ or ""
 
-            tool_params = dict(parameters or {})   # 拷一份，避免副作用
+            tool_params = dict(parameters or {})
             inferred_required: List[str] = []
 
             if not tool_params and func.__annotations__:
@@ -140,7 +151,9 @@ class ToolRegistry:
                             inferred_required.append(param_name)
 
             # required 优先级：显式传入 > 注解推断
-            final_required = list(required) if required is not None else inferred_required
+            final_required = (
+                list(required) if required is not None else inferred_required
+            )
 
             # 产出标准 input_schema（幂等）
             input_schema = _build_input_schema(tool_params, final_required)
@@ -149,12 +162,14 @@ class ToolRegistry:
                 func,
                 name=tool_name,
                 description=tool_description,
-                parameters=tool_params,      # 保留扁平形态，向后兼容
+                parameters=tool_params,
                 examples=examples,
                 category=category,
                 danger_level=danger_level,
-                input_schema=input_schema,   # 新增：标准 JSON Schema
+                input_schema=input_schema,
                 resource_kinds=resource_kinds,
+                essential_when=essential_when,
+                capability_tags=capability_tags,
             )
 
             @wraps(func)
@@ -180,7 +195,9 @@ class ToolRegistry:
         idempotent: bool = False,
         resource_kinds: List[str] = None,
         required: List[str] = None,
-        trust_level: int = 0,                 # ← 新增
+        trust_level: int = 0,
+        essential_when: tuple = (),
+        capability_tags: tuple = (),
     ) -> Callable:
         if input_schema is None and parameters:
             input_schema = _build_input_schema(parameters, required)
@@ -198,6 +215,8 @@ class ToolRegistry:
             idempotent=idempotent,
             resource_kinds=list(resource_kinds or []),
             trust_level=trust_level,
+            essential_when=tuple(essential_when or ()),
+            capability_tags=tuple(capability_tags or ()),
         )
         return func
         
@@ -267,10 +286,15 @@ def tool(name: str = None, description: str = "",
          parameters: Dict = None, examples: List[str] = None,
          category: str = "general", danger_level: str = "safe",
          resource_kinds: List[str] = None,
-         required: List[str] = None):
+         required: List[str] = None,
+         essential_when: tuple = (),
+         capability_tags: tuple = ()):
     """工具注册装饰器（简写）
 
     required: 显式声明必填参数名列表。为空时用函数注解推断（无默认值者）。
+    essential_when: 声明"我在什么意图场景下是必需工具"，
+        与 tools.semantics.intent 的标签取交集，非空则被 _select_shortlist 强制保留。
+        例：("generate", "document") / ("read", "spreadsheet") / ("db",)
     """
     return registry.register(
         name=name,
@@ -281,6 +305,8 @@ def tool(name: str = None, description: str = "",
         danger_level=danger_level,
         resource_kinds=resource_kinds,
         required=required,
+        essential_when=essential_when,
+        capability_tags=capability_tags,
     )
 
 

@@ -50,7 +50,7 @@ from infra.lazy_loader import (
     preload_all_in_background,
     get_all_module_status,
 )
-
+from tools.mcp_intent_index import load_or_build_index
 
 # ── 注册重模块为惰性加载 ──
 
@@ -126,9 +126,7 @@ tool_shortlister = None
 local_rag_service = None
 llm_instance = None
 multimodal_client = None
-# ── capability index 重建锁 + task（串行化，避免并发写坏 records.json） ──
-_capability_index_lock: Optional[asyncio.Lock] = None
-_capability_index_task: Optional[asyncio.Task] = None
+
 
 # ─────────────────────────────────────────────────────────────
 # lifespan
@@ -230,6 +228,19 @@ async def app_lifespan(_app: FastAPI):
     mcp_worker = worker
     mcp_client_manager = proxy
 
+    # ── 后台构建 MCP 语义索引（不阻塞启动） ──
+    # 工具集不变时 load_or_build_index 直接加载 records.json（零编码）；
+    # 变了才增量编码新增工具。索引建好前 search_intents 返回空列表，
+    # _select_shortlist 走静态 MCP 兜底（tavily/fetch），降级可接受。
+    async def _build_mcp_index_background():
+        try:
+            await asyncio.to_thread(load_or_build_index, proxy)
+            logger.info("[boot] MCP semantic index ready")
+        except Exception:
+            logger.exception("[boot] MCP semantic index build failed")
+
+    asyncio.create_task(_build_mcp_index_background())
+
     # 注入 discovery context（也用 proxy）
     try:
         from tools import mcp_discovery
@@ -270,21 +281,10 @@ async def app_lifespan(_app: FastAPI):
     mcp_worker = worker
     mcp_client_manager = proxy
 
-    # ── 后台建意图索引（只覆盖已连接 server，不联网） ──
-    schedule_capability_index_rebuild(reason="lifespan_start")
-    
     try:
         yield
     finally:
-        # 取消未完成的索引重建 task，避免退出时挂起
-        if _capability_index_task is not None and not _capability_index_task.done():
-            try:
-                _capability_index_task.cancel()
-                await asyncio.wait_for(_capability_index_task, timeout=2.0)
-            except (asyncio.CancelledError, asyncio.TimeoutError):
-                pass
-            except Exception:
-                logger.exception("取消 capability index task 失败")
+
 
         try:
             if worker is not None:
@@ -394,95 +394,6 @@ def get_multimodal_client():
         multimodal_client = MultimodalService()
     return multimodal_client
 
-# ─────────────────────────────────────────────────────────────
-# capability index 重建
-# ─────────────────────────────────────────────────────────────
-
-def _get_capability_index_lock() -> asyncio.Lock:
-    global _capability_index_lock
-    if _capability_index_lock is None:
-        _capability_index_lock = asyncio.Lock()
-    return _capability_index_lock
-
-
-async def rebuild_capability_index(
-    reason: str = "manual",
-    servers: Optional[Set[str]] = None,
-) -> None:
-    """重建 MCP 意图索引。
-
-    - servers=None：全量重建（首次启动 / 手动）
-    - servers={...}：增量（只处理指定 server）
-    """
-    if mcp_client_manager is None:
-        logger.debug(
-            "[boot] rebuild_capability_index skipped (reason=%s): "
-            "manager not ready",
-            reason,
-        )
-        return
-
-    lock = _get_capability_index_lock()
-    async with lock:
-        try:
-            from scripts.build_capability_index import (
-                build_full, build_incremental,
-            )
-            if servers:
-                await build_incremental(
-                    mcp_client_manager, get_llm(), servers,
-                )
-            else:
-                await build_full(mcp_client_manager, get_llm())
-            logger.info(
-                "[boot] capability index rebuilt (reason=%s, servers=%r)",
-                reason, servers,
-            )
-        except Exception:
-            logger.exception(
-                "[boot] capability index rebuild failed (reason=%s)", reason,
-            )
-
-def schedule_capability_index_rebuild(
-    reason: str = "manual",
-    servers: Optional[Set[str]] = None,
-) -> None:
-    """后台调度一次重建。servers=None 全量，否则增量。
-
-    默认关闭（CAPABILITY_INDEX_ENABLED!=1 时直接返回），
-    避免启动 / MCP 变更时批量调 LLM 抢占主链路配额。
-    """
-    if os.getenv("CAPABILITY_INDEX_ENABLED", "0") != "1":
-        logger.debug(
-            "[boot] capability index rebuild disabled (reason=%s)", reason,
-        )
-        return
-    global _capability_index_task
-    if mcp_client_manager is None:
-        return
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        logger.debug(
-            "[boot] schedule_capability_index_rebuild: no running loop "
-            "(reason=%s)",
-            reason,
-        )
-        return
-
-    prev_task = _capability_index_task
-
-    async def _run(prev: Optional[asyncio.Task]):
-        if prev is not None and not prev.done():
-            try:
-                await prev
-            except Exception:
-                pass
-        await rebuild_capability_index(reason=reason, servers=servers)
-
-    _capability_index_task = loop.create_task(
-        _run(prev_task), name=f"capability-index-rebuild-{reason}",
-    )
     
 # ─────────────────────────────────────────────────────────────
 # knowledge_tools RAG provider

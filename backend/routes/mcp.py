@@ -11,7 +11,7 @@ import shutil
 import subprocess
 
 import logging
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Body, HTTPException
@@ -32,9 +32,16 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────
 
 class AddServerPayload(BaseModel):
-    """URL 导入（原有接口保留）。"""
+    """URL 导入。
+
+    headers: 明文 header 值（如 {"Authorization": "Bearer sk-xxx"}）。
+    推荐让 Key 走 header，而不是塞进 URL query，
+    避免 Key 进日志/历史/配置文件。
+    """
     url: str
     name: str | None = None
+    headers: Optional[Dict[str, str]] = None
+    header_env: Optional[Dict[str, str]] = None
 
 
 class ServerConfigBody(BaseModel):
@@ -43,6 +50,10 @@ class ServerConfigBody(BaseModel):
     支持 stdio / sse / http 三种 transport。
     - stdio: 需要 command，args 可选
     - sse/http: 需要 url
+
+    headers:     明文 header 值（如 {"Authorization": "Bearer sk-xxx"}）
+    header_env:  header 名 -> 本机环境变量名（更安全的引用方式）
+    两者可同时存在，headers 同名时优先。
     """
     name: str
     transport: str = "stdio"
@@ -51,6 +62,7 @@ class ServerConfigBody(BaseModel):
     url: Optional[str] = None
     env_from: Optional[Dict[str, str]] = None
     header_env: Optional[Dict[str, str]] = None
+    headers: Optional[Dict[str, str]] = None
     connect_timeout: float = 10.0
     call_timeout: float = 30.0
     retries: int = 2
@@ -60,6 +72,51 @@ class ServerConfigBody(BaseModel):
 # ─────────────────────────────────────────────────────────────
 # 辅助
 # ─────────────────────────────────────────────────────────────
+
+def _extract_url_credentials(url: str) -> tuple[str, Dict[str, str]]:
+    """从 URL 提取内嵌凭据，返回 (干净URL, 提取出的headers)。
+
+    支持两种形态：
+    - userinfo：https://user:pass@host/path  -> Authorization: Basic ...
+    - query：  https://host/path?api_key=xxx -> X-Api-Key: xxx（保留在 query 里，不提取）
+              但 ?token=/access_token= 等会被提取为 Authorization: Bearer xxx
+
+    提取后 URL 不再含凭据，可安全写日志/落盘。
+    """
+    import base64
+    from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
+
+    headers: Dict[str, str] = {}
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return url, headers
+
+    # 1) userinfo
+    username = parsed.username
+    password = parsed.password
+    if username is not None:
+        raw = f"{username}:{password or ''}"
+        token = base64.b64encode(raw.encode()).decode()
+        headers["Authorization"] = f"Basic {token}"
+
+    # 2) query 里的 token / access_token
+    qsl = parse_qsl(parsed.query, keep_blank_values=True)
+    filtered = []
+    for k, v in qsl:
+        if k.lower() in ("token", "access_token") and v:
+            headers["Authorization"] = f"Bearer {v}"
+            continue  # 从 query 中移除
+        filtered.append((k, v))
+
+    netloc = parsed.hostname or ""
+    if parsed.port:
+        netloc = f"{netloc}:{parsed.port}"
+    clean_url = urlunparse((
+        parsed.scheme, netloc, parsed.path,
+        parsed.params, urlencode(filtered), parsed.fragment,
+    ))
+    return clean_url, headers
 
 def _infer_transport(url: str) -> str:
     parsed = urlparse(url)
@@ -93,6 +150,7 @@ def _config_to_mapping(config: MCPServerConfig) -> dict:
         "url": config.url,
         "env_from": dict(config.env_from),
         "header_env": dict(config.header_env),
+        "headers": dict(config.headers),
         "connect_timeout": config.connect_timeout,
         "call_timeout": config.call_timeout,
         "retries": config.retries,
@@ -233,8 +291,14 @@ def create_mcp_router(
         失败不影响请求。
         """
         try:
-            from backend.app import schedule_capability_index_rebuild
-            schedule_capability_index_rebuild(reason=reason, servers=servers)
+            # MCP server 变更后，后台增量刷新语义索引（不再调旧的 capability index）
+            try:
+                from tools.mcp_discovery import schedule_intent_index_refresh
+                schedule_intent_index_refresh()
+            except Exception:
+                logger.exception(
+                    "[dsh][mcp] schedule intent index refresh failed"
+                )
         except Exception:
             logger.exception(
                 "[dsh][mcp] schedule index rebuild failed (reason=%s)", reason,
@@ -270,9 +334,23 @@ def create_mcp_router(
                 detail="暂不支持从 URL 导入 stdio MCP，请提供 http(s) URL",
             )
 
+        # 从 URL 中提取内嵌凭据（user:pass@ 或 ?api_key=xxx），
+        # 剥离到 headers，避免 Key 进日志和配置文件。
+        url, extracted_headers = _extract_url_credentials(url)
+        merged_headers: Dict[str, str] = {}
+        merged_headers.update(extracted_headers)
+        if payload.headers:
+            merged_headers.update(payload.headers)
+
         try:
             config = MCPServerConfig.from_mapping(
-                name, {"transport": transport, "url": url}
+                name,
+                {
+                    "transport": transport,
+                    "url": url,
+                    "headers": merged_headers,
+                    "header_env": payload.header_env or {},
+                },
             )
         except Exception as exc:
             logger.exception("构造 MCPServerConfig 失败")
@@ -346,6 +424,7 @@ def create_mcp_router(
                     "url": url,
                     "env_from": body.env_from or {},
                     "header_env": body.header_env or {},
+                    "headers": body.headers or {},
                     "connect_timeout": body.connect_timeout,
                     "call_timeout": body.call_timeout,
                     "retries": body.retries,

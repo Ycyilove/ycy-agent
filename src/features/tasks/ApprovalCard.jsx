@@ -9,11 +9,29 @@ export default function ApprovalCard({ approval, taskId, stepId }) {
 
   const resolve = async (requestedAction) => {
     if (resolvedRef.current || busy) return;
-    resolvedRef.current = true;
 
     const resolvedAction = requestedAction === 'save-as' ? 'allow' : requestedAction;
     const currentTaskId = approval.taskId || taskId;
     const currentStepId = approval.stepId || stepId;
+
+    // session_id 后端必填，缺失就 422。先校验再置 resolved，
+    // 避免缺字段时卡片被永久禁用。
+    const sessionId = approval.sessionId || approval.session_id;
+    if (!sessionId) {
+      dispatch({
+        type: 'UPDATE_STEP',
+        taskId: currentTaskId,
+        stepId: currentStepId,
+        patch: {
+          status: 'failed',
+          label: '审批失败：缺少 sessionId（前端未收到 session 上下文）',
+        },
+      });
+      dispatch({ type: 'UPDATE_TASK', id: currentTaskId, patch: { status: 'failed' } });
+      return;
+    }
+
+    resolvedRef.current = true;
     setBusy(true);
 
     // 立刻把 step 状态改成 running，让父组件隐藏卡片
@@ -28,7 +46,13 @@ export default function ApprovalCard({ approval, taskId, stepId }) {
     dispatch({ type: 'RESOLVE_APPROVAL', id: approval.id });
 
     try {
-      const stream = await approveAgentTask(currentTaskId, approval.id, resolvedAction);
+      const stream = await approveAgentTask(
+        currentTaskId,
+        approval.id,
+        resolvedAction,
+        undefined,   // signal 占位
+        sessionId,
+      );
       for await (const event of stream.events()) {
         if (event.type === 'step' && event.step) {
           dispatch({ type: 'UPSERT_STEP', taskId: currentTaskId, step: event.step });

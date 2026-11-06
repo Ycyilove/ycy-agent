@@ -336,22 +336,38 @@ def split_pdf(
     ],
     category="document",
     danger_level="medium",
+    essential_when=("generate", "spreadsheet"),
 )
 def write_excel(
     data: List[Any],
     file_path: str,
     sheet_name: str = "Sheet1",
     columns: Optional[List[str]] = None,
-    overwrite: bool = True,   # ← 默认覆盖
+    overwrite: bool = True,
 ) -> Dict[str, Any]:
     """写 Excel。"""
+    logger.info(
+        "[dsh][write_excel] enter: file_path=%r sheet=%r rows=%d "
+        "columns=%r overwrite=%r",
+        file_path, sheet_name, len(data or []),
+        columns, overwrite,
+    )
+
     if not data:
+        logger.warning("[dsh][write_excel] data empty, abort")
         return {"success": False, "error": "数据为空"}
 
     if not is_safe_path(os.path.abspath(file_path)):
+        logger.warning(
+            "[dsh][write_excel] path protected: %r", file_path,
+        )
         return {"success": False, "error": "路径受保护"}
 
     if os.path.exists(file_path) and not overwrite:
+        logger.warning(
+            "[dsh][write_excel] file exists and overwrite=False: %r",
+            file_path,
+        )
         return {
             "success": False,
             "error": f"文件已存在: {file_path}（设 overwrite=True 覆盖）",
@@ -359,29 +375,71 @@ def write_excel(
 
     try:
         from openpyxl import Workbook
-    except ImportError:
-        return {"success": False, "error": "需要安装 openpyxl: pip install openpyxl"}
+    except ImportError as exc:
+        logger.exception("[dsh][write_excel] openpyxl import failed")
+        return {"success": False, "error": f"需要安装 openpyxl: {exc}"}
 
     try:
+        # ── 数据形态诊断（不改变行为，只打日志） ──
+        first_type = type(data[0]).__name__
+        if isinstance(data[0], dict):
+            logger.info(
+                "[dsh][write_excel] data shape: list[dict], first_keys=%r",
+                list(data[0].keys()),
+            )
+        elif isinstance(data[0], (list, tuple)):
+            logger.info(
+                "[dsh][write_excel] data shape: list[list], first_len=%d",
+                len(data[0]),
+            )
+        else:
+            logger.warning(
+                "[dsh][write_excel] data shape unsupported: first_type=%s "
+                "first_repr=%r",
+                first_type, str(data[0])[:200],
+            )
+            return {
+                "success": False,
+                "error": "数据格式不支持（需 list[dict] 或 list[list]）",
+            }
+
         os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
+        logger.info("[dsh][write_excel] dir ready: %r", os.path.dirname(file_path) or ".")
+
         wb = Workbook()
         ws = wb.active
         ws.title = sheet_name
 
-        # 表头
         if isinstance(data[0], dict):
             if columns is None:
                 columns = list(data[0].keys())
             ws.append(columns)
             for row in data:
                 ws.append([row.get(c) for c in columns])
-        elif isinstance(data[0], (list, tuple)):
+        else:  # list / tuple
             for row in data:
                 ws.append(list(row))
-        else:
-            return {"success": False, "error": "数据格式不支持（需 list[dict] 或 list[list]）"}
 
-        wb.save(file_path)
+        logger.info(
+            "[dsh][write_excel] sheet filled: sheet=%r rows=%d cols=%r, "
+            "saving to %r",
+            sheet_name, len(data), columns, file_path,
+        )
+
+        try:
+            wb.save(file_path)
+        except Exception as save_exc:
+            logger.exception(
+                "[dsh][write_excel] wb.save failed: file_path=%r",
+                file_path,
+            )
+            return {"success": False, "error": f"保存失败: {save_exc}"}
+
+        file_size = os.path.getsize(file_path) if os.path.exists(file_path) else -1
+        logger.info(
+            "[dsh][write_excel] saved: file_path=%r size=%d bytes",
+            file_path, file_size,
+        )
 
         return {
             "success": True,
@@ -390,10 +448,34 @@ def write_excel(
             "rows_written": len(data),
             "columns": columns,
             "message": f"已写入 {len(data)} 行到 {file_path}（sheet={sheet_name}）",
+            "_debug": {
+                "data_shape": (
+                    "list[dict]" if isinstance(data[0], dict) else "list[list]"
+                ),
+                "first_keys": (
+                    list(data[0].keys())
+                    if isinstance(data[0], dict) else None
+                ),
+                "file_size": (
+                    os.path.getsize(file_path)
+                    if os.path.exists(file_path) else -1
+                ),
+                "dir": os.path.dirname(file_path) or ".",
+            },
         }
     except Exception as e:
-        return {"success": False, "error": f"写入失败: {e}"}
-
+        logger.exception(
+            "[dsh][write_excel] unexpected error: file_path=%r", file_path,
+        )
+        return {
+            "success": False,
+            "error": f"写入失败: {e}",
+            "_debug": {
+                "file_path": file_path,
+                "exception_type": type(e).__name__,
+                "dir": os.path.dirname(file_path) or ".",
+            },
+        }
 
 @tool(
     name="edit_excel",
@@ -617,6 +699,7 @@ def read_docx_tables(file_path: str) -> Dict[str, Any]:
     ],
     category="document",
     danger_level="medium",
+    essential_when=("generate", "document"),
 )
 def write_docx(
     paragraphs: List[str],

@@ -24,6 +24,7 @@ import logging
 import os
 from functools import lru_cache
 from typing import Optional
+import threading
 
 from infra.offline import offline_mode
 
@@ -77,9 +78,19 @@ def resolve_local_model_dir(model_name: str) -> Optional[str]:
 
     return None
 
+_LOAD_LOCK = threading.Lock()
+
 
 @lru_cache(maxsize=4)
 def _load_encoder(model_name: str, local_files_only: bool):
+    """实际加载函数；被 get_encoder 缓存。"""
+    # 并发首次加载时串行化，避免多线程各自 SentenceTransformer(...)
+    # （lru_cache 不保证线程安全，三个启动任务可能同时 miss）
+    with _LOAD_LOCK:
+        return _load_encoder_impl(model_name, local_files_only)
+
+
+def _load_encoder_impl(model_name: str, local_files_only: bool):
     """实际加载函数；被 get_encoder 缓存。"""
     from sentence_transformers import SentenceTransformer
 

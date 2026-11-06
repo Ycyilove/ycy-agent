@@ -30,6 +30,8 @@ class MCPToolSpec:
     input_schema: dict
     read_only_hint: bool = False
     idempotent_hint: bool = False
+    essential_when: tuple = ()
+    capability_tags: tuple = ()
 
 
 class MCPClientManager:
@@ -84,11 +86,54 @@ class MCPClientManager:
 
     @staticmethod
     def _headers(config: MCPServerConfig) -> dict[str, str]:
-        return {
-            header: os.environ[environment_name]
-            for header, environment_name in config.header_env.items()
-            if os.getenv(environment_name)
-        }
+        """构造 HTTP 请求头。
+
+        优先级：headers（明文值）> header_env（环境变量引用）。
+        同名时 headers 覆盖 header_env，方便用户用 headers 临时覆盖。
+        """
+        resolved: dict[str, str] = {}
+
+        # 1) 环境变量引用
+        for header, environment_name in config.header_env.items():
+            value = os.getenv(environment_name)
+            if value:
+                resolved[header] = value
+
+        # 2) 明文值（优先级更高）
+        for header, value in config.headers.items():
+            if value:
+                resolved[header] = value
+
+        return resolved
+
+    @staticmethod
+    def _redact_url(url: Optional[str]) -> str:
+        """脱敏 URL，用于日志。
+
+        去掉 userinfo（user:pass@）和 query 里的敏感参数，
+        防止 Key 被打进日志。
+        """
+        if not url:
+            return ""
+        try:
+            from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
+            parsed = urlparse(url)
+            # 去掉 userinfo
+            netloc = parsed.hostname or ""
+            if parsed.port:
+                netloc = f"{netloc}:{parsed.port}"
+            # query 里的敏感 key 替换为 ***
+            _SENSITIVE = ("key", "token", "secret", "password", "auth", "api_key", "apikey")
+            qsl = [
+                (k, "***" if any(s in k.lower() for s in _SENSITIVE) else v)
+                for k, v in parse_qsl(parsed.query, keep_blank_values=True)
+            ]
+            return urlunparse((
+                parsed.scheme, netloc, parsed.path,
+                parsed.params, urlencode(qsl), parsed.fragment,
+            ))
+        except Exception:
+            return "<unparseable-url>"
 
     # ── 安全：stdio MCP 只继承白名单环境变量 ──
     _SAFE_ENV_KEYS = frozenset({
@@ -99,18 +144,32 @@ class MCPClientManager:
 
     @classmethod
     def _stdio_env(cls, config: MCPServerConfig) -> dict[str, str]:
-        safe = {k: v for k, v in os.environ.items() if k in cls._SAFE_ENV_KEYS}
-        safe.update({
-            key: os.environ[env_name]
-            for key, env_name in config.env_from.items()
-            if os.getenv(env_name)
-        })
-        return safe
+        """构造 stdio 子进程的环境变量。
+
+        语义：env_from 是 {子进程变量名: 本机环境变量名}。
+        - 白名单保留运行必需的系统变量（PATH/HOME 等）
+        - env_from 显式注入业务 Key
+        - 若本机不存在对应环境变量，记 warning（便于排查"Key 没生效"）
+        """
+        env: dict[str, str] = {
+            k: v for k, v in os.environ.items() if k in cls._SAFE_ENV_KEYS
+        }
+        for target_name, source_name in config.env_from.items():
+            source_value = os.getenv(source_name)
+            if source_value:
+                env[target_name] = source_value
+            else:
+                logger.warning(
+                    "[dsh][mcp] env_from 未生效: server=%s, "
+                    "子进程变量 %s 期望从本机环境变量 %s 取值，但该变量不存在",
+                    config.name, target_name, source_name,
+                )
+        return env
 
     async def _connect_once(self, config: MCPServerConfig) -> MCPConnection:
         logger.info(
             "[dsh][mcp] _connect_once start: name=%s transport=%s url=%s",
-            config.name, config.transport, config.url,
+            config.name, config.transport, self._redact_url(config.url),
         )
 
         try:
@@ -129,10 +188,13 @@ class MCPClientManager:
             if config.transport == "stdio":
                 from mcp.client.stdio import stdio_client, StdioServerParameters
 
+                # env 只使用白名单 + env_from 注入，不再合并全量 os.environ。
+                # 原因：{**os.environ, **_stdio_env()} 会让白名单失效，
+                # 且容易让人误判 Key 是否真的传给了子进程。
                 params = StdioServerParameters(
                     command=config.command,
                     args=list(config.args),
-                    env={**os.environ, **self._stdio_env(config)},
+                    env=self._stdio_env(config),
                 )
 
                 read_stream, write_stream = await stack.enter_async_context(
@@ -140,7 +202,10 @@ class MCPClientManager:
                 )
                 logger.info("[dsh][mcp] stdio_client ready: %s", config.name)
             elif config.transport == "sse":
-                logger.info("[dsh][mcp] entering sse_client: %s", config.url)
+                logger.info(
+                    "[dsh][mcp] entering sse_client: %s",
+                    self._redact_url(config.url),
+                )
                 read_stream, write_stream = await stack.enter_async_context(
                     sse_client(
                         config.url,
@@ -150,7 +215,10 @@ class MCPClientManager:
                 )
                 logger.info("[dsh][mcp] sse_client ready: %s", config.name)
             else:
-                logger.info("[dsh][mcp] creating AsyncClient: %s", config.url)
+                logger.info(
+                    "[dsh][mcp] creating AsyncClient: %s",
+                    self._redact_url(config.url),
+                )
                 http_client = await stack.enter_async_context(
                     AsyncClient(
                         headers=self._headers(config),
@@ -158,7 +226,8 @@ class MCPClientManager:
                     )
                 )
                 logger.info(
-                    "[dsh][mcp] entering streamable_http_client: %s", config.url,
+                    "[dsh][mcp] entering streamable_http_client: %s",
+                    self._redact_url(config.url),
                 )
                 streams = await stack.enter_async_context(
                     streamable_http_client(
@@ -293,6 +362,70 @@ class MCPClientManager:
             "append", "upload", "post", "put",
         )
 
+        # ── MCP 工具元数据：在循环外定义一次 ──
+        # 按 remote_name 查 essential_when / capability_tags。
+        # 新增 MCP 生成工具时只改这里，不用改 core.py / mcp_discovery.py。
+        _MCP_TOOL_META = {
+            "create_pptx": {
+                "essential_when": ("generate", "presentation"),
+                "capability_tags": (
+                    "generate", "presentation", "ppt", "pptx",
+                    "slide", "slides", "deck", "powerpoint",
+                ),
+            },
+            "create_word": {
+                "essential_when": ("generate", "document"),
+                "capability_tags": (
+                    "generate", "document", "docx", "word", "report",
+                ),
+            },
+            "create_excel": {
+                "essential_when": ("generate", "spreadsheet"),
+                "capability_tags": (
+                    "generate", "spreadsheet", "xlsx", "excel",
+                    "sheet", "table", "csv",
+                ),
+            },
+            "create_book": {
+                "essential_when": ("generate", "document"),
+                "capability_tags": ("generate", "document", "book", "epub"),
+            },
+            "convert_to_pdf": {
+                "capability_tags": ("convert", "pdf"),
+            },
+            "read_office": {
+                "essential_when": ("read",),
+                "capability_tags": ("read", "document", "office"),
+            },
+            "read_pdf": {
+                "essential_when": ("read", "pdf"),
+                "capability_tags": ("read", "pdf", "document"),
+            },
+            "edit_pptx": {
+                "capability_tags": ("modify", "presentation", "ppt"),
+            },
+            "edit_word": {
+                "capability_tags": ("modify", "document", "docx"),
+            },
+            "edit_excel": {
+                "capability_tags": ("modify", "spreadsheet", "excel"),
+            },
+            "write_file": {
+                "essential_when": ("generate",),
+                "capability_tags": ("generate", "file", "write"),
+            },
+            "read_file": {
+                "essential_when": ("read",),
+                "capability_tags": ("read", "file"),
+            },
+            "search": {
+                "capability_tags": ("query", "search", "web"),
+            },
+            "search_news": {
+                "capability_tags": ("query", "search", "news"),
+            },
+        }
+
         def _infer_read_only(remote_name: str, declared: bool) -> bool:
             if declared:
                 return True
@@ -301,6 +434,13 @@ class MCPClientManager:
                 return False
             return any(h in low for h in _READ_ONLY_NAME_HINTS)
 
+        # 用闭包包装 handler，确保空参数调用也能正确传递
+        def _make_handler(pub_name: str):
+            async def _handler(**kwargs):
+                return await self.call_tool(pub_name, kwargs)
+            return _handler
+
+        # ── 单次循环：构造 spec + 写入 self.tools + register_tool ──
         for tool in getattr(result, "tools", []):
             raw = tool.model_dump(by_alias=True)
             annotations = raw.get("annotations") or {}
@@ -313,6 +453,12 @@ class MCPClientManager:
                     "no readOnlyHint declared)",
                     public_name, server_name,
                 )
+
+            # 按 remote_name 查元数据
+            _tool_meta = _MCP_TOOL_META.get((tool.name or "").lower(), {})
+            _essential = _tool_meta.get("essential_when", ())
+            _caps = _tool_meta.get("capability_tags", ())
+
             spec = MCPToolSpec(
                 public_name=public_name,
                 server_name=server_name,
@@ -321,39 +467,13 @@ class MCPClientManager:
                 input_schema=raw.get("inputSchema", {}),
                 read_only_hint=_read_only,
                 idempotent_hint=bool(annotations.get("idempotentHint", False)),
-            )
-            
-        for tool in getattr(result, "tools", []):
-            raw = tool.model_dump(by_alias=True)
-            annotations = raw.get("annotations") or {}
-            public_name = f"mcp__{server_name}__{tool.name}"
-            _declared_read_only = bool(annotations.get("readOnlyHint", False))
-            _read_only = _infer_read_only(tool.name, _declared_read_only)
-            if _read_only and not _declared_read_only:
-                logger.info(
-                    "[dsh][mcp] inferred read-only tool: %s (server=%s, "
-                    "no readOnlyHint declared)",
-                    public_name, server_name,
-                )
-            spec = MCPToolSpec(
-                public_name=public_name,
-                server_name=server_name,
-                remote_name=tool.name,
-                description=tool.description or "MCP 外部工具",
-                input_schema=raw.get("inputSchema", {}),
-                read_only_hint=_read_only,
-                idempotent_hint=bool(annotations.get("idempotentHint", False)),
+                essential_when=_essential,
+                capability_tags=_caps,
             )
             self.tools[public_name] = spec
             server_tools.append(spec)
 
             properties = spec.input_schema.get("properties", {})
-
-            # 用闭包包装 handler，确保空参数调用也能正确传递
-            def _make_handler(pub_name: str):
-                async def _handler(**kwargs):
-                    return await self.call_tool(pub_name, kwargs)
-                return _handler
 
             register_tool(
                 name=spec.public_name,
@@ -364,6 +484,8 @@ class MCPClientManager:
                 origin="mcp",
                 danger_level="safe" if spec.read_only_hint else "high",
                 idempotent=spec.idempotent_hint,
+                essential_when=_essential,
+                capability_tags=_caps,
             )
 
         self.server_tool_names[server_name] = {

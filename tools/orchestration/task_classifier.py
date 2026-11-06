@@ -83,14 +83,15 @@ def _any(text: str, words) -> bool:
 def classify_task(goal: str, attachments: Optional[List] = None) -> TaskType:
     """首步任务分类。返回完成判据族。
 
-    判定顺序（命中即返回）：
-        chitchat → web_research → doc_survey → code_fix
-        → generate → file_op → info_query → 兜底
-
-    Args:
-        goal: 用户原始请求
-        attachments: 附件列表（用于 generate / file_op 的强信号）
+    改为调用 tools.semantics.intent.classify（单一真源）。
+    特殊情况（web/survey/code）保留原来的结构化信号判断。
     """
+    from tools.semantics import (
+        classify_intent,
+        INTENT_GENERATE, INTENT_MODIFY, INTENT_READ, INTENT_QUERY,
+        INTENT_DB, INTENT_CODE, INTENT_TUTORIAL, INTENT_CHITCHAT,
+    )
+
     g = (goal or "").lower().strip()
     n_attach = len(attachments or [])
 
@@ -98,24 +99,15 @@ def classify_task(goal: str, attachments: Optional[List] = None) -> TaskType:
         return TaskType.CHITCHAT
 
     has_path = bool(_PATH.search(g))
-    has_side = _any(g, _SIDE_EFFECT)
-    has_read = _any(g, _READ)
     has_web = _any(g, _WEB)
     has_survey = _any(g, _SURVEY)
-    has_data = bool(_DATA_EXT.search(g))
-    has_code = bool(_CODE_EXT.search(g))
 
-    # 1. chitchat：短句 + 寒暄词 + 无路径 + 无副作用
-    if (
-        g
-        and len(g) < 20
-        and _any(g, _CHITCHAT)
-        and not has_path
-        and not has_side
-    ):
-        return TaskType.CHITCHAT
+    # 1. chitchat：短句 + 寒暄词 + 无路径
+    if g and len(g) < 20 and _any(g, _CHITCHAT) and not has_path:
+        if classify_intent(goal).primary == INTENT_CHITCHAT:
+            return TaskType.CHITCHAT
 
-    # 1.5 外部事实查询：结构化信号（不靠窄词表）
+    # 1.5 外部事实查询：结构化信号
     if not has_web:
         try:
             from .validator import _looks_like_external_fact_query
@@ -123,8 +115,8 @@ def classify_task(goal: str, attachments: Optional[List] = None) -> TaskType:
                 return TaskType.WEB_RESEARCH
         except Exception:
             pass
-            
-    # 2. 网页检索：有 web 信号优先（后续需要生成由运行时升级）
+
+    # 2. 网页检索
     if has_web:
         return TaskType.WEB_RESEARCH
 
@@ -132,27 +124,17 @@ def classify_task(goal: str, attachments: Optional[List] = None) -> TaskType:
     if has_survey:
         return TaskType.DOC_SURVEY
 
-    # 4. 代码修复：代码文件 + 副作用动词
-    if has_code and has_side:
+    # 4~8. 其余走统一意图分类器
+    intent = classify_intent(goal)
+    if intent.primary == INTENT_CODE:
         return TaskType.CODE_FIX
-    # 或"修复/跑测试"类明确指令
-    if (
-        _any(g, _FIX_VERBS)
-        and ("test" in g or "tests" in g or has_path)
-    ):
-        return TaskType.CODE_FIX
-
-    # 5. 内容生成：生成类动词 + 数据文件/附件
-    if _any(g, _GENERATE_VERBS) and (has_data or n_attach):
+    if intent.primary == INTENT_GENERATE:
         return TaskType.GENERATE
-
-    # 6. 文件操作：副作用 + 路径/数据文件/附件
-    if has_side and (has_path or has_data or n_attach):
+    if intent.primary == INTENT_MODIFY:
         return TaskType.FILE_OP
-
-    # 7. 信息查询
-    if has_read:
+    if intent.primary in (INTENT_READ, INTENT_QUERY, INTENT_DB):
         return TaskType.INFO_QUERY
+    if intent.primary in (INTENT_TUTORIAL, INTENT_CHITCHAT):
+        return TaskType.CHITCHAT
 
-    # 8. 兜底
-    return TaskType.FILE_OP if has_side else TaskType.INFO_QUERY
+    return TaskType.INFO_QUERY

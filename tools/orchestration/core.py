@@ -740,53 +740,60 @@ class AgentOrchestrator:
             if not picked:
                 picked.update(builtin_tools)
 
-        # ── 2. MCP 工具：意图索引检索 ──
-        if mcp_tools:
+            # ── 声明式保底：按 intent 标签保留"必需工具" ──
+            # 工具通过 @tool(essential_when=(...)) 或 manager.discover 的推断，
+            # 声明"我在什么意图场景下必需"。这里按 intent.tags + intent.secondary
+            # 做交集保底，不硬编码工具名。
             try:
-                from tools.mcp_intent_index import search_intents
-                hits = search_intents(goal, top_k=15)
-                keep_mcp = set()
-                for h in hits:
-                    for t in h.get("matched_tools", []):
-                        name = t.get("tool_name")
-                        if name in mcp_tools:
-                            keep_mcp.add(name)
-                if keep_mcp:
-                    picked.update({n: mcp_tools[n] for n in keep_mcp})
-                    logger.info(
-                        "[dsh][orchestrator] intent index kept %d/%d MCP tools",
-                        len(keep_mcp), len(mcp_tools),
-                    )
-                else:
-                    # 意图索引无命中：
-                    # 1. 网页/实时信息任务 → 保留静态 MCP（tavily/fetch）
-                    # 2. 本地任务 → 不保留任何 MCP，只留 discovery 入口
-                    # 3. 最近 discovery 注册的由 _decide 补回
-                    goal_low = (goal or "").lower()
-                    is_web_task = self._is_external_fact_query(goal)
-                    if is_web_task:
-                        static_mcp = {
-                            n: m for n, m in mcp_tools.items()
-                            if len(n.split("__", 2)) == 3
-                            and n.split("__", 2)[1] in self._STATIC_MCP_SERVERS
-                        }
-                        if static_mcp:
-                            picked.update(static_mcp)
-                        logger.info(
-                            "[dsh][orchestrator] web task, pass %d static MCP",
-                            len(static_mcp),
-                        )
-                    else:
-                        logger.info(
-                            "[dsh][orchestrator] non-web task, "
-                            "skip static MCP (keep discovery entry only)"
-                        )
+                from tools.semantics import classify_intent
+                _intent = classify_intent(goal or "")
+                _wanted_tags = set(_intent.tags) | set(_intent.secondary)
+                if _wanted_tags:
+                    for _name, _meta in builtin_tools.items():
+                        _ess = getattr(_meta, "essential_when", ()) or ()
+                        if _ess and set(_ess) & _wanted_tags:
+                            if _name not in picked:
+                                picked[_name] = _meta
+                                logger.info(
+                                    "[dsh][orchestrator] essential tool kept: "
+                                    "%s (matched=%r)",
+                                    _name,
+                                    sorted(set(_ess) & _wanted_tags),
+                                )
             except Exception:
                 logger.exception(
-                    "[dsh][orchestrator] intent index failed, "
-                    "fallback by task scene"
+                    "[dsh][orchestrator] essential_when fallback failed"
                 )
-                goal_low = (goal or "").lower()
+
+            # ── last-resort 兜底：写工具强制可见 ──
+            # 防止 @tool 装饰器没传 essential_when 时写工具仍被筛掉。
+            # 等所有写工具都声明了 essential_when 后可以删。
+            _WRITE_FALLBACK = (
+                "write_file", "write_excel", "write_docx",
+                "edit_file", "edit_excel", "edit_docx",
+            )
+            for _name in _WRITE_FALLBACK:
+                if _name in builtin_tools and _name not in picked:
+                    picked[_name] = builtin_tools[_name]
+                    logger.info(
+                        "[dsh][orchestrator] write tool force-kept "
+                        "(fallback): %s", _name,
+                    )
+
+        # ── 2. MCP 工具：语义召回 → 阈值过滤 → capability_tags 精确过滤 ──
+        if mcp_tools:
+            picked_mcp = self._select_mcp_tools_semantic(goal, mcp_tools)
+            if picked_mcp:
+                picked.update(picked_mcp)
+                logger.info(
+                    "[dsh][orchestrator] semantic recall kept %d/%d MCP tools",
+                    len(picked_mcp), len(mcp_tools),
+                )
+            else:
+                # 语义召回无命中（阈值过滤后为空）：
+                # 1. 网页/实时信息任务 → 保留静态 MCP（tavily/fetch）
+                # 2. 本地任务 → 不保留任何 MCP，只留 discovery 入口
+                # 3. 最近 discovery 注册的由 _decide 补回
                 is_web_task = self._is_external_fact_query(goal)
                 if is_web_task:
                     static_mcp = {
@@ -796,6 +803,16 @@ class AgentOrchestrator:
                     }
                     if static_mcp:
                         picked.update(static_mcp)
+                    logger.info(
+                        "[dsh][orchestrator] web task, pass %d static MCP "
+                        "(semantic recall empty)",
+                        len(static_mcp),
+                    )
+                else:
+                    logger.info(
+                        "[dsh][orchestrator] non-web task, "
+                        "skip static MCP (semantic recall empty)"
+                    )
 
         # ── 诊断：web 任务但没有任何 MCP 搜索/抓取工具 ──
         if self._is_external_fact_query(goal):
@@ -825,6 +842,97 @@ class AgentOrchestrator:
                 )
 
         return picked
+
+    def _select_mcp_tools_semantic(
+        self, goal: str, mcp_tools: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """语义召回 + capability_tags 精确过滤。
+
+        流程：
+            1. search_intents 语义召回（阈值过滤在函数内部，min_score=0.5）
+            2. 把聚合结果展开成 {tool_name: meta}
+            3. capability_tags 精确过滤：intent.tags & capability_tags 非空才保留
+               （避免"语义相似但领域不对"的工具混进来，如 create_word 在 PPT 任务里）
+            4. 返回过滤后的工具子集
+
+        任一步失败返回空 dict，由调用方走静态 MCP 兜底。
+        """
+        from tools.mcp_intent_index import search_intents
+
+        # 1. 语义召回（聚合结构：[{server_name, top_score, matched_tools}]）
+        try:
+            from tools.intent_frame.normalizer import IntentNormalizer
+            _frame = IntentNormalizer().normalize(goal or "")
+            hits = search_intents(
+                goal, top_k=20, min_score=0.5, frame=_frame,
+            )
+        except Exception:
+            logger.exception(
+                "[dsh][orchestrator] search_intents failed, "
+                "fallback to static MCP"
+            )
+            return {}
+
+        if not hits:
+            return {}
+
+        # 2. 展开成 {tool_name: score}
+        scored: Dict[str, float] = {}
+        for h in hits:
+            for t in h.get("matched_tools", []):
+                name = t.get("tool_name")
+                if name in mcp_tools:
+                    scored[name] = max(scored.get(name, 0.0), t.get("score", 0.0))
+
+        if not scored:
+            return {}
+
+        # 3. capability_tags 精确过滤
+        #    intent.tags + intent.secondary 和工具的 capability_tags 取交集，
+        #    非空才保留。create_word 在"做 PPT"任务里 tags 有 generate 但
+        #    secondary 只有 presentation —— capability_tags 没 presentation 就剔除。
+        try:
+            from tools.semantics import classify_intent
+            _intent = classify_intent(goal or "")
+            _wanted = set(_intent.tags) | set(_intent.secondary)
+        except Exception:
+            logger.exception(
+                "[dsh][orchestrator] classify_intent failed, "
+                "skip capability_tags filter"
+            )
+            _wanted = set()
+
+        filtered: Dict[str, Any] = {}
+        for name, score in scored.items():
+            meta = mcp_tools[name]
+            if _wanted:
+                caps = set(getattr(meta, "capability_tags", ()) or ())
+                if caps and not (caps & _wanted):
+                    logger.info(
+                        "[dsh][orchestrator] capability_tags reject: %s "
+                        "(caps=%r, wanted=%r, score=%.2f)",
+                        name, sorted(caps), sorted(_wanted), score,
+                    )
+                    continue
+                # caps 为空（工具没声明标签）→ 保留，靠语义分数兜底
+            filtered[name] = meta
+
+        if not filtered:
+            logger.info(
+                "[dsh][orchestrator] capability_tags filtered out all %d "
+                "semantic hits (wanted=%r)",
+                len(scored), sorted(_wanted) if _wanted else [],
+            )
+            return {}
+
+        logger.info(
+            "[dsh][orchestrator] semantic+caps: %d recalled → %d kept "
+            "(wanted=%r, top5=%r)",
+            len(scored), len(filtered),
+            sorted(_wanted) if _wanted else [],
+            sorted(scored.items(), key=lambda kv: -kv[1])[:5],
+        )
+        return filtered
 
     def _assemble_decide_prompt(
         self,
@@ -1195,6 +1303,23 @@ class AgentOrchestrator:
         if not requires_tool_call(goal):
             return None
 
+        # ── 硬拦截：需要工具但一步都没成功执行过 ──
+        # 不依赖 audit 的判据，防止"生成 Excel"这类任务因
+        # classify_request 词表缺口被误判成 smalltalk 而放行。
+        if not state.succeeded_tool_names:
+            logger.info(
+                "[dsh][orchestrator] done rejected: requires_tool_call=True "
+                "but no tool succeeded yet (goal=%r)",
+                goal[:80],
+            )
+            return (
+                "⛔ 校验失败 —— 这个请求必须调用工具才能完成，"
+                "但你还没有成功执行任何工具。\n"
+                "**下一步：从工具目录里选一个能完成目标的工具并调用**，"
+                "不要只描述「可以用 X 完成」。\n"
+                "**知道 ≠ 做过。**只有工具实际执行并返回结果后，才允许 done=true。"
+            )
+
         audit = run_audit(goal, state, evidence=collect_evidence(state))
         if audit.satisfied:
             return None
@@ -1404,6 +1529,13 @@ class AgentOrchestrator:
                 content = (m.get("content") or "").strip()
                 if not content:
                     continue
+                # assistant 原文只保留"已回复"标记：
+                # 上一轮 assistant 的输出可能是幻觉（如"已在 D:/... 生成 xxx"），
+                # 原样放进 fill_params 的 prompt 会污染本轮参数生成。
+                # 只保留 user 原文（截断），assistant 一律脱敏。
+                if role == "assistant":
+                    lines.append("- assistant: （已回复，内容省略）")
+                    continue
                 if len(content) > 400:
                     content = content[:400] + "..."
                 lines.append(f"- {role}: {content}")
@@ -1411,7 +1543,8 @@ class AgentOrchestrator:
                 conversation_block = (
                     "## 对话历史（最近几条）\n"
                     + "\n".join(lines)
-                    + "\n\n"
+                    + "\n\n**注意**：assistant 的历史回复内容已省略，"
+                    "不要假设上一轮执行过任何操作——以当前「已执行步骤」为准。\n\n"
                 )
 
         # ── Mem0 检索：本会话已知文件路径 ──
@@ -1715,6 +1848,12 @@ class AgentOrchestrator:
                 "[dsh][orchestrator] _fill_params params adapted for %s: "
                 "%r → %r",
                 tool_name, data, adapted,
+            )
+        else:
+            logger.info(
+                "[dsh][orchestrator] _fill_params params unchanged for %s: "
+                "keys=%r",
+                tool_name, list(adapted.keys()),
             )
 
         # ── 参数名校验：LLM 可能编造 schema 外的字段 ──
@@ -2020,12 +2159,20 @@ class AgentOrchestrator:
 
         return None
 
-    @staticmethod
-    def _extract_path_from_params(params: Dict[str, Any]) -> Optional[str]:
+    # 输出路径类参数名（写工具常用这些键）
+    _OUTPUT_PATH_KEYS = (
+        "file_path", "path", "output_path", "new_path", "old_path",
+        # 生成类工具常见别名
+        "filename", "file", "output", "save_path", "target_path",
+        "destination", "dest", "out_path",
+    )
+
+    @classmethod
+    def _extract_path_from_params(cls, params: Dict[str, Any]) -> Optional[str]:
         """从参数里抽文件路径，供 read_paths/written_paths 证据用。"""
         if not isinstance(params, dict):
             return None
-        for key in ("file_path", "path", "output_path", "new_path", "old_path"):
+        for key in cls._OUTPUT_PATH_KEYS:
             v = params.get(key)
             if isinstance(v, str) and v.strip():
                 return v.strip()

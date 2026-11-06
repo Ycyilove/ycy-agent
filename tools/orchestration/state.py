@@ -114,14 +114,34 @@ class OrchestratorState:
         return self.failed_calls.get((tool_name, params_key(params)))
 
     def describe_recent_attempts(self, max_items: int = 5) -> str:
-        """给 LLM 展示的"最近已尝试"摘要。"""
+        """给 LLM 展示的"最近已尝试"摘要。
+
+        快照恢复后 successful_calls 的 value 可能是 str（JSON 往返丢失类型），
+        排序前统一转 int，转不了的跳过，避免 TypeError 把整个任务打挂。
+        """
         items = []
-        for key, step in sorted(
-            self.successful_calls.items(), key=lambda kv: kv[1]
-        )[-max_items:]:
+
+        def _as_int(v: Any) -> Optional[int]:
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                return None
+
+        # ── 成功调用：按 step 编号排序 ──
+        success_pairs = []
+        for key, step in self.successful_calls.items():
+            step_int = _as_int(step)
+            if step_int is None:
+                continue
+            success_pairs.append((key, step_int))
+        success_pairs.sort(key=lambda kv: kv[1])
+        for key, step in success_pairs[-max_items:]:
             items.append(f"  ✅ Step {step}: {key[0]}({key[1][:60]})")
+
+        # ── 失败调用：保持原顺序（failed_calls 无 step 编号） ──
         for key, err in list(self.failed_calls.items())[-max_items:]:
             items.append(f"  ❌ {key[0]}({key[1][:60]}) → {err[:80]}")
+
         return "\n".join(items) if items else "  (无)"
 
     # ── 快照 / 恢复（用于审批后的 orchestrator 续跑） ──
@@ -167,10 +187,36 @@ class OrchestratorState:
             task_id=snap.get("task_id"),
         )
         st.history = list(snap.get("history", []))
-        st.successful_calls = {
-            (k[0], k[1]) if isinstance(k, list) else k: v
-            for k, v in snap.get("successful_calls", {})
-        }
+        # ── 重建 successful_calls 的 key ──
+        # 正常路径：key 是 tuple(tool_name, params_json)，value 是 int。
+        # 但快照经过 JSON 往返后可能出现三种形态：
+        #   1. key 是 list（JSON 数组）→ 转 tuple
+        #   2. key 是 "(tool_name, params_json)" 字符串 → ast.literal_eval 转 tuple
+        #   3. key 是其他 str（无法解析）→ 原样保留，下游会跳过
+        def _parse_call_key(k: Any) -> Any:
+            if isinstance(k, list) and len(k) == 2:
+                return (k[0], k[1])
+            if isinstance(k, str) and k.startswith("(") and k.endswith(")"):
+                try:
+                    import ast
+                    parsed = ast.literal_eval(k)
+                    if isinstance(parsed, tuple) and len(parsed) == 2:
+                        return parsed
+                except (ValueError, SyntaxError):
+                    pass
+            return k
+
+        raw_successful = snap.get("successful_calls", {}) or {}
+        st.successful_calls = {}
+        for k, v in raw_successful.items():
+            parsed_key = _parse_call_key(k)
+            # value 统一转 int；转不了保留原值（下游 describe_recent_attempts
+            # 的 _as_int 会兜底跳过，不会崩）
+            try:
+                parsed_value: Any = int(v)
+            except (TypeError, ValueError):
+                parsed_value = v
+            st.successful_calls[parsed_key] = parsed_value
         st.failed_calls = dict(snap.get("failed_calls", {}))
         st.succeeded_tool_names = dict(snap.get("succeeded_tool_names", {}))
         st.last_successful_call_key = snap.get("last_successful_call_key")

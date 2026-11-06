@@ -244,13 +244,28 @@ def run_audit(
                 r.satisfied = True
                 r.evidence = f"written: {sorted(evidence['written_paths'])}"
             else:
-                # 写尝试过但失败：不视为满足，但记录
-                write_failed = any(
-                    _looks_like_write_tool(name)
-                    for name in evidence["failed_calls"]
-                )
-                if write_failed:
-                    r.evidence = "写操作尝试过但失败"
+                # 兜底：写类工具成功但没记录到路径（如返回 bytes、
+                # 或路径参数名不在 _OUTPUT_PATH_KEYS 里）。
+                # 只要写类工具成功执行过，就视为 modify 满足，
+                # 避免因路径采集不全导致 done 被反复拒绝。
+                write_succeeded = [
+                    name for name in evidence["succeeded_tools"]
+                    if _looks_like_write_tool(name)
+                ]
+                if write_succeeded:
+                    r.satisfied = True
+                    r.evidence = (
+                        f"写类工具已成功（未记录路径）: "
+                        f"{write_succeeded[:5]}"
+                    )
+                else:
+                    # 写尝试过但失败：不视为满足，但记录
+                    write_failed = any(
+                        _looks_like_write_tool(name)
+                        for name in evidence["failed_calls"]
+                    )
+                    if write_failed:
+                        r.evidence = "写操作尝试过但失败"
 
         elif r.kind == "read":
             target = extract_target_files(goal, state)
@@ -288,7 +303,6 @@ def run_audit(
     missing.sort(key=lambda r: _GAP_PRIORITY.get(r.kind, 9))
     first = missing[0]
 
-    first = missing[0]
     return AuditResult(
         satisfied=False,
         requirements=reqs,

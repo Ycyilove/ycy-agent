@@ -11,33 +11,6 @@ import re
 from tools.semantics.tags import get_intent_tags
 
 
-# 副作用动词
-_SIDE_EFFECT_VERBS = (
-    "创建", "新建", "写入", "写一个", "写个", "编辑", "修改", "改",
-    "修复", "修正", "改正", "更正", "补充", "补齐", "增加", "添加",
-    "移动", "重命名", "删除", "移除", "复制", "拷贝",
-    "create", "write", "edit", "modify", "move", "rename",
-    "delete", "remove", "copy", "mkdir",
-    "fix", "repair", "patch", "correct", "update",
-)
-
-# 读取动词
-_READ_VERBS = (
-    "读取", "查看", "打开", "读取内容", "看", "显示", "列出", "列一下",
-    "搜索", "查找", "找一下", "统计", "计算",
-    "read", "view", "open", "show", "list", "search", "find",
-    "count", "calculate",
-)
-
-# "教程"类表述
-_TUTORIAL_PHRASES = (
-    "怎么做", "如何", "教程", "命令是", "怎么用", "教我",
-    "how to", "tutorial", "command",
-)
-
-_PATH_PATTERN = re.compile(r"[A-Za-z]:[\\/]|\.\w{1,5}\b|/[A-Za-z]")
-
-
 # ── MCP 工具名兜底 tag 推断 ──
 # registry 里 MCP 工具可能没有 tags（tags.py 只覆盖内置工具基名）。
 # 这里按 remote_name 的后缀/子串推断一个粗 tag，供完成度校验用。
@@ -78,48 +51,51 @@ def _tool_tags(tool_name: str) -> List[str]:
 def classify_request(goal: str) -> str:
     """把请求分类成 action / query / tutorial / smalltalk。
 
-    - action:    有副作用（创建/修改/删除/移动）
-    - query:     只读（列出/读取/搜索/统计）
-    - tutorial:  只是询问方法
-    - smalltalk: 闲聊
+    改为调用 tools.semantics.intent.classify（单一真源）。
+    保留原返回字符串，兼容下游调用方。
     """
-    if not goal:
-        return "smalltalk"
+    from tools.semantics import (
+        classify_intent,
+        INTENT_GENERATE, INTENT_MODIFY, INTENT_READ, INTENT_QUERY,
+        INTENT_DB, INTENT_CODE, INTENT_TUTORIAL,
+    )
 
-    goal_lower = goal.lower()
+    intent = classify_intent(goal or "")
+    primary = intent.primary
 
-    if any(p in goal_lower for p in _TUTORIAL_PHRASES):
-        return "tutorial"
-
-    has_path = bool(_PATH_PATTERN.search(goal))
-    has_side_effect = any(v in goal_lower for v in _SIDE_EFFECT_VERBS)
-    has_read = any(v in goal_lower for v in _READ_VERBS)
-
-    if has_side_effect and (has_path or len(goal) > 5):
+    if primary in (INTENT_GENERATE, INTENT_MODIFY, INTENT_CODE):
         return "action"
-    if has_read and (has_path or "文件" in goal or "目录" in goal):
+    if primary in (INTENT_READ, INTENT_QUERY, INTENT_DB):
         return "query"
-
+    if primary == INTENT_TUTORIAL:
+        return "tutorial"
     return "smalltalk"
 
 
 def requires_tool_call(goal: str) -> bool:
     """判断请求是否必须调用工具。
 
-    设计原则：
-        - 不再用“网页/新闻/最新”等窄词表决定是否联网；
-        - action/query 仍强制；
-        - 其他情况交给模型自主决策（工具已暴露），
-          这里只对“明确需要外部事实”的结构化信号做强制。
+    改为调用 tools.semantics.intent.classify（单一真源）。
+    只要 primary 是任何非 tutorial/chitchat 的意图，就要求工具调用。
     """
-    kind = classify_request(goal)
-    if kind in ("action", "query"):
+    from tools.semantics import (
+        classify_intent,
+        INTENT_GENERATE, INTENT_MODIFY, INTENT_READ, INTENT_QUERY,
+        INTENT_DB, INTENT_CODE,
+    )
+
+    intent = classify_intent(goal or "")
+    if intent.primary in {
+        INTENT_GENERATE, INTENT_MODIFY, INTENT_READ,
+        INTENT_QUERY, INTENT_DB, INTENT_CODE,
+    }:
         return True
-    # 结构化信号：外部实体 + 历史/时间词 + 事实疑问句式
+
+    # 外部事实查询（保留原结构化信号，不走 intent.py）
     if _looks_like_external_fact_query(goal):
         return True
-    return False
 
+    return False
 
 # ── 结构化信号：外部事实查询 ──
 # 不用“宕机/故障/事件”这类会不断膨胀的词表，
@@ -152,13 +128,6 @@ def _looks_like_external_fact_query(goal: str) -> bool:
 # ─────────────────────────────────────────────────────────────
 # 网页检索完成度检查
 # ─────────────────────────────────────────────────────────────
-
-# 网页检索信号词
-_WEB_SIGNALS = (
-    "网页", "页面", "网站", "网址", "链接", "榜单", "排行榜",
-    "新闻", "最新", "实时", "动态", "热搜",
-    "web", "page", "website", "url", "link", "news", "latest",
-)
 
 
 def is_web_query(goal: str) -> bool:

@@ -467,6 +467,58 @@ async def search_and_connect_mcp(
         config_for_entry,
     )
 
+    manager = _get_manager()
+
+    # ── 0. 声明式能力标签匹配（优先，零 LLM 调用） ──
+    # 工具通过 @tool(capability_tags=(...)) 或 manager.discover 的推断，
+    # 声明"我能做什么"。这里按 intent 标签和 capability_tags 交集匹配。
+    # 命中就直接返回，不查 records.json，不调 LLM。
+    try:
+        from tools.semantics import classify_intent
+        _intent = classify_intent(user_query or "")
+        _wanted = set(_intent.tags) | set(_intent.secondary)
+        if _wanted:
+            _matched = []
+            for _spec in manager.tools.values():
+                _caps = set(getattr(_spec, "capability_tags", ()) or ())
+                _overlap = _caps & _wanted
+                if _overlap:
+                    _matched.append((len(_overlap), _spec))
+            if _matched:
+                _matched.sort(key=lambda x: -x[0])
+                _best = _matched[0][1]
+                _srv = _best.server_name
+                if _srv not in manager.connections:
+                    logger.info(
+                        "[dsh][discovery] capability_tags match, "
+                        "connecting: %s", _srv,
+                    )
+                    await manager.connect(_srv)
+                    await manager.discover(_srv, _register_tool, _unregister_tool)
+                _tools = [
+                    s.public_name for s in manager.tools.values()
+                    if s.server_name == _srv
+                ]
+                _matched_tags = sorted(
+                    set(getattr(_best, "capability_tags", ()) or ()) & _wanted
+                )
+                logger.info(
+                    "[dsh][discovery] capability_tags hit: server=%s "
+                    "matched=%r", _srv, _matched_tags,
+                )
+                return {
+                    "success": True,
+                    "server": _srv,
+                    "description": f"(capability_tags match: {_matched_tags})",
+                    "transport": manager.configs[_srv].transport,
+                    "url": manager.configs[_srv].url,
+                    "tools": _tools,
+                    "message": _format_tools_for_message(_tools),
+                    "source": "capability_tags",
+                }
+    except Exception:
+        logger.exception("[dsh][discovery] capability_tags match failed")
+
     # ── 0. 本地意图索引优先 ──
     local_hits: List[Dict[str, Any]] = []
     if user_query and user_query.strip():
@@ -489,8 +541,6 @@ async def search_and_connect_mcp(
             )
         except Exception:
             logger.exception("[dsh][discovery] intent index search failed")
-
-    manager = _get_manager()
 
     # ── 1. 本地命中且已配置 → 直接连 ──
     if local_hits:
@@ -800,15 +850,18 @@ async def search_and_connect_mcp(
     }
 
 
-# ── 异步意图索引刷新（不阻塞 discovery 返回） ──
+# ── 异步索引刷新（不阻塞 discovery 返回） ──
 
 _intent_index_refresh_lock: Optional[asyncio.Lock] = None
 
 
 def _schedule_intent_index_refresh() -> None:
-    """连接成功后，后台为新 server 建意图索引。
+    """连接成功后，后台为新 server 增量重建索引。
 
-    不阻塞当前协程；用 to_thread 把 LLM 合成 + 向量化放到线程池。
+    重构后：底层走 mcp_intent_index.load_or_build_index（本地 embedding +
+    增量更新），不再调 LLM 合成意图。工具集变了自动增量编码新增工具。
+
+    不阻塞当前协程；用 to_thread 把编码 + FAISS 重建放到线程池。
     失败只记日志，不影响 discovery 结果。
     """
     global _intent_index_refresh_lock
@@ -818,18 +871,9 @@ def _schedule_intent_index_refresh() -> None:
     async def _do_refresh():
         async with _intent_index_refresh_lock:
             try:
-                from .mcp_intent_index import build_index
-                from mcp_client.dynamic_store import load_all_servers
+                from .mcp_intent_index import load_or_build_index
                 manager = _get_manager()
-                llm = _llm_provider() if _llm_provider else None
-                if llm is None:
-                    logger.info(
-                        "[dsh][discovery] no LLM, skip intent index refresh",
-                    )
-                    return
-                await asyncio.to_thread(
-                    build_index, load_all_servers(), manager, llm,
-                )
+                await asyncio.to_thread(load_or_build_index, manager)
                 logger.info("[dsh][discovery] intent index refreshed")
             except Exception:
                 logger.exception(
@@ -841,3 +885,6 @@ def _schedule_intent_index_refresh() -> None:
     except RuntimeError:
         # 没有 running loop（同步上下文）→ 跳过
         logger.debug("[dsh][discovery] no running loop, skip index refresh")
+
+# 公开别名（供 backend/routes/mcp.py 等外部调用）
+schedule_intent_index_refresh = _schedule_intent_index_refresh

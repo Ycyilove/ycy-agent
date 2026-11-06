@@ -75,12 +75,40 @@ export function MCPProvider({ children }) {
     await refresh();
   }, [refresh]);
 
-  /** URL 导入（原有） */
-  const addServer = useCallback(async (url) => {
+  /** URL 导入：兼容 string 与 { url, headers, header_env, name } */
+  const addServer = useCallback(async (urlOrPayload) => {
+    const payload =
+      typeof urlOrPayload === 'string'
+        ? { url: urlOrPayload }
+        : { ...(urlOrPayload || {}) };
+
+    if (!payload.url || !String(payload.url).trim()) {
+      throw new Error('缺少 url');
+    }
+    payload.url = String(payload.url).trim();
+
+    // 过滤空 header，避免后端存空字符串
+    if (payload.headers && typeof payload.headers === 'object') {
+      const cleaned = Object.fromEntries(
+        Object.entries(payload.headers).filter(
+          ([k, v]) => k && v !== undefined && v !== null && String(v) !== ''
+        )
+      );
+      if (Object.keys(cleaned).length > 0) payload.headers = cleaned;
+      else delete payload.headers;
+    }
+    if (payload.header_env && typeof payload.header_env === 'object') {
+      const cleaned = Object.fromEntries(
+        Object.entries(payload.header_env).filter(([k, v]) => k && v)
+      );
+      if (Object.keys(cleaned).length > 0) payload.header_env = cleaned;
+      else delete payload.header_env;
+    }
+
     const res = await fetch(`${API_BASE}/api/mcp/servers`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url }),
+      body: JSON.stringify(payload),
     });
     if (!res.ok) throw await parseError(res, '添加失败');
     return res.json();
