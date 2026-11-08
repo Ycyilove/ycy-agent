@@ -30,7 +30,14 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
-from backend.config import MEM0_ENABLED, MEM0_API_KEY, MEM0_CONFIG
+from core import ports
+
+
+def _mem0_cfg():
+    cfg = ports.get_config()
+    if cfg is None:
+        raise RuntimeError("core.ports.config 未注入")
+    return cfg
 from infra.embedding import resolve_local_model_dir
 
 from infra.debug_log.mem0 import (
@@ -238,7 +245,7 @@ def init_mem0() -> bool:
             logger.info("[mem0] init done in %.1fs (enabled=False)", elapsed)
         return ok
 
-    if not MEM0_ENABLED:
+    if not getattr(_mem0_cfg(), "MEM0_ENABLED", True):
         logger.info("[mem0] MEM0_ENABLED=false，结构化记忆关闭")
         _enabled = False
         return _finish(False)

@@ -1,0 +1,21 @@
+B4 完成于 2026-11-08 23:55:18
+
+改动：
+- backend/routes/agent.py::approve_agent_task 删重复 store.decide（10 行）
+  审批唯一真源 = core.task.service::stream_approval（service.py:1821）
+- 新增 tests/test_approval_single_source.py（8 个测试，全 PASSED）
+
+验收：
+- 8 个审批单测全 PASSED
+- routes/agent.py 已无 store.decide
+- service.py 唯一 decide 保持
+- approve 路由 + stream 调用完整
+- b0 / b1 仍绿
+- deps 仍 2 条（B4 不动 deps）
+
+B0-B4 累计：
+- B0: 9 个 bug 修复（time/os/NameError/重复 except/TTL 统一/verify 接入）
+- B1: core/task/answer/ 8 文件，_stream_answer 287 -> 44 行
+- B2: core/ports.py + bootstrap/，deps 7 -> 2
+- B3: fallback_search 走 SearchPort
+- B4: 审批唯一真源 + 8 个单测

@@ -1,0 +1,23 @@
+B8-b 完成于 2026-11-09 00:15:58
+
+新增：
+- tools/orchestration/fill_params.py（FillParamsMixin，~516 行）
+
+改动：
+- tools/orchestration/core.py 从 1803 行 -> ~1287 行（删 516 行）
+  - 删 _fill_params（L458-L973）
+  - class AgentOrchestrator(DecisionMixin) -> class AgentOrchestrator(DecisionMixin, FillParamsMixin)
+  - 顶部 from .fill_params import FillParamsMixin
+
+验收：
+- bases: ['DecisionMixin', 'FillParamsMixin']
+- _fill_params removed
+- 19 methods in core.py
+- 手动 _fill_params 测试通过（noop + read_text_file）
+- b0 / b1 仍绿
+
+B8 进度：
+- B8-a: decision.py ✅（1803 行）
+- B8-b: fill_params.py ✅（~1287 行）
+- B8-c: assess.py（待做，3 个评估方法：_assess_result / _validate_done / _collect_verification）
+- B8-d: run.py（待做，主循环 + 辅助）

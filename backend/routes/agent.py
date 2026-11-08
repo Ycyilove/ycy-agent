@@ -3,6 +3,8 @@
 import json
 import logging
 import os
+
+import time
 from typing import Any, Callable, Dict, List, Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
@@ -142,16 +144,6 @@ def create_agent_router(
         if not task or task.get('session_id') != session_id:
             raise HTTPException(status_code=404, detail='任务不存在')
 
-        # 服务端权威审批状态
-        from tools.security.approval import get_approval_store
-        store = get_approval_store()
-        consumed = store.decide(approval_id, session_id, action)
-        if not consumed:
-            # 已消费 / 过期 / session 不符 → 视为 stale，走原 stream_approval 的 stale 分支
-            logger.warning(
-                "[approve] approval %s 已失效或不属于 session %s",
-                approval_id, session_id,
-            )
 
         stream = task_service_provider().stream_approval(
             task_id, approval_id, action

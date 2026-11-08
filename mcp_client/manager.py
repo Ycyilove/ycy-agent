@@ -475,12 +475,6 @@ class MCPClientManager:
                     "[dsh][mcp] infer_essential_when failed for %s", tool.name,
                 )
                 _essential = ()
-            except Exception:
-                logger.exception(
-                    "[dsh][mcp] infer_essential_when failed for %s", tool.name,
-                )
-                _essential = ()
-
             spec = MCPToolSpec(
                 public_name=public_name,
                 server_name=server_name,

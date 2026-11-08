@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+
+import os
 import re
 from contextvars import ContextVar
 from typing import Any, Callable, Dict, FrozenSet, List, Optional, Set
@@ -413,9 +415,7 @@ def _format_tools_for_message(tools: List[str]) -> str:
         "if it is missing or paraphrased, discovery degrades badly.\n\n"
         "**`capability` is a FALLBACK**: only used when the local intent "
         "index has no hit. Must be English keywords, comma-separated, "
-        "ordered from most specific to most general. Use generic word roots "
-        "that MCP authors put in package names — not literal translations. "
-        "**NEVER pass Chinese in `capability`.**\n\n"
+        "ordered from most specific to most general.\n\n"
         "**IMPORTANT: Each call picks a DIFFERENT candidate.** "
         "Servers already connected in this session are excluded from future "
         "searches. If the currently connected server does NOT match the "
@@ -431,8 +431,6 @@ def _format_tools_for_message(tools: List[str]) -> str:
             "description": (
                 "**必填**。用户的**原始问题原文**，保持用户的语言（中文可以），"
                 "逐字照抄，不要翻译、不要改写、不要总结。"
-                "例：用户说'实时查询维尼斯当前状态以及外界评价'，"
-                "就填'实时查询维尼斯当前状态以及外界评价'。"
             ),
         },
         "capability": {
@@ -461,393 +459,18 @@ async def search_and_connect_mcp(
     capability: str = "",
     limit: int = 100,
 ) -> Dict[str, Any]:
-    """Search local intent index first, then registry, rank, connect."""
-    from mcp_client.registry_client import (
-        search_configs_multi,
-        config_for_entry,
+    """搜索 Registry + 连接候选（B7-c 薄壳）。
+
+    委托给 tools.capability.pipeline.search_and_connect_mcp（registry 模式 7 阶段）。
+    """
+    from tools.capability.pipeline import (
+        search_and_connect_mcp as _impl,
     )
-
-    manager = _get_manager()
-
-    # ── 0. 声明式能力标签匹配（优先，零 LLM 调用） ──
-    # 工具通过 @tool(capability_tags=(...)) 或 manager.discover 的推断，
-    # 声明"我能做什么"。这里按 intent 标签和 capability_tags 交集匹配。
-    # 命中就直接返回，不查 records.json，不调 LLM。
-    try:
-        from tools.semantics import classify_intent
-        _intent = classify_intent(user_query or "")
-        _wanted = set(_intent.tags) | set(_intent.secondary)
-        if _wanted:
-            _matched = []
-            for _spec in manager.tools.values():
-                _caps = set(getattr(_spec, "capability_tags", ()) or ())
-                _overlap = _caps & _wanted
-                if _overlap:
-                    _matched.append((len(_overlap), _spec))
-            if _matched:
-                _matched.sort(key=lambda x: -x[0])
-                _best = _matched[0][1]
-                _srv = _best.server_name
-                if _srv not in manager.connections:
-                    logger.info(
-                        "[dsh][discovery] capability_tags match, "
-                        "connecting: %s", _srv,
-                    )
-                    await manager.connect(_srv)
-                    await manager.discover(_srv, _register_tool, _unregister_tool)
-                _tools = [
-                    s.public_name for s in manager.tools.values()
-                    if s.server_name == _srv
-                ]
-                _matched_tags = sorted(
-                    set(getattr(_best, "capability_tags", ()) or ()) & _wanted
-                )
-                logger.info(
-                    "[dsh][discovery] capability_tags hit: server=%s "
-                    "matched=%r", _srv, _matched_tags,
-                )
-                return {
-                    "success": True,
-                    "server": _srv,
-                    "description": f"(capability_tags match: {_matched_tags})",
-                    "transport": manager.configs[_srv].transport,
-                    "url": manager.configs[_srv].url,
-                    "tools": _tools,
-                    "message": _format_tools_for_message(_tools),
-                    "source": "capability_tags",
-                }
-    except Exception:
-        logger.exception("[dsh][discovery] capability_tags match failed")
-
-    # ── 0. 本地意图索引优先 ──
-    local_hits: List[Dict[str, Any]] = []
-    if user_query and user_query.strip():
-        try:
-            from .mcp_intent_index import search_intents
-            from tools.intent_frame.normalizer import IntentNormalizer
-            _frame = IntentNormalizer().normalize(user_query.strip())
-            local_hits = search_intents(
-                user_query.strip(), top_k=10, frame=_frame,
-            )
-            logger.info(
-                "[dsh][discovery] intent index hits: %d servers "
-                "(frame domain=%s, action=%s)",
-                len(local_hits), _frame.domain, _frame.action,
-            )
-            logger.info(
-                "[dsh][discovery] intent index hits: %d servers (%r)",
-                len(local_hits),
-                [h["server_name"] for h in local_hits[:3]],
-            )
-        except Exception:
-            logger.exception("[dsh][discovery] intent index search failed")
-
-    # ── 1. 本地命中且已配置 → 直接连 ──
-    if local_hits:
-        for hit in local_hits:
-            srv = hit["server_name"]
-            if srv in manager.configs:
-                local_name = srv
-                if local_name in manager.connections:
-                    tools = [
-                        spec.public_name
-                        for spec in manager.tools.values()
-                        if spec.server_name == local_name
-                    ]
-                    return {
-                        "success": True,
-                        "server": srv,
-                        "description": "(local intent index hit)",
-                        "transport": manager.configs[srv].transport,
-                        "url": manager.configs[srv].url,
-                        "tools": tools,
-                        "message": _format_tools_for_message(tools),
-                        "source": "intent_index_already_connected",
-                    }
-                try:
-                    logger.info(
-                        "[dsh][discovery] connecting local-intent server: %s",
-                        srv,
-                    )
-                    await manager.connect(local_name)
-                    await manager.discover(
-                        local_name, _register_tool, _unregister_tool,
-                    )
-                    _mark_tried(srv)
-                    tools = [
-                        spec.public_name
-                        for spec in manager.tools.values()
-                        if spec.server_name == local_name
-                    ]
-                    # 连接成功后异步建意图索引（不阻塞返回）
-                    _schedule_intent_index_refresh()
-                    return {
-                        "success": True,
-                        "server": srv,
-                        "description": "(local intent index hit)",
-                        "transport": manager.configs[srv].transport,
-                        "url": manager.configs[srv].url,
-                        "tools": tools,
-                        "message": _format_tools_for_message(tools),
-                        "source": "intent_index",
-                        "score": hit.get("top_score"),
-                    }
-                except Exception as error:
-                    logger.warning(
-                        "[dsh][discovery] local-intent connect failed: %s: %s",
-                        srv, error,
-                    )
-                    _mark_tried(srv)
-                    continue
-
-        # 本地命中但未配置 → 把 server 名作为关键词去 registry 找
-        extra_keywords = [h["server_name"] for h in local_hits[:3]]
-    else:
-        extra_keywords = []
-
-    # ── 2. 回退到英文关键词 + Registry 搜索 ──
-    raw_keywords = [
-        kw.strip() for kw in capability.split(",")
-        if kw.strip()
-    ] if capability else []
-    raw_keywords = extra_keywords + raw_keywords
-
-    # ── 2b. capability 为空时，自动从 user_query 生成英文关键词 ──
-    # 这样 LLM 只传 user_query 也能工作，capability 真正可选。
-    if not raw_keywords and user_query and user_query.strip():
-        auto_kw = _auto_generate_keywords(user_query.strip())
-        if auto_kw:
-            raw_keywords = auto_kw
-            logger.info(
-                "[dsh][discovery] auto-generated keywords from user_query: %r",
-                auto_kw,
-            )
-
-    seen = set()
-    raw_keywords = [kw for kw in raw_keywords if not (kw in seen or seen.add(kw))]
-
-    if not raw_keywords:
-        return {
-            "success": False,
-            "error": (
-                f"无法为 {user_query!r} 生成有效的英文关键词。\n"
-                "**下一步建议**：\n"
-                "1. 如果这个需求可以用已连接的工具解决，直接用那些工具，不要再调 discovery。\n"
-                "2. 如果确实需要新服务，用更通用的英文词根作为 capability 重试，"
-                "例如 'news,search' 或 'web,fetch'。\n"
-                "3. 如果连续 3 次失败，告诉用户你找不到合适的外部服务。"
-            ),
-        }
-
-    keywords = _expand_keywords(raw_keywords)
-    logger.info(
-        "[dsh][discovery] keyword expansion: %r → %r",
-        raw_keywords, keywords,
+    return await _impl(
+        user_query=user_query,
+        capability=capability,
+        limit=limit,
     )
-
-    tried = _get_tried_servers()
-    logger.info(
-        "[dsh][discovery] search_and_connect_mcp: keywords=%r tried_servers=%r",
-        keywords, tried,
-    )
-
-    candidates, meta = await search_configs_multi(keywords, limit=limit)
-
-    if not candidates:
-        if meta.get("network_error"):
-            return {
-                "success": False,
-                "error": "MCP Registry 网络不可达（重试后仍失败）。",
-                "network_error": True,
-                "tried_keywords": meta.get("tried_keywords", []),
-            }
-        return {
-            "success": False,
-            "error": (
-                f"未在 MCP Registry 中找到与 {keywords!r} 相关的服务器。"
-                f"尝试过的关键词：{', '.join(meta.get('tried_keywords', []))}"
-            ),
-            "tried_keywords": meta.get("tried_keywords", []),
-        }
-
-    tried = _get_tried_servers()
-    fresh_candidates = [
-        c for c in candidates
-        if c["registry_name"] not in tried
-    ]
-
-    if not fresh_candidates:
-        return {
-            "success": False,
-            "error": (
-                f"关键词 {keywords!r} 找到的 {len(candidates)} 个候选"
-                f"都已在本任务中尝试过。"
-                f"**不要再用相同的关键词**——换一组全新的关键词。"
-            ),
-            "tried_candidates": [c["registry_name"] for c in candidates],
-        }
-
-    logger.info(
-        "[dsh][discovery] %d fresh candidates (excluded %d tried)",
-        len(fresh_candidates), len(candidates) - len(fresh_candidates),
-    )
-
-    ranked_all = _heuristic_rank(
-        user_query or capability, fresh_candidates,
-    )
-    if not ranked_all:
-        return {"success": False, "error": "候选列表为空"}
-
-    # ── LLM 领域判断：只连领域匹配的候选 ──
-    chosen_first = await _rank_candidates(
-        user_query or capability, ranked_all,
-    )
-    if chosen_first is None:
-        logger.info(
-            "[dsh][discovery] LLM rejected all %d candidates",
-            len(ranked_all),
-        )
-        return {
-            "success": False,
-            "error": (
-                f"候选 {len(ranked_all)} 个，但 LLM 判断没有一个领域匹配。\n"
-                "**下一步**：换更具体的 capability（如 'sports news'），"
-                "或直接用已连接的工具。"
-            ),
-            "candidates": [c["registry_name"] for c in ranked_all[:10]],
-        }
-    # 把 LLM 选的排到最前
-    ranked_all = [chosen_first] + [
-        c for c in ranked_all if c is not chosen_first
-    ]
-
-    connection_errors: List[str] = []
-
-    for attempt_idx, chosen in enumerate(ranked_all[:5]):
-        local_name = chosen["local_name"]
-
-        if manager.has_server(local_name) and local_name in manager.connections:
-            tools = [
-                spec.public_name
-                for spec in manager.tools.values()
-                if spec.server_name == local_name
-            ]
-            return {
-                "success": True,
-                "server": chosen["registry_name"],
-                "description": chosen.get("description", ""),
-                "transport": chosen["transport"],
-                "url": chosen["url"],
-                "tools": tools,
-                "message": _format_tools_for_message(tools),
-                "matched_keyword": meta.get("matched_keyword"),
-                "note": (
-                    "这是之前已连接的服务器。如果它的工具无法满足需求，"
-                    "请再次调用 search_and_connect_mcp 用更宽的 capability，"
-                    "系统会选一个不同的候选。"
-                ),
-            }
-
-        config = await config_for_entry(chosen)
-        if config is None:
-            connection_errors.append(
-                f"{chosen['registry_name']}: 无法构造配置"
-            )
-            continue
-
-        manager.register_config(config)
-        try:
-            logger.info(
-                "[dsh][discovery] trying candidate %d/%d: %s",
-                attempt_idx + 1, min(len(ranked_all), 5),
-                chosen["registry_name"],
-            )
-            await manager.connect(local_name)
-            await manager.discover(local_name, _register_tool, _unregister_tool)
-        except Exception as error:
-            err_str = str(error)
-            is_auth = any(
-                k in err_str.lower()
-                for k in ("401", "unauthorized", "authentication",
-                         "api key", "missing", "forbidden", "403")
-            )
-            tag = "[需要认证]" if is_auth else ""
-            connection_errors.append(
-                f"{chosen['registry_name']}{tag}: {err_str[:150]}"
-            )
-            _mark_tried(chosen["registry_name"])
-            try:
-                manager.unregister_config(local_name)
-            except Exception:
-                pass
-            continue
-
-        # 连接成功 → 认证预检
-        needs_auth = False
-        if chosen.get("headers"):
-            try:
-                from mcp_client.registry_client import config_for_entry as _cfe
-                cfg = await _cfe(chosen)
-                if cfg and cfg.header_env:
-                    missing_env = [
-                        env for env in cfg.header_env.values()
-                        if not os.getenv(env)
-                    ]
-                    if missing_env:
-                        needs_auth = True
-                        logger.warning(
-                            "[dsh][discovery] %s needs auth, missing: %r",
-                            chosen["registry_name"], missing_env,
-                        )
-            except Exception:
-                logger.exception("auth precheck failed")
-
-        if needs_auth:
-            _mark_tried(chosen["registry_name"])
-            try:
-                manager.unregister_config(local_name)
-            except Exception:
-                pass
-            connection_errors.append(
-                f"{chosen['registry_name']}[需要认证]: "
-                f"缺少环境变量 {missing_env}"
-            )
-            continue
-
-        # 认证通过 → 注册成功
-        _mark_tried(chosen["registry_name"])
-        tools = [
-            spec.public_name
-            for spec in manager.tools.values()
-            if spec.server_name == local_name
-        ]
-        _schedule_intent_index_refresh()
-        return {
-            "success": True,
-            "server": chosen["registry_name"],
-            "description": chosen.get("description", ""),
-            "transport": chosen["transport"],
-            "url": chosen["url"],
-            "tools": tools,
-            "message": _format_tools_for_message(tools),
-            "matched_keyword": meta.get("matched_keyword"),
-            "attempts": attempt_idx + 1,
-        }
-
-    return {
-        "success": False,
-        "error": (
-            f"尝试了 {len(ranked_all[:5])} 个候选服务器，全部连接失败。"
-            f"错误汇总：\n"
-            + "\n".join(f"  - {e}" for e in connection_errors[:5])
-            + "\n\n**下一步建议**：\n"
-            + "  1. 如果有服务器标记为 [需要认证]，说明它需要 API key —— "
-            + "请用户提供凭证或换一个关键词\n"
-            + "  2. 换更宽泛的 capability 再试一次"
-        ),
-        "candidates": [c["registry_name"] for c in ranked_all[:10]],
-        "errors": connection_errors,
-    }
 
 
 # ── 异步索引刷新（不阻塞 discovery 返回） ──
@@ -888,3 +511,47 @@ def _schedule_intent_index_refresh() -> None:
 
 # 公开别名（供 backend/routes/mcp.py 等外部调用）
 schedule_intent_index_refresh = _schedule_intent_index_refresh
+
+# ── SearchPort 适配器（供 core.ports 注入） ──
+
+class _SearchAdapter:
+    """把 mcp_discovery 的 tavily/fetch 兜底搜索适配成 core.ports.SearchPort。"""
+
+    async def search_web(self, query: str, max_results: int = 5):
+        """尝试 tavily -> fetch。返回已格式化文本；失败返回 None。"""
+        try:
+            manager = _get_manager()
+        except Exception:
+            logger.exception("[dsh][search_port] manager 不可用")
+            return None
+
+        for srv in ("tavily", "fetch"):
+            if srv not in getattr(manager, "configs", {}):
+                continue
+            try:
+                if srv not in manager.connections:
+                    await manager.connect(srv)
+                    await manager.discover(srv, _register_tool, _unregister_tool)
+                if srv == "tavily":
+                    payload = await manager.call_tool(
+                        "mcp__tavily__tavily_search",
+                        {"query": query, "max_results": max_results},
+                    )
+                else:
+                    payload = await manager.call_tool(
+                        "mcp__fetch__fetch", {"url": query},
+                    )
+                import json as _json
+                return _json.dumps(
+                    payload, ensure_ascii=False, default=str
+                )[:6000]
+            except Exception:
+                logger.exception(
+                    "[dsh][search_port] search via %s failed", srv
+                )
+        return None
+
+
+def make_search_port():
+    """bootstrap 注入用。"""
+    return _SearchAdapter()

@@ -169,6 +169,31 @@ class ToolAgent:
                     parameters=params,
                 )
 
+        # ── 新增：L2 或写操作必须 verify 审批 ──
+        if meta is not None:
+            trust = getattr(meta, "trust_level", 0)
+            is_write = get_gateway().is_write_operation(tool_name, meta)
+            if trust == 2 or is_write:
+                approval_id = params.get("__approval_id__")
+                if not approval_id:
+                    return ToolCallResult(
+                        tool_name=tool_name, success=False,
+                        error="需要审批但缺少 __approval_id__",
+                        execution_time=time.time() - start_time,
+                        parameters=params,
+                    )
+                from tools.security.approval import get_approval_store
+                if not get_approval_store().verify(approval_id, tool_name, params):
+                    return ToolCallResult(
+                        tool_name=tool_name, success=False,
+                        error=(
+                            f"审批校验失败：approval_id={approval_id} "
+                            "已过期/已消费/参数不匹配"
+                        ),
+                        execution_time=time.time() - start_time,
+                        parameters=params,
+                    )
+
         if tool_func is None and self._is_mcp_tool_name(tool_name):
             mcp_client = self._mcp_client_manager
             if mcp_client is None:
@@ -199,8 +224,6 @@ class ToolAgent:
                     success = True
                     error_message = None
 
-                # ── 如果 result 是 MCP 格式，检查 content[0].text 里的 status ──
-                # result 是 call_tool 的返回值（dict），不是 ToolCallResult
                 if isinstance(result, dict):
                     blocks = result.get("content")
                     if isinstance(blocks, list) and blocks:
@@ -303,7 +326,6 @@ class ToolAgent:
                 execution_time=time.time() - start_time,
                 parameters=params,
             )
-
     def format_tool_result(self, result: ToolCallResult) -> str:
         from .format import format_tool_result as _fmt
         try:

@@ -25,10 +25,7 @@ RAG_EMBEDDING_MODEL = os.getenv(
 )
 
 # 工具筛选器的 embedding 模型
-SHORTLIST_EMBEDDING_MODEL = os.getenv(
-    'SHORTLIST_EMBEDDING_MODEL',
-    'BAAI/bge-small-zh-v1.5',
-)
+SHORTLIST_EMBEDDING_MODEL = os.getenv('SHORTLIST_EMBEDDING_MODEL', 'sentence-transformers/all-MiniLM-L6-v2')
 
 # 检索混合策略
 RAG_TOP_K_DEFAULT = int(os.getenv('RAG_TOP_K_DEFAULT', '8'))
@@ -75,7 +72,7 @@ LANGFUSE_ENABLED = os.getenv('LANGFUSE_ENABLED', 'false').lower() in ('1', 'true
 # Langfuse 是可选功能：未配置时 observability 会静默降级，所以允许为空
 LANGFUSE_PUBLIC_KEY = os.getenv('LANGFUSE_PUBLIC_KEY', '').strip()
 LANGFUSE_SECRET_KEY = os.getenv('LANGFUSE_SECRET_KEY', '').strip()
-LANGFUSE_HOST = os.getenv('LANGFUSE_HOST', 'https://cloud.langfuse.com')
+LANGFUSE_HOST = (os.getenv('LANGFUSE_BASE_URL') or os.getenv('LANGFUSE_HOST', 'https://cloud.langfuse.com'))
 
 # ── Mem0 结构化记忆 ──
 MEM0_ENABLED = os.getenv('MEM0_ENABLED', 'true').lower() in ('1', 'true', 'yes')
@@ -141,3 +138,8 @@ LLM_COMPACT_TRIGGER_RATIO = float(os.getenv('LLM_COMPACT_TRIGGER_RATIO', '0.8'))
 
 # 压缩时保留最近 N 步原文
 LLM_COMPACT_KEEP_RECENT = int(os.getenv('LLM_COMPACT_KEEP_RECENT', '5'))
+if LANGFUSE_ENABLED and not (LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY):
+    import logging as _logging
+    _logging.getLogger(__name__).warning(
+        '[config] LANGFUSE_ENABLED=true 但 PUBLIC/SECRET KEY 为空，Langfuse 将静默降级'
+    )

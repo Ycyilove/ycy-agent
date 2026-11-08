@@ -1,0 +1,19 @@
+B2 完成于 2026-11-08 23:51:50
+
+新增：
+- core/ports.py（8 端口 + 注入/获取）
+- bootstrap/__init__.py / ports.py / startup.py
+- tools/mcp_discovery.py::make_search_port
+
+改动：
+- backend/app.py::app_lifespan 136 -> 62 行（调 boot_all/shutdown_all）
+- core/llm/provider.py：删 backend.config 顶层 import，_cfg() 延迟读
+- core/memory/mem0_layer.py：同上
+- infra/observability.py / infra/sandbox.py：同上
+- core/task/service.py：删 tools.agent 顶层 import，ToolCallResult 延迟 import，TYPE_CHECKING 块
+
+deps 违规 7 -> 2：
+- core/llm/prompts.py:11 core -> rag（B15）
+- core/task/service.py:33 core -> tools.orchestration.state（B8）
+
+B0/B1 仍绿。

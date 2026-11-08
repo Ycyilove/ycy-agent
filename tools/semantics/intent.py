@@ -36,143 +36,32 @@ WORDLIST_VERSION = "2026-11-07-v1"
 
 
 # ── 动作原子（单字/词根，组合格式词使用） ──
-_GEN_ACTION_ATOMS = frozenset({
-    # 中文单字
-    "生", "做", "写", "弄", "整", "搞", "出", "来", "制", "建",
-    "创", "拟", "撰", "编", "起", "草", "导", "存", "转", "合",
-    # 英文单词/短语
-    "generate", "create", "make", "build", "draft", "write",
-    "compose", "assemble", "prepare", "produce", "render",
-    "export", "convert", "save",
-    "put together", "put-together",
-})
-
-_EN_GEN_ACTION_ROOTS = (
-    "creat", "gener", "mak", "build", "draft", "writ", "compos",
-    "assembl", "prepar", "produc", "render", "export", "convert",
+# ── 词表从 vocab 唯一真源取（B5-b） ──
+from .vocab import (
+    GEN_ACTION_ATOMS as _GEN_ACTION_ATOMS,
+    EN_GEN_ACTION_ROOTS as _EN_GEN_ACTION_ROOTS,
+    MODIFY_ACTION_ATOMS as _MODIFY_ACTION_ATOMS,
+    READ_ACTION_ATOMS as _READ_ACTION_ATOMS,
+    QUERY_ACTION_ATOMS as _QUERY_ACTION_ATOMS,
+    ANALYZE_ACTION_ATOMS as _ANALYZE_ACTION_ATOMS,
+    FORMAT_GROUPS as _FORMAT_GROUPS,
+    GENERATE_FORMATS as _GENERATE_FORMATS,
+    POLITE_PREFIXES as _POLITE_PREFIXES,
+    QUERY_HINTS as _QUERY_HINTS,
+    TUTORIAL_HINTS as _TUTORIAL_HINTS,
+    TUTORIAL_AMBIGUOUS_PATTERNS as _TUTORIAL_AMBIGUOUS_PATTERNS,
+    DB_HINTS as _DB_HINTS,
+    CODE_HINTS as _CODE_HINTS,
+    WEB_HINTS as _WEB_HINTS,
+    CHITCHAT_HINTS as _CHITCHAT_HINTS,
+    SURVEY_HINTS as _SURVEY_HINTS,
+    FIX_VERBS as _FIX_VERBS,
 )
 
-_MODIFY_ACTION_ATOMS = frozenset({
-    "改", "修", "编", "调", "优", "美", "润", "补", "删", "移",
-    "增", "加", "换", "替", "重命名", "重排", "改改",
-    # 批处理/转换类（"批量处理"、"转换"是 modify 语义）
-    # 注意：不加裸"处理"/"process"，太宽（"处理这个PDF"可能想读/分析）
-    "批量", "批处理", "转换", "拆分", "合并", "压缩",
-    "edit", "update", "modify", "patch", "fix", "repair",
-    "correct", "replace", "insert", "append", "delete", "remove",
-    "move", "rename", "optimize", "polish", "refine",
-    "batch", "convert", "split", "merge", "compress",
-})
-
-_READ_ACTION_ATOMS = frozenset({
-    # "查" 留给 _QUERY_ACTION_ATOMS（"查一下"是检索，不是读文件）
-    "读", "看", "列", "显", "打", "统", "计", "算", "览",
-    "read", "view", "open", "show", "list", "display",
-    "count", "calculate", "compute", "preview",
-})
-
-_QUERY_ACTION_ATOMS = frozenset({
-    "搜", "找", "查", "问", "询", "检",
-    "search", "find", "query", "lookup", "retrieve", "ask",
-})
-
-_ANALYZE_ACTION_ATOMS = frozenset({
-    "分析", "总结", "概括", "解读", "解析", "提炼", "归纳",
-    "评价", "评估", "审查", "审阅", "点评", "赏析",
-    "analyze", "analyse", "summarize", "summarise",
-    "interpret", "review", "evaluate", "assess", "critique",
-})
-
-# ── 格式分组（按领域分层，组合动作原子使用） ──
-_FORMAT_GROUPS = {
-    "presentation": frozenset({
-        "ppt", "pptx", "presentation", "slide", "slides", "deck",
-        "幻灯片", "演示", "演示文稿", "汇报材料", "宣讲",
-    }),
-    "document": frozenset({
-        "word", "docx", "document", "文档", "报告", "论文", "文章",
-        "essay", "paper", "thesis", "简历", "resume", "cv",
-        "合同", "contract", "通知", "notice", "发票", "invoice",
-        "证书", "certificate", "周报", "简报", "纪要", "minutes",
-        "信", "letter", "邮件", "email",
-    }),
-    "spreadsheet": frozenset({
-        "excel", "xlsx", "spreadsheet", "sheet", "表格", "报表",
-        "账单", "明细", "清单", "统计表", "看板", "dashboard",
-        "csv", "流水",
-    }),
-    "pdf": frozenset({"pdf"}),
-    "table": frozenset({"table", "tabular"}),
-    "markdown": frozenset({"markdown", "md"}),
-}
-
-# 兼容旧代码：扁平格式词表
-_GENERATE_FORMATS = frozenset().union(*_FORMAT_GROUPS.values())
-
-
-# ── 礼貌前缀（剥离后匹配动作原子） ──
-_POLITE_PREFIXES = (
-    "帮我", "帮我做", "帮我弄", "帮我整", "帮我搞", "帮我出",
-    "给我", "给我做", "给我来", "给我整",
-    "能不能", "可不可以", "麻烦", "请", "劳驾",
-    "please", "could you", "can you", "would you",
-)
-
-# 兼容旧代码：扁平生成动词表（保留 export 给外部 import）
+# 兼容旧名（下游可能 from tools.semantics.intent import _GENERATE_VERBS 等）
 _GENERATE_VERBS = _GEN_ACTION_ATOMS
 _MODIFY_VERBS = _MODIFY_ACTION_ATOMS
 _READ_VERBS = _READ_ACTION_ATOMS
-
-
-_QUERY_HINTS = frozenset({
-    "是什么", "有哪些", "多少", "什么", "介绍", "讲了什么",
-    "统计", "计算", "搜索", "查找",
-    "what", "how many", "count", "calculate", "search", "find",
-})
-
-_TUTORIAL_HINTS = frozenset({
-    "教程", "教我", "怎么用", "命令是",
-    "tutorial", "how to", "command is",
-})
-
-# "如何/怎么做" 是模糊词：单独出现不足以判 tutorial。
-# 只有"如何 + 动词"（如何用/如何读/如何写/如何实现...）才是真的问方法。
-# "如何"后面跟非动词（如"如何优雅地拒绝"）可能是内容，不是教程。
-_TUTORIAL_AMBIGUOUS_PATTERNS = (
-    re.compile(
-        r"如何\s*(用|读|写|实现|做|弄|搞|配置|安装|使用|调用|运行|执行|设置|连接|导入|导出|解析|转换|生成)"
-    ),
-    re.compile(r"怎么做\s*(一|个|出|到|成|好)"),
-)
-
-_DB_HINTS = frozenset({"数据库", "sql", "mysql", "查询表", "database"})
-
-_CODE_HINTS = frozenset({
-    "代码", "bug", "test", "tests", "重构", "函数",
-    ".py", ".js", ".jsx", ".ts", ".tsx",
-    ".java", ".go", ".rs", ".c", ".cpp", ".h", ".hpp",
-    ".rb", ".php", ".sql", ".sh",
-    "code", "refactor", "function",
-})
-
-_WEB_HINTS = frozenset({
-    "网页", "页面", "网站", "网址", "链接", "榜单", "排行榜",
-    "新闻", "最新", "实时", "动态", "热搜", "维基", "官网",
-    "web", "page", "website", "url", "link", "news", "latest",
-    "wiki",
-})
-
-_CHITCHAT_HINTS = frozenset({
-    "你好", "hi", "hello", "谢谢", "thanks", "在吗", "测试",
-    "早上好", "晚上好", "嗨", "hey", "拜拜", "再见",
-})
-
-_SURVEY_HINTS = frozenset({
-    "这些文档", "所有文档", "各个文档", "每个文档", "几个文档",
-    "多少文档", "分别", "盘点", "速览", "概览", "知识库",
-})
-
-_FIX_VERBS = frozenset({"修复", "fix", "repair", "patch", "correct"})
 
 
 @dataclass(frozen=True)

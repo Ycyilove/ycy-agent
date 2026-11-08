@@ -1,185 +1,47 @@
-"""基于 embedding 的工具筛选器。
+"""工具筛选器（B6-c 薄壳）：委托给 tools/semantics/index/strategies/shortlist。
 
-设计：
-    - 复用 sentence-transformers 的 all-MiniLM-L6-v2（RAG 已在用）
-    - 工具集不变时不重编向量
-    - 模型不可用时返回全量，由上层兜底
-    - 首次调用懒加载模型，之后缓存
+保留原类签名 + 方法名（warmup / shortlist），调用方零改动。
 """
-
 from __future__ import annotations
 
 import logging
-import threading
 from typing import Any, Dict, Optional
-
-from infra.embedding import get_encoder
 
 logger = logging.getLogger(__name__)
 
 
 class ToolShortlister:
-    """goal → top-k 相关工具。
-
-    相似度用归一化向量的点积（= cosine）。
-    """
+    """goal → top-k 工具。委托给 ShortlistStrategy。"""
 
     def __init__(
         self,
         model_name: str = "BAAI/bge-small-zh-v1.5",
         top_k: int = 8,
-        min_score: float = 0.25,
-        min_keep: int = 5,
+        min_score: float = 0.10,
+        min_keep: int = 3,
     ):
-        self._model_name = model_name
-        self._top_k = top_k
-        self._min_score = min_score
-        self._min_keep = min_keep
+        from tools.semantics.index.strategies.shortlist import ShortlistStrategy
 
-        self._model = None
-        self._model_ok = False
-        self._tool_vectors: Dict[str, list] = {}
-        self._cache_key: Optional[tuple] = None
-        self._lock = threading.Lock()
-
-    # ── 模型懒加载 ──
-
-    def _ensure_model(self) -> bool:
-        if self._model_ok:
-            return True
-        with self._lock:
-            if self._model_ok:
-                return True
-            if self._model is None:
-                try:
-                    self._model = get_encoder(
-                        self._model_name, local_files_only=True
-                    )
-                    logger.info(
-                        "[dsh][shortlist] model loaded: %s (via infra.embedding)",
-                        self._model_name,
-                    )
-                except Exception:
-                    logger.exception(
-                        "[dsh][shortlist] model load failed; "
-                        "shortlister disabled"
-                    )
-                    self._model_ok = False
-                    return False
-            self._model_ok = True
-            return True
+        self._impl = ShortlistStrategy(
+            model_name=model_name,
+            top_k=top_k,
+            min_score=min_score,
+            min_keep=min_keep,
+        )
 
     def warmup(self) -> None:
-        """显式预热：在 lifespan 里后台调用，避免首次任务卡顿。"""
-        self._ensure_model()
-
-    # ── 工具索引 ──
-
-    def _ensure_index(self, tools: Dict[str, Any]) -> bool:
-        if not self._ensure_model():
-            return False
-
-        key = tuple(sorted(tools.keys()))
-        if key == self._cache_key:
-            return True
-
-        with self._lock:
-            if key == self._cache_key:
-                return True
-
-            from tools.semantics import get_intent_tags
-            texts = []
-            names = []
-            for name, meta in tools.items():
-                desc = getattr(meta, "description", "") or ""
-                tags = " ".join(str(t) for t in get_intent_tags(name))
-                texts.append(f"{name} {desc} {tags}".strip())
-                names.append(name)
-
-            try:
-                # get_encoder 返回 SentenceTransformer，用 encode 替代 HuggingFaceEmbeddings
-                vectors = self._model.encode(
-                    texts,
-                    normalize_embeddings=True,
-                    show_progress_bar=False,
-                )
-                vectors = [v.tolist() for v in vectors]   # 统一成 list，下游 dot 兼容
-            except Exception:
-                logger.exception("[dsh][shortlist] embed_documents failed")
-                return False
-
-            self._tool_vectors = dict(zip(names, vectors))
-            self._cache_key = key
-            logger.info(
-                "[dsh][shortlist] indexed %d tools", len(self._tool_vectors)
-            )
-            return True
-
-    # ── 公开接口 ──
+        """预热：加载模型 + 编码一个占位串。失败静默。"""
+        try:
+            from tools.semantics.index.encoder import encode_texts
+            encode_texts(["warmup"])
+            logger.info("[shortlist] warmed up")
+        except Exception:
+            logger.exception("[shortlist] warmup failed")
 
     def shortlist(
-        self, goal: str, tools: Dict[str, Any]
+        self, goal: str, tools: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
-        """返回筛选后的工具子集。失败时返回 None（调用方兜底）。"""
-        if not goal or not tools:
-            return None
+        return self._impl.shortlist(goal, tools)
 
-        if not self._ensure_index(tools):
-            return None
 
-        try:
-            goal_vec = self._model.encode(
-                [goal],
-                normalize_embeddings=True,
-                show_progress_bar=False,
-            )[0].tolist()
-        except Exception:
-            logger.exception("[dsh][shortlist] embed_query failed")
-            return None
-            
-        # 余弦相似度（已归一化，点积即可）
-        scores = []
-        for name, vec in self._tool_vectors.items():
-            if name not in tools:
-                continue
-            dot = 0.0
-            for a, b in zip(goal_vec, vec):
-                dot += a * b
-            scores.append((name, dot))
-
-        scores.sort(key=lambda x: -x[1])
-
-        # 记录 top-10 分数，用于判断 essential_when 工具是否被 min_score 筛掉
-        _top = [(n, round(s, 3)) for n, s in scores[:10]]
-        logger.info(
-            "[dsh][shortlist][debug] goal=%r, kept_threshold=%.2f, "
-            "min_keep=%d, top10=%r",
-            goal[:60], self._min_score, self._min_keep, _top,
-        )
-        # 特别记录关键工具的分数
-        for _key_tool in ("write_excel", "read_pdf_text", "write_docx",
-                          "write_file", "read_pdf_metadata"):
-            for n, s in scores:
-                if n == _key_tool:
-                    logger.info(
-                        "[dsh][shortlist][debug] key tool %s: score=%.3f "
-                        "(threshold=%.2f, will_keep=%r)",
-                        _key_tool, s, self._min_score, s >= self._min_score,
-                    )
-                    break
-                
-        kept = [n for n, s in scores if s >= self._min_score][: self._top_k]
-        if len(kept) < self._min_keep:
-            logger.info(
-                "[dsh][shortlist] kept=%d < min_keep=%d, fallback to full",
-                len(kept), self._min_keep,
-            )
-            return None
-
-        result = {n: tools[n] for n in kept if n in tools}
-        logger.info(
-            "[dsh][shortlist] %d/%d tools kept; top5=%r",
-            len(result), len(tools),
-            [(n, round(s, 3)) for n, s in scores[:5]],
-        )
-        return result
+__all__ = ["ToolShortlister"]

@@ -25,7 +25,7 @@ class ApprovalRecord:
 
 
 class ApprovalStore:
-    def __init__(self, ttl_seconds: int = 600):
+    def __init__(self, ttl_seconds: int = 3600):
         self._records: Dict[str, ApprovalRecord] = {}
         self._lock = threading.Lock()
         self._ttl = ttl_seconds

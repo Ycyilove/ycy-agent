@@ -9,17 +9,17 @@
 import json
 from typing import Dict, List
 
-from backend.config import (
-    DEFAULT_MODEL,
-    LOCAL_MODEL_CONFIG,
-    MODESCOPE_API_KEY,
-    MODESCOPE_BASE_URL,
-    SILICONFLOW_API_KEY,
-    SILICONFLOW_BASE_URL,
-    YUNDU_API_KEY,
-    YUNDU_BASE_URL,
-    MODEL_SOURCE,
-)
+from core import ports
+
+
+def _cfg():
+    """延迟读配置，避免 core -> backend 模块级依赖。"""
+    cfg = ports.get_config()
+    if cfg is None:
+        raise RuntimeError(
+            "core.ports.config 未注入，bootstrap/startup 未执行"
+        )
+    return cfg
 from .local_model import get_local_model_service, ModelSource
 
 import logging
@@ -45,16 +45,18 @@ class ModelScopeLLM:
     QUICK_RESPONSE_PROMPT = '你是一个高效的AI助手，请直接、简洁地回答用户问题，不要过度思考，快速给出答案。'
     DEEP_THINKING_PROMPT = '你是一个善于深度思考的AI助手，请仔细分析问题，一步步推理，先给出思考过程，再给出最终答案。请用"思考："开头来展示你的思考过程，然后用"答案："来给出最终结论。'
 
-    def __init__(self, model: str = DEFAULT_MODEL, temperature: float = 0.7, max_tokens: int = 2048):
+    def __init__(self, model: Optional[str] = None, temperature: float = 0.7, max_tokens: int = 2048):
+        if model is None:
+            model = _cfg().DEFAULT_MODEL
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
-        self.use_local = MODEL_SOURCE == ModelSource.LOCAL
+        self.use_local = _cfg().MODEL_SOURCE == ModelSource.LOCAL
         self.llm = None          # 延迟到首次使用
         self.local_service = None
 
         if self.use_local:
-            self.local_service = get_local_model_service(LOCAL_MODEL_CONFIG)
+            self.local_service = get_local_model_service(_cfg().LOCAL_MODEL_CONFIG)
 
     def _ensure_llm(self):
         """确保 self.llm 已初始化。
@@ -77,8 +79,8 @@ class ModelScopeLLM:
             model=self.model,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
-            api_key=YUNDU_API_KEY,
-            base_url=YUNDU_BASE_URL,
+            api_key=_cfg().YUNDU_API_KEY,
+            base_url=_cfg().YUNDU_BASE_URL,
             max_retries=2
         )
 
@@ -215,8 +217,7 @@ class MultimodalClient:
             pass
         import anthropic
         self.client = anthropic.Anthropic(
-            base_url='https://api-inference.modelscope.cn',
-            api_key=MODESCOPE_API_KEY,
+            base_url=_cfg().MODESCOPE_BASE_URL, api_key=_cfg().MODESCOPE_API_KEY,
         )
 
     def stream_analyze(self, messages: List[Dict], max_tokens: int = 4096):

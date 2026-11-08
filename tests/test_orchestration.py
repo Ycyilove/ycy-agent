@@ -34,7 +34,7 @@ from tools.orchestration.task_types import GapKind
 # helpers
 # ─────────────────────────────────────────────────────────────
 
-def make_orch(max_steps: int = 10, enable_intent_router: bool = False):
+def make_orch(max_steps: int = 10):
     agent = MagicMock()
     agent.execute_tool_async = AsyncMock()
     agent.register_dynamic_tool = lambda *a, **k: None
@@ -45,7 +45,6 @@ def make_orch(max_steps: int = 10, enable_intent_router: bool = False):
         agent_provider=lambda: agent,
         llm_provider=lambda: llm,
         max_steps=max_steps,
-        enable_intent_router=enable_intent_router,
     )
 
 
@@ -490,7 +489,6 @@ class TestWriteThenVerify:
             agent_provider=lambda: agent,
             llm_provider=lambda: shared_llm,
             max_steps=8,
-            enable_intent_router=False,
         )
 
         events = []
@@ -610,7 +608,6 @@ class TestRealTaskRegressions:
             agent_provider=lambda: agent,
             llm_provider=lambda: llm,
             max_steps=3,
-            enable_intent_router=False,
         )
 
         async def _run():
@@ -691,7 +688,6 @@ class TestRealTaskRegressions:
             agent_provider=lambda: agent,
             llm_provider=lambda: llm,
             max_steps=5,
-            enable_intent_router=False,
         )
 
         async def _empty_fill(*a, **kw):
@@ -762,7 +758,6 @@ class TestRealTaskRegressions:
             agent_provider=lambda: agent,
             llm_provider=lambda: llm,
             max_steps=5,
-            enable_intent_router=False,
         )
 
         async def _fill(goal, tool_name, tools, state, **kw):

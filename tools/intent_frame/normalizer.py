@@ -13,33 +13,12 @@ from .frame import IntentFrame
 logger = logging.getLogger(__name__)
 
 
-_DOMAIN_KEYWORDS = {
-    "news": ("新闻", "资讯", "报道", "实时", "最新", "动态", "热搜",
-             "news", "latest", "realtime"),
-    "sports": ("体育", "足球", "篮球", "球员", "比赛", "赛事", "运动员",
-               "sports", "football", "basketball", "player", "match"),
-    "knowledge": ("知识库", "文档", "资料", "概要", "摘要",
-                  "knowledge", "document", "summary"),
-    "file": ("文件", "目录", "路径", "csv", "pdf", "docx",
-             "file", "directory", "path"),
-    "code": ("代码", "运行", "执行", "python",
-             "code", "run", "execute"),
-    "web": ("网页", "页面", "网站", "网址", "链接",
-            "web", "page", "website", "url"),
-}
-
-_FRESHNESS_KEYWORDS = {
-    "realtime": ("实时", "现在", "当前", "此刻", "realtime", "now", "current"),
-    "recent": ("最新", "最近", "近期", "这几天", "latest", "recent"),
-}
-
-_ACTION_KEYWORDS = {
-    "search": ("搜索", "查找", "查", "找", "search", "find", "query"),
-    "read": ("读取", "查看", "打开", "read", "view", "open"),
-    "write": ("创建", "新建", "写入", "保存", "create", "write", "save"),
-    "compute": ("计算", "统计", "compute", "calculate", "count"),
-    "browse": ("浏览", "抓取", "fetch", "crawl", "extract"),
-}
+# ── 词表从 vocab 唯一真源取（B5-b） ──
+from tools.semantics.vocab import (
+    DOMAIN_KEYWORDS as _DOMAIN_KEYWORDS,
+    FRESHNESS_KEYWORDS as _FRESHNESS_KEYWORDS,
+    ACTION_KEYWORDS as _ACTION_KEYWORDS,
+)
 
 
 def _match(table, text: str) -> str:

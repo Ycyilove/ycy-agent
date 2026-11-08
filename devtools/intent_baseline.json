@@ -1,0 +1,330 @@
+[
+  {
+    "goal": "你好",
+    "intent": {
+      "primary": "chitchat",
+      "tags": [
+        "chitchat"
+      ],
+      "secondary": []
+    },
+    "frame": {
+      "domain": "unknown",
+      "action": "search",
+      "freshness": "any"
+    }
+  },
+  {
+    "goal": "hi",
+    "intent": {
+      "primary": "chitchat",
+      "tags": [
+        "chitchat"
+      ],
+      "secondary": []
+    },
+    "frame": {
+      "domain": "unknown",
+      "action": "search",
+      "freshness": "any"
+    }
+  },
+  {
+    "goal": "谢谢",
+    "intent": {
+      "primary": "chitchat",
+      "tags": [
+        "chitchat"
+      ],
+      "secondary": []
+    },
+    "frame": {
+      "domain": "unknown",
+      "action": "search",
+      "freshness": "any"
+    }
+  },
+  {
+    "goal": "今天天气怎么样",
+    "intent": {
+      "primary": "unknown",
+      "tags": [],
+      "secondary": []
+    },
+    "frame": {
+      "domain": "unknown",
+      "action": "search",
+      "freshness": "any"
+    }
+  },
+  {
+    "goal": "帮我生成一份 PPT，主题是季度总结",
+    "intent": {
+      "primary": "generate",
+      "tags": [
+        "analyze",
+        "generate"
+      ],
+      "secondary": [
+        "presentation"
+      ]
+    },
+    "frame": {
+      "domain": "unknown",
+      "action": "search",
+      "freshness": "any"
+    }
+  },
+  {
+    "goal": "做一个 Excel 表格，统计销售额",
+    "intent": {
+      "primary": "generate",
+      "tags": [
+        "generate",
+        "query",
+        "read"
+      ],
+      "secondary": [
+        "spreadsheet"
+      ]
+    },
+    "frame": {
+      "domain": "unknown",
+      "action": "compute",
+      "freshness": "any"
+    }
+  },
+  {
+    "goal": "写一个 Word 文档，介绍 AI",
+    "intent": {
+      "primary": "generate",
+      "tags": [
+        "generate",
+        "query"
+      ],
+      "secondary": [
+        "document"
+      ]
+    },
+    "frame": {
+      "domain": "knowledge",
+      "action": "search",
+      "freshness": "any"
+    }
+  },
+  {
+    "goal": "生成一份 PDF 报告",
+    "intent": {
+      "primary": "generate",
+      "tags": [
+        "generate"
+      ],
+      "secondary": [
+        "document",
+        "pdf"
+      ]
+    },
+    "frame": {
+      "domain": "file",
+      "action": "search",
+      "freshness": "any"
+    }
+  },
+  {
+    "goal": "把 report.docx 转成 PDF",
+    "intent": {
+      "primary": "generate",
+      "tags": [
+        "generate"
+      ],
+      "secondary": [
+        "document",
+        "pdf"
+      ]
+    },
+    "frame": {
+      "domain": "file",
+      "action": "search",
+      "freshness": "any"
+    }
+  },
+  {
+    "goal": "修改 config.py 的 DATA_DIR",
+    "intent": {
+      "primary": "modify",
+      "tags": [
+        "code",
+        "modify"
+      ],
+      "secondary": []
+    },
+    "frame": {
+      "domain": "unknown",
+      "action": "search",
+      "freshness": "any"
+    }
+  },
+  {
+    "goal": "修复 calculator/core.py 的 divide 函数，并确保 tests 通过",
+    "intent": {
+      "primary": "code",
+      "tags": [
+        "code",
+        "modify"
+      ],
+      "secondary": []
+    },
+    "frame": {
+      "domain": "unknown",
+      "action": "search",
+      "freshness": "any"
+    }
+  },
+  {
+    "goal": "帮我重构这个函数",
+    "intent": {
+      "primary": "code",
+      "tags": [
+        "code"
+      ],
+      "secondary": []
+    },
+    "frame": {
+      "domain": "unknown",
+      "action": "search",
+      "freshness": "any"
+    }
+  },
+  {
+    "goal": "读取 data.csv 的内容",
+    "intent": {
+      "primary": "code",
+      "tags": [
+        "code",
+        "read"
+      ],
+      "secondary": [
+        "spreadsheet"
+      ]
+    },
+    "frame": {
+      "domain": "file",
+      "action": "read",
+      "freshness": "any"
+    }
+  },
+  {
+    "goal": "列出当前目录的文件",
+    "intent": {
+      "primary": "read",
+      "tags": [
+        "read"
+      ],
+      "secondary": []
+    },
+    "frame": {
+      "domain": "file",
+      "action": "search",
+      "freshness": "realtime"
+    }
+  },
+  {
+    "goal": "查看 report.pdf 讲了什么",
+    "intent": {
+      "primary": "read",
+      "tags": [
+        "query",
+        "read"
+      ],
+      "secondary": [
+        "pdf"
+      ]
+    },
+    "frame": {
+      "domain": "file",
+      "action": "search",
+      "freshness": "any"
+    }
+  },
+  {
+    "goal": "搜索最近的 AI 新闻",
+    "intent": {
+      "primary": "query",
+      "tags": [
+        "query"
+      ],
+      "secondary": []
+    },
+    "frame": {
+      "domain": "news",
+      "action": "search",
+      "freshness": "recent"
+    }
+  },
+  {
+    "goal": "查一下维基百科上维尼修斯的当前状态",
+    "intent": {
+      "primary": "modify",
+      "tags": [
+        "modify",
+        "query"
+      ],
+      "secondary": []
+    },
+    "frame": {
+      "domain": "unknown",
+      "action": "search",
+      "freshness": "realtime"
+    }
+  },
+  {
+    "goal": "知识库里记录了哪些获得最佳女队称号的学校",
+    "intent": {
+      "primary": "query",
+      "tags": [
+        "query"
+      ],
+      "secondary": []
+    },
+    "frame": {
+      "domain": "knowledge",
+      "action": "search",
+      "freshness": "any"
+    }
+  },
+  {
+    "goal": "这些文档分别讲了什么",
+    "intent": {
+      "primary": "query",
+      "tags": [
+        "query"
+      ],
+      "secondary": [
+        "document"
+      ]
+    },
+    "frame": {
+      "domain": "knowledge",
+      "action": "search",
+      "freshness": "any"
+    }
+  },
+  {
+    "goal": "怎么用 Python 读取 Excel",
+    "intent": {
+      "primary": "tutorial",
+      "tags": [
+        "read",
+        "tutorial"
+      ],
+      "secondary": [
+        "spreadsheet"
+      ]
+    },
+    "frame": {
+      "domain": "code",
+      "action": "read",
+      "freshness": "any"
+    }
+  }
+]

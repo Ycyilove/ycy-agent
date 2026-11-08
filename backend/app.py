@@ -137,52 +137,20 @@ multimodal_client = None
 # ─────────────────────────────────────────────────────────────
 
 @asynccontextmanager
+@asynccontextmanager
 async def app_lifespan(_app: FastAPI):
+    """启动装配：MCP 建连 + boot_all；关闭：shutdown_all。
+
+    具体启动步骤在 bootstrap/startup.py::boot_all，
+    端口注入在 bootstrap/ports.py::wire_ports。
+    """
     global mcp_client_manager, mcp_worker
 
-    try:
-        init_langfuse()
-    except Exception:
-        logger.exception("Langfuse 初始化失败")
-
-    async def _init_mem0_background():
-        if os.getenv("MEM0_ENABLED", "1") == "0":
-            logger.info("[boot] mem0 disabled by MEM0_ENABLED=0")
-            return
-        try:
-            logger.info("[boot] initializing mem0 in background...")
-            await asyncio.to_thread(init_mem0)
-            logger.info("[boot] mem0 initialized")
-        except Exception:
-            logger.exception("Mem0 初始化失败")
-
-    async def _warmup_embeddings_then_mem0():
-        try:
-            rag = get_local_rag_service()
-            vec_store = rag.vector_store
-            if vec_store is not None:
-                await asyncio.to_thread(
-                    lambda: vec_store._generate_embeddings(["warmup"])
-                )
-                logger.info("[boot] RAG embedding warmed up")
-            else:
-                logger.warning("[boot] RAG vector_store is None, skip warmup")
-        except Exception:
-            logger.exception("[boot] RAG embedding warmup failed (non-fatal)")
-        await _init_mem0_background()
-
-    asyncio.create_task(_warmup_embeddings_then_mem0())
-
-    try:
-        from core.resource.store import cleanup_expired
-        await asyncio.to_thread(cleanup_expired)
-    except Exception:
-        logger.exception("清理 agent 资源失败")
-
+    # ── 1. 建 MCP（必须最早，boot_all 依赖） ──
     try:
         configs = load_mcp_config()
-    except Exception as error:
-        logger.error("MCP 配置加载失败: %s", error)
+    except Exception:
+        logger.exception("MCP 配置加载失败")
         configs = []
 
     real_manager = MCPClientManager(configs)
@@ -199,7 +167,10 @@ async def app_lifespan(_app: FastAPI):
         for c in configs:
             if c.transport == "stdio":
                 if _resolve_command(c.command) is None:
-                    logger.warning("[boot] skip MCP %s: command not found (%s)", c.name, c.command)
+                    logger.warning(
+                        "[boot] skip MCP %s: command not found (%s)",
+                        c.name, c.command,
+                    )
                     continue
             filtered.append(c)
         try:
@@ -213,69 +184,22 @@ async def app_lifespan(_app: FastAPI):
     mcp_worker = worker
     mcp_client_manager = proxy
 
-    async def _build_mcp_index_background():
-        try:
-            await asyncio.to_thread(load_or_build_index, proxy)
-            logger.info("[boot] MCP semantic index ready")
-        except Exception:
-            logger.exception("[boot] MCP semantic index build failed")
-
-    asyncio.create_task(_build_mcp_index_background())
-
-    try:
-        from tools import mcp_discovery
-        mcp_discovery.set_mcp_discovery_context(
-            manager_provider=lambda: mcp_client_manager,
-            register_tool=agent.register_dynamic_tool,
-            unregister_tool=agent.unregister_dynamic_tool,
-            llm_provider=get_llm,
-        )
-    except Exception:
-        logger.exception("MCP discovery context 注入失败")
-
-    try:
-        preload_all_in_background()
-        logger.info("[boot] background preload scheduled")
-    except Exception:
-        logger.exception("[boot] background preload failed to schedule")
-
-    async def _warmup_shortlister():
-        try:
-            sl = get_tool_shortlister()
-            if sl is None:
-                return
-            await asyncio.to_thread(sl.warmup)
-            agent2 = get_tool_agent()
-            tools_map = agent2.list_all_tools()
-            await asyncio.to_thread(sl._ensure_index, tools_map)
-            logger.info("[boot] ToolShortlister warmed up")
-        except Exception:
-            logger.exception("[boot] ToolShortlister warmup failed")
-
-    asyncio.create_task(_warmup_shortlister())
-
-    mcp_worker = worker
-    mcp_client_manager = proxy
+    # ── 2. 其余全部交给 boot_all ──
+    from bootstrap.startup import boot_all, shutdown_all
+    await boot_all(
+        get_tool_agent=get_tool_agent,
+        get_llm=get_llm,
+        get_local_rag_service=get_local_rag_service,
+        get_tool_shortlister=get_tool_shortlister,
+        mcp_client_manager=proxy,
+    )
 
     try:
         yield
     finally:
-        try:
-            if worker is not None:
-                await worker.stop()
-        except Exception:
-            logger.exception("关闭 MCP worker 失败")
+        await shutdown_all(mcp_worker=worker)
         mcp_worker = None
         mcp_client_manager = None
-
-        try:
-            close_sandbox_backend()
-        except Exception:
-            logger.exception("关闭 E2B 沙箱失败")
-            
-# ─────────────────────────────────────────────────────────────
-# FastAPI app
-# ─────────────────────────────────────────────────────────────
 
 app = FastAPI(title="LLM API 服务", lifespan=app_lifespan)
 

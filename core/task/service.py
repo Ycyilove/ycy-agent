@@ -23,9 +23,13 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Dict, List, Optional
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional, TYPE_CHECKING
 
-from tools.agent import ToolAgent, ToolCallRequest, ToolCallResult
+
+if TYPE_CHECKING:
+    # 仅类型检查器可见；运行期不 import，不触发 deps 违规
+    from tools.types import ToolCallRequest, ToolCallResult
+
 from tools.orchestration.state import OrchestratorState
 from core.task.modes import MODE_ASK, MODE_AGENT, MODES, validate_mode
 
@@ -53,7 +57,7 @@ class PendingApproval:
     session_id: str
     step_id: str
     approval_id: str
-    tool_call: ToolCallRequest
+    tool_call: Any
     title: str
     turn_id: str = ""
     path: Optional[str] = None
@@ -182,7 +186,7 @@ class AgentTaskService:
 
     def __init__(
         self,
-        agent_provider: Callable[[], ToolAgent],
+        agent_provider: Callable[[], Any],
         llm_provider: Callable[[], Any],
         multimodal_provider: Callable[[], Any],
         session_provider: Callable[[], Any],
@@ -904,280 +908,37 @@ class AgentTaskService:
         rag_resources: Optional[List[Dict[str, Any]]] = None,
         tool_context: Optional[List[str]] = None,
     ) -> AsyncIterator[str]:
-        answer_step_id = f"{task_id}:{turn_id}:answer"
-        thinking_step_id = f"{task_id}:{turn_id}:thinking"
+        """串联 answer_stream 的 7 个模块。
 
-        initial_step = self._step(
-            thinking_step_id, "思考过程", "running", "think", log=""
-        )
-        yield self._emit_step(task_id, initial_step)
+        具体逻辑在 core/task/answer/ 下：
+            multimodal.py / prompt_build.py / provider_call.py
+            splitter_bridge.py / fallback_search.py
+            asset_resolve.py / orchestrator.py
+        """
+        from core.task.answer import answer_stream
 
-        # ── 长期记忆：只注入 user_intent 类事实（file_path 已由 fill_params 用，
-        #    stream_answer 不需要重复），且限 3 条。──
-        try:
-            from core.memory.mem0_layer import recall_recent_facts
-            _facts = recall_recent_facts(session_id, limit=6) if session_id else []
-            # 只保留看起来像"用户意图"的事实（不是文件路径）
-            _intent_facts = [
-                f for f in (_facts or [])
-                if f and not re.match(r"^[A-Za-z]:[\\/]|^/", f)
-            ][:3]
-            if _intent_facts:
-                _mem_lines = ["## 本会话已知意图（长期记忆）"]
-                for f in _intent_facts:
-                    _mem_lines.append(f"- {f[:150]}")
-                _mem_lines.append(
-                    "\n**注意**：这些是历史意图，可能已过时；"
-                    "与当前问题无关时忽略。"
-                )
-                tool_context = list(tool_context or []) + ["\n".join(_mem_lines)]
-                logger.info(
-                    "[dsh][task_service] injected %d intent facts into stream_answer",
-                    len(_intent_facts),
-                )
-        except Exception:
-            logger.exception("recall_recent_facts (stream_answer) failed")
-            
-        # 隐式兜底：把检索到的资源作为时间线步骤展示
-        if rag_resources:
-            resource_step = self._step(
-                f"{task_id}:{turn_id}:rag_resources",
-                f"引用知识库 {len(rag_resources)} 个资源",
-                "done",
-                "resource",
-                resources=rag_resources,
-            )
-            yield self._emit_step(task_id, resource_step)
+        async for evt in answer_stream(
+            task_id=task_id,
+            session_id=session_id,
+            prior_messages=prior_messages,
+            message=message,
+            mode=mode,
+            attachments=attachments,
+            turn_id=turn_id,
+            rag_context=rag_context,
+            rag_resources=rag_resources,
+            tool_context=tool_context,
+            make_step=self._step,
+            emit_step=self._emit_step,
+            session_provider=self._session_provider,
+            rag_provider=self._rag_provider,
+            llm_provider=self._llm_provider,
+            multimodal_provider=self._multimodal_provider,
+            agent_provider=self._agent_provider,
+            persist_task_status=self._persist_task_status,
+        ):
+            yield evt
 
-        # 选择 provider
-        if attachments and all(self._is_multimodal(item) for item in attachments):
-            provider = self._multimodal_provider().stream_analyze(
-                self._build_multimodal_message(message, attachments)
-            )
-        else:
-            stop_block = ""
-            if task_id:
-                try:
-                    task = self._session_provider().get_task(task_id)
-                    stop_reason = task.get("stop_reason") if task else None
-                    stop_detail = task.get("stop_detail") if task else None
-                except Exception:
-                    stop_reason, stop_detail = None, None
-                if stop_reason and stop_reason != "done":
-                    stop_block = (
-                        f"\n\n【终止原因】{stop_reason}"
-                        + (f"：{stop_detail}" if stop_detail else "")
-                        + "\n请在回答里如实说明未完成的部分与原因，"
-                        "不要声称任务已完全完成。"
-                    )
-
-            prompt = build_prompt(
-                message,
-                mode,
-                attachments,
-                rag_context,
-                tool_context=tool_context,
-                extra_suffix=stop_block,
-            )
-
-            def _trim_history(msgs, max_user_chars=800, max_assistant_chars=400):
-                out = []
-                for m in msgs:
-                    role = m.get("role", "user")
-                    content = m.get("content") or ""
-                    limit = max_user_chars if role == "user" else max_assistant_chars
-                    if len(content) > limit:
-                        content = content[:limit] + "..."
-                    out.append({"role": role, "content": content})
-                return out
-
-            messages = _trim_history(prior_messages) + [
-                {"role": "user", "content": prompt}
-            ]
-            provider = self._llm_provider().stream_generate(messages, mode="deep")
-
-            # 落盘 stream_answer 的输入
-            try:
-                from infra.debug_log.llm import dump_llm_call
-                full_prompt = "\n\n".join(
-                    f"[{m.get('role', 'user')}]\n{m.get('content', '')}"
-                    for m in messages
-                )
-                dump_llm_call(
-                    kind="stream_answer",
-                    prompt=full_prompt,
-                    response=None,   # 流式响应在结束时才拿到，下面单独落盘
-                    model=None,
-                    extra={"mode": mode, "message": message[:200]},
-                )
-            except Exception:
-                logger.exception("dump stream_answer prompt failed")
-
-        # 用 StreamSplitter 解析
-        from collections import deque
-        splitter_events: "deque[Dict[str, Any]]" = deque()
-
-        def on_thinking(text: str) -> None:
-            step = self._step(
-                thinking_step_id, "思考过程", "running", "think", log=text
-            )
-            splitter_events.append({"kind": "thinking", "step": step})
-
-        def on_answer(text: str) -> None:
-            step = self._step(
-                answer_step_id, "正在生成回答…", "running", "answer", log=text
-            )
-            splitter_events.append({"kind": "answer", "step": step})
-
-        splitter = StreamSplitter(
-            on_thinking=on_thinking, on_answer=on_answer
-        )
-
-        async for chunk in _async_iter_sync(provider):
-            for payload in parse_provider_chunk(chunk):
-                result = splitter.feed(payload)
-                if result == "error":
-                    yield sse_event(
-                        "error",
-                        message=payload.get("text") or "生成回答失败",
-                    )
-
-                # 把本轮 splitter 产生的事件 yield 出去
-                while splitter_events:
-                    evt = splitter_events.popleft()
-                    yield self._emit_step(task_id, evt["step"])
-
-        # finalize
-        thinking_text, answer_text = splitter.finalize()
-
-        # finalize 可能再次触发 on_thinking/on_answer
-        while splitter_events:
-            evt = splitter_events.pop(0)
-            yield self._emit_step(task_id, evt["step"])
-
-        final_think = self._step(
-            thinking_step_id, "思考过程", "done", "think", log=thinking_text
-        )
-        yield self._emit_step(task_id, final_think)
-
-        if not answer_text:
-            answer_text = "未生成有效回答。"
-
-        # ── 反向兜底触发器：模型承认信息缺失，且本 turn 未调用过搜索工具 ──
-        # 设计：不预测“哪些问题该搜”，而是检测“模型承认答不了”这个信号。
-        # 只对 ask 模式生效；agent 模式由 orchestrator 的 audit 负责。
-        if mode == MODE_ASK:
-            _MISSING_INFO_PHRASES = (
-                "没有权限访问", "无法访问", "没有相关信息",
-                "无法提供", "建议通过官方渠道", "建议您通过官方",
-                "我无法", "我不知道", "没有足够的信息",
-                "无法获取", "不在我的知识",
-            )
-            _answer_lower = (answer_text or "").lower()
-            _admits_missing = any(p in _answer_lower for p in _MISSING_INFO_PHRASES)
-            _has_search_evidence = any(
-                ("返回" in t and ("tavily" in t.lower() or "fetch" in t.lower()
-                                 or "search" in t.lower() or "knowledge" in t.lower()))
-                for t in (tool_context or [])
-            )
-            if _admits_missing and not _has_search_evidence:
-                logger.info(
-                    "[dsh][ask] answer admits missing info; triggering fallback search"
-                )
-                try:
-                    from tools.mcp_discovery import _get_manager as _get_mcp_manager
-                    manager = _get_mcp_manager()
-                    fallback_results: List[str] = []
-                    # 1) 优先 tavily 搜索
-                    for srv in ("tavily", "fetch"):
-                        if srv not in getattr(manager, "configs", {}):
-                            continue
-                        try:
-                            if srv not in manager.connections:
-                                await manager.connect(srv)
-                                await manager.discover(srv, self._agent_provider().register_dynamic_tool)
-                            if srv == "tavily":
-                                payload = await manager.call_tool(
-                                    "mcp__tavily__tavily_search",
-                                    {"query": message, "max_results": 5},
-                                )
-                            else:
-                                payload = await manager.call_tool(
-                                    "mcp__fetch__fetch",
-                                    {"url": message},
-                                )
-                            fallback_results.append(
-                                f"【兜底搜索 {srv} 返回】\n"
-                                f"{json.dumps(payload, ensure_ascii=False, default=str)[:6000]}"
-                            )
-                            break
-                        except Exception:
-                            logger.exception("[dsh][ask] fallback search via %s failed", srv)
-                    if fallback_results:
-                        # 用搜索结果重新生成一次回答
-                        retry_context = list(tool_context or []) + fallback_results
-                        async for evt in self._stream_answer(
-                            task_id, session_id, prior_messages, message, mode,
-                            attachments, turn_id,
-                            rag_context=None, rag_resources=None,
-                            tool_context=retry_context,
-                        ):
-                            yield evt
-                        return
-                except Exception:
-                    logger.exception("[dsh][ask] fallback search failed")
-
-        # [[asset:xxx]] 解析
-        if rag_resources:
-            try:
-                rag = self._rag_provider()
-                # 统一格式：resource_store / search_knowledge 的资源 → resolve_asset_tags 期望的格式
-                normalized = []
-                for r in rag_resources:
-                    rid = r.get("id")
-                    url = r.get("url") or ""
-                    if not rid or not url:
-                        continue
-                    normalized.append({
-                        "id": rid,
-                        "url": url,
-                        "filename": r.get("filename") or "",
-                        "kind": r.get("kind") or "image",
-                        "markdown": r.get("markdown")
-                            or f"![{r.get('filename', '')}]({url})",
-                    })
-                if normalized:
-                    answer_text = rag.resource_manager.resolve_asset_tags(
-                        answer_text, normalized
-                    )
-            except Exception as error:
-                logger.warning("解析 asset 标签失败: %s", error)
-
-        final_answer = self._step(
-            answer_step_id, "Agent 回复", "done", "answer", log=answer_text
-        )
-        yield self._emit_step(task_id, final_answer)
-
-        # 落盘 stream_answer 的响应
-        try:
-            from infra.debug_log.llm import dump_llm_call
-            dump_llm_call(
-                kind="stream_answer_response",
-                prompt="",                      # prompt 已经落过，不重复
-                response=answer_text,
-                extra={
-                    "thinking_len": len(thinking_text or ""),
-                    "answer_len": len(answer_text or ""),
-                },
-            )
-        except Exception:
-            logger.exception("dump stream_answer response failed")
-
-        self._session_provider().add_message(session_id, "assistant", answer_text)
-        self._persist_task_status(task_id, "done")
-        yield sse_event("done", task_status="done")
-
-    # ────────── 工具执行（回退路径） ──────────
 
     async def _execute_tool(
         self,
@@ -2123,6 +1884,19 @@ class AgentTaskService:
             tool_call.tool_name, tool_call.parameters,
         )
 
+
+        # ── 新增：注入 approval_id，供 execute_tool_async 的 verify 用 ──
+        try:
+            from tools.security.gateway import get_security_context
+            _ctx = get_security_context()
+            if _ctx is not None:
+                _ctx.approved_approval_ids.add(approval_id)
+        except Exception:
+            logger.exception("注入 approved_approval_ids 失败: %s", approval_id)
+
+        tool_call.parameters = dict(tool_call.parameters or {})
+        tool_call.parameters["__approval_id__"] = approval_id
+
         try:
             result = await self._agent_provider().execute_tool_async(tool_call)
         except Exception as error:
@@ -2130,6 +1904,7 @@ class AgentTaskService:
                 "[dsh][task_service] approval execution raised: %s",
                 tool_call.tool_name,
             )
+            from tools.types import ToolCallResult
             result = ToolCallResult(
                 tool_name=tool_call.tool_name,
                 success=False,

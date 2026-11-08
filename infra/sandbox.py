@@ -3,7 +3,7 @@
 设计：
     - 接口与 tools/tools_def/sandbox.py 的 ExecutionResult 对齐
     - run_python_code(code, timeout) 签名保持不变
-    - SANDBOX_BACKEND=local 或 E2B 初始化失败时，get_backend() 返回 None
+    - _cfg().SANDBOX_BACKEND=local 或 E2B 初始化失败时，get_backend() 返回 None
       调用方走本地实现
     - E2B SDK 的 run_code() 是同步阻塞的，本模块内部不做 async 包装，
       由调用方（execute_tool_async）在线程池里跑即可
@@ -20,11 +20,14 @@ import logging
 import time
 from typing import Any, Dict, Optional
 
-from backend.config import (
-    E2B_API_KEY,
-    E2B_TEMPLATE,
-    SANDBOX_BACKEND,
-)
+from core import ports
+
+
+def _cfg():
+    cfg = ports.get_config()
+    if cfg is None:
+        raise RuntimeError("core.ports.config 未注入")
+    return cfg
 
 logger = logging.getLogger(__name__)
 
@@ -112,19 +115,19 @@ def get_backend() -> Optional[E2BBackend]:
 
     _initialized = True
 
-    if SANDBOX_BACKEND != "e2b":
-        logger.info("[e2b] SANDBOX_BACKEND=%r, using local sandbox", SANDBOX_BACKEND)
+    if _cfg().SANDBOX_BACKEND != "e2b":
+        logger.info("[e2b] _cfg().SANDBOX_BACKEND=%r, using local sandbox", _cfg().SANDBOX_BACKEND)
         _backend = None
         return None
 
-    if not E2B_API_KEY:
-        logger.warning("[e2b] E2B_API_KEY 未配置，回退本地沙箱")
+    if not _cfg().E2B_API_KEY:
+        logger.warning("[e2b] _cfg().E2B_API_KEY 未配置，回退本地沙箱")
         _backend = None
         return None
 
     try:
-        _backend = E2BBackend(api_key=E2B_API_KEY, template=E2B_TEMPLATE)
-        logger.info("[e2b] backend ready (template=%s)", E2B_TEMPLATE)
+        _backend = E2BBackend(api_key=_cfg().E2B_API_KEY, template=_cfg().E2B_TEMPLATE)
+        logger.info("[e2b] backend ready (template=%s)", _cfg().E2B_TEMPLATE)
     except Exception:
         logger.exception("[e2b] 初始化失败，回退本地沙箱")
         _backend = None

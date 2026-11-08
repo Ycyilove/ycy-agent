@@ -1,7 +1,7 @@
 """Langfuse 可观测性集成（方向 A）。
 
 设计：
-    - 未配置 LANGFUSE_PUBLIC_KEY / SECRET_KEY 时静默降级为 no-op
+    - 未配置 _cfg().LANGFUSE_PUBLIC_KEY / SECRET_KEY 时静默降级为 no-op
     - 通过 contextvars 把 per-turn callback handler 传递到
       asyncio.to_thread 里（否则 to_thread 里取不到当前 turn）
     - 每个 turn 一个 handler，同一 turn 内所有 LLM 调用归到同一 trace
@@ -21,12 +21,14 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Iterator, Optional
 
-from backend.config import (
-    LANGFUSE_ENABLED,
-    LANGFUSE_HOST,
-    LANGFUSE_PUBLIC_KEY,
-    LANGFUSE_SECRET_KEY,
-)
+from core import ports
+
+
+def _cfg():
+    cfg = ports.get_config()
+    if cfg is None:
+        raise RuntimeError("core.ports.config 未注入")
+    return cfg
 
 logger = logging.getLogger(__name__)
 
@@ -45,12 +47,12 @@ def init_langfuse() -> bool:
     """启动时调用。未启用 / 未配置 / 依赖缺失时静默返回 False。"""
     global _enabled
 
-    if not LANGFUSE_ENABLED:
-        logger.info("[langfuse] LANGFUSE_ENABLED=false，可观测性关闭")
+    if not _cfg().LANGFUSE_ENABLED:
+        logger.info("[langfuse] _cfg().LANGFUSE_ENABLED=false，可观测性关闭")
         _enabled = False
         return False
 
-    if not LANGFUSE_PUBLIC_KEY or not LANGFUSE_SECRET_KEY:
+    if not _cfg().LANGFUSE_PUBLIC_KEY or not _cfg().LANGFUSE_SECRET_KEY:
         logger.info("[langfuse] 未配置 PUBLIC/SECRET KEY，可观测性关闭")
         _enabled = False
         return False
@@ -64,7 +66,7 @@ def init_langfuse() -> bool:
 
     _enabled = True
     logger.info(
-        "[langfuse] 已启用 host=%s", LANGFUSE_HOST or "(default)"
+        "[langfuse] 已启用 host=%s", _cfg().LANGFUSE_HOST or "(default)"
     )
     return True
 

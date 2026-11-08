@@ -241,99 +241,20 @@ def search_intents(
 ) -> List[Dict[str, Any]]:
     """语义检索工具索引，返回按 server 聚合的候选。
 
-    步骤：
-        1. goal 编码（与工具同一模型）
-        2. FAISS top_k 检索
-        3. 阈值过滤（min_score）
-        4. 按 server 聚合，每 server 保留最高分的 per_server_cap 条
-
-    Args:
-        query: 用户 goal 原文
-        top_k: 召回条数上限
-        per_server_cap: 每个 server 保留的候选条数
-        min_score: 相似度阈值，低于此值丢弃（默认 0.5）
-        frame: IntentFrame（可选），有 domain 时对 domain 不匹配的候选降权
-
-    Returns:
-        [{server_name, top_score, matched_tools: [{tool_name, score, ...}]}, ...]
-        按 top_score 降序。
+    B6-c 起委托给 tools.semantics.index.strategies.intent_search。
+    保留原签名，调用方零改动。
     """
-    import faiss
-    import numpy as np
-
-    if not (os.path.exists(_RECORDS_FILE) and os.path.exists(_INDEX_FILE)):
-        return []
-
-    records = _load_records()
-    if not records:
-        return []
-
-    # 1. goal 编码
-    encoder = get_encoder(_EMBED_MODEL, local_files_only=True)
-    qv = encoder.encode([query], normalize_embeddings=True)[0]
-    qv = np.array([qv], dtype="float32")
-
-    # 2. FAISS 检索
-    index = faiss.read_index(_INDEX_FILE)
-    k = min(top_k * 3, len(records))
-    dists, idxs = index.search(qv, k)
-
-    # 3. 阈值过滤
-    hits: List[Dict[str, Any]] = []
-    for d, i in zip(dists[0], idxs[0]):
-        if i < 0 or i >= len(records):
-            continue
-        score = float(d)
-        if score < min_score:
-            continue
-        r = records[i]
-        hits.append({
-            "tool_name": r["tool_name"],
-            "server_name": r.get("server_name", ""),
-            "text": r.get("text", ""),
-            "score": score,
-        })
-
-    if not hits:
-        logger.info(
-            "[mcp_intent] no hit above threshold %.2f for %r", min_score, query,
-        )
-        return []
-
-    # 4. 领域过滤（可选，frame 有 domain 时降权不匹配的候选）
-    if frame is not None and getattr(frame, "domain", "unknown") != "unknown":
-        # 用 tool text 里是否含 domain 关键词做粗过滤（不做硬剔除，只降权）
-        _domain_kw = {
-            "news": ("news", "新闻", "headline"),
-            "sports": ("sport", "体育", "match", "score"),
-            "file": ("file", "文件", "path", "directory"),
-            "web": ("web", "网页", "http", "url", "fetch"),
-            "code": ("code", "代码", "function", "script"),
-        }.get(frame.domain, ())
-        if _domain_kw:
-            for h in hits:
-                text_low = h["text"].lower()
-                if not any(kw in text_low for kw in _domain_kw):
-                    h["score"] *= 0.8   # 降权，不剔除
-
-    # 5. 按 server 聚合
-    by_server: Dict[str, List[Dict]] = {}
-    for h in hits:
-        srv = h.get("server_name") or ""
-        if not srv:
-            continue
-        by_server.setdefault(srv, []).append(h)
-
-    out: List[Dict[str, Any]] = []
-    for srv, items in by_server.items():
-        items.sort(key=lambda x: -x["score"])
-        out.append({
-            "server_name": srv,
-            "top_score": items[0]["score"],
-            "matched_tools": items[:per_server_cap],
-        })
-    out.sort(key=lambda x: -x["top_score"])
-    return out
+    from tools.semantics.index.strategies.intent_search import (
+        search_intents as _impl,
+    )
+    return _impl(
+        query,
+        _INDEX_DIR,
+        top_k=top_k,
+        per_server_cap=per_server_cap,
+        min_score=min_score,
+        frame=frame,
+    )
 
 
 def clear_index() -> None:

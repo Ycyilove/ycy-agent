@@ -46,89 +46,39 @@ class CapabilityIndex:
         return False
 
     def search(self, frame, top_k: int = 10) -> List[Any]:
-        """混合检索，返回按 server 聚合的 RankedCandidate。"""
+        """向量 + BM25 + RRF 混合检索。
+
+        B6-c 起委托给 tools.semantics.index.strategies.hybrid.hybrid_search。
+        保留原签名（frame + top_k），调用方零改动。
+        """
+        from tools.semantics.index.strategies.hybrid import (
+            hybrid_search as _impl,
+        )
+
+        # frame 可能是 IntentFrame 对象，取其 raw / domain
+        query = getattr(frame, "raw", "") or ""
+        domain = getattr(frame, "domain", None)
+        if domain == "unknown":
+            domain = None
+
+        raw = _impl(
+            query,
+            _INDEX_DIR,
+            domain=domain,
+            top_k=top_k,
+        )
+
+        # 转回 RankedCandidate（下游 _pipeline 期望这个类型）
         from .types import RankedCandidate
-        if not (os.path.exists(_RECORDS_FILE) and os.path.exists(_INDEX_FILE)):
-            return []
-
-        with open(_RECORDS_FILE, "r", encoding="utf-8") as f:
-            records = json.load(f)
-        if not records:
-            return []
-
-        # 确定性过滤：domain 匹配
-        filtered = [
-            r for r in records
-            if r.get("intent_features", {}).get("domain") == frame.domain
-        ]
-        if not filtered:
-            filtered = records
-
-        # 向量 + BM25 + RRF
-        try:
-            import faiss
-            import numpy as np
-            from infra.embedding import get_encoder
-            from rag.bm25_store import BM25Store, rrf_fuse
-        except Exception:
-            logger.exception("[capability] deps missing, fallback to bm25 only")
-            return []
-
-        enc = get_encoder(_EMBED_MODEL, local_files_only=True)
-        qv = enc.encode([frame.raw], normalize_embeddings=True)[0]
-        qv = np.array([qv], dtype="float32")
-        idx = faiss.read_index(_INDEX_FILE)
-
-        k = min(top_k * 5, len(records))
-        dists, idxs = idx.search(qv, k)
-
-        filtered_ids = {r.get("record_id") for r in filtered}
-        vec_results: List[Dict] = []
-        for d, i in zip(dists[0], idxs[0]):
-            if i < 0 or i >= len(records):
-                continue
-            r = dict(records[i])
-            if r.get("record_id") not in filtered_ids:
-                continue
-            r["score"] = float(d)
-            r["metadata"] = {"chunk_id": r.get("record_id", f"vec-{i}")}
-            vec_results.append(r)
-
-        bm25 = BM25Store()
-        bm25.build(filtered)
-        bm25_results = bm25.search(frame.raw, top_k * 3, lambda: filtered)
-        for i, r in enumerate(bm25_results):
-            r["metadata"] = {
-                "chunk_id": r.get("record_id", f"bm25-{i}")
-            }
-
-        fused = rrf_fuse(
-            vec_results, bm25_results, limit=top_k * 2,
-        ) if bm25_results else vec_results[: top_k * 2]
-
-        # 聚合到 server
-        by_server: Dict[str, Dict] = {}
-        for item in fused:
-            srv = item.get("server_name")
-            if not srv:
-                continue
-            if srv not in by_server or (
-                item.get("rrf_score", 0) > by_server[srv].get("rrf_score", 0)
-            ):
-                by_server[srv] = item
-
         out: List[RankedCandidate] = []
-        for srv, item in by_server.items():
+        for item in raw:
             out.append(
                 RankedCandidate(
-                    server_name=srv,
-                    top_tools=[item.get("tool_name", "")],
-                    score=item.get("rrf_score", 0),
-                    intent_features=item.get("intent_features", {}),
-                    registry_entry=item.get("provenance", {}).get(
-                        "registry_entry", {}
-                    ),
+                    server_name=item["server_name"],
+                    top_tools=item.get("top_tools") or [],
+                    score=item.get("score", 0.0),
+                    intent_features=item.get("intent_features") or {},
+                    registry_entry=item.get("registry_entry") or {},
                 )
             )
-        out.sort(key=lambda c: -c.score)
         return out

@@ -1,0 +1,28 @@
+B8-c 完成于 2026-11-09 00:18:31
+
+新增：
+- tools/orchestration/assess.py（AssessMixin，5 个方法）
+  - _validate_done / _find_verify_tool / _collect_verification
+  - _assess_result / _goal_needs_verification
+
+改动：
+- tools/orchestration/core.py 从 1288 行 -> 1084 行（删 204 行）
+  - 删 4 个评估方法 + _goal_needs_verification
+  - class AgentOrchestrator(DecisionMixin, FillParamsMixin) -> class AgentOrchestrator(DecisionMixin, FillParamsMixin, AssessMixin)
+  - 顶部 from .assess import AssessMixin
+
+修复：
+- B8-c-2 删段时留下孤儿 @classmethod（L341），贴到 _goal_needs_verification 前
+- 搬 _goal_needs_verification 到 assess.py 时修了重复 @classmethod
+
+验收：
+- core.py 14 方法（不含 5 个已搬的）
+- assess.py 5 方法
+- 手动 _validate_done / _goal_needs_verification 通过
+- b0 / b1 仍绿
+
+B8 进度：
+- B8-a: decision.py ✅（1803 行）
+- B8-b: fill_params.py ✅（~1287 行）
+- B8-c: assess.py ✅（1084 行）
+- B8-d: run.py（待做，主循环 + 辅助，core.py -> ~100 行薄壳）

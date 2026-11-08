@@ -8,6 +8,7 @@ import re
 from typing import Dict, List, Optional
 
 from .types import IntentAnalysis
+from tools import get_registry
 
 logger = logging.getLogger(__name__)
 
