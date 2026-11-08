@@ -13,7 +13,11 @@ const getErrorMessage = async (response) => {
 
 export const request = async (path, options = {}) => {
   const response = await fetch(`${API_BASE_URL}${path}`, options);
-  if (!response.ok) throw new Error(await getErrorMessage(response));
+  if (!response.ok) {
+    const err = new Error(await getErrorMessage(response));
+    err.status = response.status;          // ← 新增：透传 HTTP 状态码
+    throw err;
+  }
   return response;
 };
 

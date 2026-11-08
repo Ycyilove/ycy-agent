@@ -32,6 +32,7 @@ class MCPServerConfig:
     retries: int = 2
     enabled: bool = True
     allow_hidden_tools: tuple[str, ...] = ()
+    capability_tags: tuple[str, ...] = () 
 
     @classmethod
     def from_mapping(cls, name: str, value: dict) -> "MCPServerConfig":
@@ -79,6 +80,9 @@ class MCPServerConfig:
             enabled=bool(value.get("enabled", True)),
             allow_hidden_tools=tuple(
                 str(t) for t in value.get("allow_hidden_tools", [])
+            ),
+            capability_tags=tuple(
+                str(t) for t in value.get("capability_tags", [])
             ),
         )
 

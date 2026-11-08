@@ -10,8 +10,8 @@
     },
     "tavily": {
       "transport": "stdio",
-      "command": "npx",
-      "args": ["-y", "tavily-mcp@latest"],
+      "command": "cmd",
+      "args": ["/c", "npx", "-y", "tavily-mcp"],
       "env_from": {
         "TAVILY_API_KEY": "TAVILY_API_KEY"
       },

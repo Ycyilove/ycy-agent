@@ -19,6 +19,7 @@ import os
 import threading
 import time
 import uuid
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -72,8 +73,7 @@ class PendingApproval:
 def _looks_base64(s: str) -> bool:
     if not isinstance(s, str) or len(s) < 32:
         return False
-    import re as _re
-    return bool(_re.match(r"^[A-Za-z0-9+/=\s]+$", s[:256]))
+    return bool(re.match(r"^[A-Za-z0-9+/=\s]+$", s[:256]))
 
 
 def _dedup_resources(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -912,22 +912,28 @@ class AgentTaskService:
         )
         yield self._emit_step(task_id, initial_step)
 
-        # ── 长期记忆：把本会话已知事实作为一条 tool_context 注入最终回答 ──
+        # ── 长期记忆：只注入 user_intent 类事实（file_path 已由 fill_params 用，
+        #    stream_answer 不需要重复），且限 3 条。──
         try:
             from core.memory.mem0_layer import recall_recent_facts
             _facts = recall_recent_facts(session_id, limit=6) if session_id else []
-            if _facts:
-                _mem_lines = ["## 本会话已知事实（长期记忆）"]
-                for f in _facts[:6]:
-                    _mem_lines.append(f"- {f[:300]}")
+            # 只保留看起来像"用户意图"的事实（不是文件路径）
+            _intent_facts = [
+                f for f in (_facts or [])
+                if f and not re.match(r"^[A-Za-z]:[\\/]|^/", f)
+            ][:3]
+            if _intent_facts:
+                _mem_lines = ["## 本会话已知意图（长期记忆）"]
+                for f in _intent_facts:
+                    _mem_lines.append(f"- {f[:150]}")
                 _mem_lines.append(
-                    "\n**注意**：这些是历史事实，可能已过时；"
+                    "\n**注意**：这些是历史意图，可能已过时；"
                     "与当前问题无关时忽略。"
                 )
                 tool_context = list(tool_context or []) + ["\n".join(_mem_lines)]
                 logger.info(
-                    "[dsh][task_service] injected %d memory facts into stream_answer",
-                    len(_facts),
+                    "[dsh][task_service] injected %d intent facts into stream_answer",
+                    len(_intent_facts),
                 )
         except Exception:
             logger.exception("recall_recent_facts (stream_answer) failed")
@@ -973,7 +979,21 @@ class AgentTaskService:
                 tool_context=tool_context,
                 extra_suffix=stop_block,
             )
-            messages = list(prior_messages) + [{"role": "user", "content": prompt}]
+
+            def _trim_history(msgs, max_user_chars=800, max_assistant_chars=400):
+                out = []
+                for m in msgs:
+                    role = m.get("role", "user")
+                    content = m.get("content") or ""
+                    limit = max_user_chars if role == "user" else max_assistant_chars
+                    if len(content) > limit:
+                        content = content[:limit] + "..."
+                    out.append({"role": role, "content": content})
+                return out
+
+            messages = _trim_history(prior_messages) + [
+                {"role": "user", "content": prompt}
+            ]
             provider = self._llm_provider().stream_generate(messages, mode="deep")
 
             # 落盘 stream_answer 的输入
@@ -1451,15 +1471,33 @@ class AgentTaskService:
                         step_index=event["step"],
                         tool_name=tool_call.tool_name,
                         payload=result.result,
-                        max_inline_tokens=4000,
+                        max_inline_tokens=2000,
                     )
 
                     if handle.get("inline"):
-                        # 小结果：原样内联
-                        payload_text = self._compact_tool_payload(result.result)
+                        # 小结果：只保留"产出型"字段，中间过程 log 已在 state.history
+                        _PRODUCTIVE_KEYS = (
+                            "new_path", "output_path", "file_path",
+                            "resources", "columns", "rows", "url",
+                            "content", "content_preview", "text",
+                            "message", "summary",
+                        )
+                        if isinstance(result.result, dict):
+                            productive = {
+                                k: v for k, v in result.result.items()
+                                if k in _PRODUCTIVE_KEYS
+                            }
+                            if productive:
+                                payload_text = json.dumps(
+                                    productive, ensure_ascii=False, default=str,
+                                )
+                            else:
+                                payload_text = self._compact_tool_payload(result.result)
+                        else:
+                            payload_text = self._compact_tool_payload(result.result)
                         tool_execution_context.append(
                             f"【工具 {tool_call.tool_name} 返回（{tag}）】"
-                            f"{err_note}\n{payload_text[:8000]}"
+                            f"{err_note}\n{payload_text[:3000]}"
                         )
                     else:
                         # 大结果：句柄 + 摘要
@@ -1481,7 +1519,7 @@ class AgentTaskService:
                             f"参数 result_id=`{handle.get('result_id')}`、task_id=`{task_id}`，"
                             f"可指定 filename 和 start_index 分页读取。\n\n"
                             f"## 摘要（每个文档采样 {len((summary or {}).get('files', []))} 个文档）\n"
-                            f"{summary_text}"
+                            f"{summary_text[:2000]}"
                         )
                 except Exception:
                     logger.exception("累积工具结果失败")
@@ -2237,6 +2275,17 @@ class AgentTaskService:
         else:
             state.mark_failure(
                 tool_call.tool_name, tool_call.parameters, result.error or ""
+            )
+            # ── 补：更新连续失败计数，供 _intercept_call 拦截重复调用 ──
+            from tools.orchestration.state import params_key as _params_key
+            _fk = (tool_call.tool_name, _params_key(tool_call.parameters))
+            state._consecutive_failures[_fk] = (
+                state._consecutive_failures.get(_fk, 0) + 1
+            )
+            logger.info(
+                "[dsh][task_service] approval failure count for %s: %d",
+                tool_call.tool_name,
+                state._consecutive_failures[_fk],
             )
             state.add_history(
                 f"Step {step_num}: {tool_call.tool_name}({tool_call.parameters}) "

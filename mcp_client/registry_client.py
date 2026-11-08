@@ -138,6 +138,62 @@ def _count_token_hits(entry: Dict[str, Any], tokens: List[str]) -> int:
     )
     return sum(1 for t in tokens if t.lower() in haystack)
 
+def _infer_capability_tags_from_description(
+    registry_name: str, description: str
+) -> List[str]:
+    """从 registry 条目的 name + description 推断 capability_tags。
+
+    registry 只返回文本，没有结构化的 capability_tags。
+    用和 tools/semantics/essential.py 一致的词根，推断粗粒度标签。
+    这些标签会写进 MCPServerConfig.capability_tags，
+    由 manager.discover 派生 essential_when。
+    """
+    import re as _re
+    haystack = f"{registry_name or ''} {description or ''}".lower()
+    tags: List[str] = []
+    _ACTION_PATTERNS = (
+        ("generate", _re.compile(
+            r"\b(create|generate|write|export|render|save|build|make|produce)\b"
+        )),
+        ("read", _re.compile(
+            r"\b(read|get|list|show|open|load|fetch|extract|parse)\b"
+        )),
+        ("modify", _re.compile(
+            r"\b(edit|update|modify|patch|replace|append|insert)\b"
+        )),
+        ("query", _re.compile(
+            r"\b(search|query|find|lookup|retrieve)\b"
+        )),
+        ("delete", _re.compile(
+            r"\b(delete|remove|drop|purge|truncate)\b"
+        )),
+    )
+    _FORMAT_PATTERNS = (
+        ("presentation", _re.compile(
+            r"\b(pptx?|powerpoint|presentation|slide|slides|deck)\b"
+        )),
+        ("document", _re.compile(
+            r"\b(docx?|word|document|report|book|epub)\b"
+        )),
+        ("spreadsheet", _re.compile(
+            r"\b(xlsx?|excel|spreadsheet|sheet|csv)\b"
+        )),
+        ("pdf", _re.compile(r"\bpdf\b")),
+        ("table", _re.compile(r"\b(table|tabular)\b")),
+    )
+    # 转换类工具不算 generate
+    _is_convert = bool(_re.search(
+        r"\b(convert|transform|merge|split|compress)\b", haystack,
+    ))
+    for action, pat in _ACTION_PATTERNS:
+        if action == "generate" and _is_convert:
+            continue
+        if pat.search(haystack):
+            tags.append(action)
+    for fmt, pat in _FORMAT_PATTERNS:
+        if pat.search(haystack):
+            tags.append(fmt)
+    return tags
 
 def _entries_to_configs(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """把原始条目转成精简配置列表。"""
@@ -150,14 +206,17 @@ def _entries_to_configs(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if not remote:
             continue
         registry_name = server.get("name") or ""
+        _desc = server.get("description") or ""
+        _caps = _infer_capability_tags_from_description(registry_name, _desc)
         results.append(
             {
                 "registry_name": registry_name,
                 "local_name": _safe_local_name(registry_name),
-                "description": server.get("description") or "",
+                "description": _desc,
                 "transport": remote["type"],
                 "url": remote["url"],
                 "headers": remote.get("headers") or [],
+                "capability_tags": _caps,
             }
         )
     return results
@@ -407,6 +466,7 @@ async def config_for_entry(entry: Dict[str, Any]) -> Optional[MCPServerConfig]:
                 "connect_timeout": 15,
                 "call_timeout": 30,
                 "retries": 1,
+                "capability_tags": entry.get("capability_tags") or [],
             },
         )
     except ValueError as error:

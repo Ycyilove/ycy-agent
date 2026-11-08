@@ -22,6 +22,13 @@ from .intent import (
     INTENT_CODE,
     INTENT_TUTORIAL,
     INTENT_CHITCHAT,
+    INTENT_UNKNOWN,
+)
+from .essential import (
+    ESSENTIAL_ACTIONS,
+    ESSENTIAL_FORMATS,
+    essential_from_capability_tags,
+    infer_essential_when,
 )
 
 __all__ = [
@@ -42,4 +49,9 @@ __all__ = [
     "INTENT_CODE",
     "INTENT_TUTORIAL",
     "INTENT_CHITCHAT",
+    "INTENT_UNKNOWN",
+    "ESSENTIAL_ACTIONS",
+    "ESSENTIAL_FORMATS",
+    "essential_from_capability_tags",
+    "infer_essential_when",
 ]

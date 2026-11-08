@@ -149,6 +149,25 @@ class ToolShortlister:
 
         scores.sort(key=lambda x: -x[1])
 
+        # 记录 top-10 分数，用于判断 essential_when 工具是否被 min_score 筛掉
+        _top = [(n, round(s, 3)) for n, s in scores[:10]]
+        logger.info(
+            "[dsh][shortlist][debug] goal=%r, kept_threshold=%.2f, "
+            "min_keep=%d, top10=%r",
+            goal[:60], self._min_score, self._min_keep, _top,
+        )
+        # 特别记录关键工具的分数
+        for _key_tool in ("write_excel", "read_pdf_text", "write_docx",
+                          "write_file", "read_pdf_metadata"):
+            for n, s in scores:
+                if n == _key_tool:
+                    logger.info(
+                        "[dsh][shortlist][debug] key tool %s: score=%.3f "
+                        "(threshold=%.2f, will_keep=%r)",
+                        _key_tool, s, self._min_score, s >= self._min_score,
+                    )
+                    break
+                
         kept = [n for n, s in scores if s >= self._min_score][: self._top_k]
         if len(kept) < self._min_keep:
             logger.info(

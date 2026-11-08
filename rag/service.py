@@ -387,7 +387,7 @@ class LocalRAGService:
     def search(
         self,
         query: str,
-        top_k: int = 15,
+        top_k: int = 8,
         rewrite: bool = True,
         use_bm25: bool = True,
         mode: str = "auto",
@@ -720,6 +720,8 @@ class LocalRAGService:
         for index, doc in enumerate(retrieved_docs, 1):
             source = doc.get('filename', '未知来源')
             content = doc.get('text', '')
+            if len(content) > 1500:
+                content = content[:1500] + "...(truncated)"
 
             resource_lines = []
             for resource in doc.get('resources', []):

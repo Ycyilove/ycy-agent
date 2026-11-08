@@ -76,6 +76,7 @@ def _human_size(size: int) -> str:
     ],
     category="document",
     danger_level="safe",
+    essential_when=("read", "pdf"),
 )
 def read_pdf_text(
     file_path: str,
@@ -612,6 +613,7 @@ def add_excel_sheet(
     examples=["read_docx_text(file_path='D:/a/report.docx')"],
     category="document",
     danger_level="safe",
+    essential_when=("read", "document")
 )
 def read_docx_text(file_path: str, max_chars: int = 50000) -> Dict[str, Any]:
     """读 Word 文本。"""

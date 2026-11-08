@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+import json
 from contextvars import ContextVar
 from typing import Any, Dict, FrozenSet, List, Optional
 
@@ -17,39 +18,15 @@ from . import registry, get_registry
 from .intent import LLMIntentRecognizer, IntentRecognizer
 from .types import ToolCallRequest, ToolCallResult, IntentAnalysis
 
-# ── per-task 允许工具集（async-safe） ──
-# 用 frozenset 保证不可变，避免被下游意外修改
 _allowed_tools_var: ContextVar[Optional[FrozenSet[str]]] = ContextVar(
     "tool_agent_allowed_tools", default=None
 )
-
-# 兼容 re-export
 
 
 logger = logging.getLogger(__name__)
 
 
 _MCP_TOOL_PREFIX = "mcp__"
-
-
-# ─────────────────────────────────────────────────────────────
-# 意图识别
-# ─────────────────────────────────────────────────────────────
-
-
-
-
-
-# ─────────────────────────────────────────────────────────────
-# 规则意图识别（保留完整版，未拆分）
-# ─────────────────────────────────────────────────────────────
-
-
-
-
-
-
-
 
 
 class ToolAgent:
@@ -61,8 +38,7 @@ class ToolAgent:
         self.llm_intent_recognizer = LLMIntentRecognizer()
         self.tool_descriptions = self.registry.get_tool_descriptions()
         self._mcp_client_manager = None
-        # _allowed_tools 不再是实例属性，改为 contextvars（见 _allowed_tools 属性）
-        
+
     def set_mcp_client_manager(self, manager) -> None:
         self._mcp_client_manager = manager
         logger.info(
@@ -70,19 +46,11 @@ class ToolAgent:
             type(manager).__name__,
         )
 
-    # ── per-task 允许工具集（contextvars） ──
-
     @property
     def _allowed_tools(self) -> Optional[FrozenSet[str]]:
-        """当前任务的允许工具集。未设置返回 None（表示全部允许）。"""
         return _allowed_tools_var.get()
 
     def set_available_tools(self, tool_names: List[str]) -> None:
-        """设置当前 asyncio 上下文允许的工具集。
-
-        因为用 contextvars，只影响当前任务及其派生的子任务，
-        不会污染其他并发任务。
-        """
         if not tool_names:
             _allowed_tools_var.set(None)
         else:
@@ -90,7 +58,6 @@ class ToolAgent:
         logger.info(f"[Skills] Allowed tools set to: {len(tool_names)} tools")
 
     def clear_available_tools(self) -> None:
-        """显式清除当前上下文的允许工具集。"""
         _allowed_tools_var.set(None)
 
     @staticmethod
@@ -127,7 +94,7 @@ class ToolAgent:
         self.tool_descriptions = self.registry.get_tool_descriptions()
         self.llm_intent_recognizer._tool_descriptions_cache = None
         return handler
-          
+
     def unregister_dynamic_tool(self, name: str) -> bool:
         metadata = self.registry.get_metadata(name)
         if metadata is None or metadata.origin != "mcp":
@@ -140,7 +107,6 @@ class ToolAgent:
     def list_all_tools(self, allowed_danger_levels: Optional[set] = None) -> Dict[str, Any]:
         result: Dict[str, Any] = {}
         for name, meta in self.registry.get_all_metadata().items():
-            # [修改] 增加技能过滤逻辑
             if self._allowed_tools is not None and name not in self._allowed_tools:
                 continue
             if allowed_danger_levels is not None and meta.danger_level not in allowed_danger_levels:
@@ -151,13 +117,11 @@ class ToolAgent:
     def analyze_intent(self, user_message: str, use_llm: bool = True) -> IntentAnalysis:
         if use_llm:
             llm_result = self.llm_intent_recognizer.analyze(user_message, self.registry)
-            # [修改] 如果识别出的工具不在允许列表中，则视为未识别
             if llm_result.suggested_tool:
                 if self._allowed_tools is None or llm_result.suggested_tool in self._allowed_tools:
                     return llm_result
         rule_result = self.rule_intent_recognizer.analyze(user_message)
         if rule_result.suggested_tool:
-             # [修改] 规则识别也要受技能限制
             if self._allowed_tools is None or rule_result.suggested_tool in self._allowed_tools:
                 return rule_result
         return IntentAnalysis(
@@ -189,7 +153,6 @@ class ToolAgent:
         tool_func = self.registry.get_tool(tool_name)
         params = tool_call.parameters or {}
 
-        # ── 安全网关（统一入口，替代分散检查） ──
         from tools.security.gateway import get_gateway, get_security_context
         ctx = get_security_context()
         meta = self.registry.get_metadata(tool_name)
@@ -206,7 +169,6 @@ class ToolAgent:
                     parameters=params,
                 )
 
-        # 动态 MCP 路由（保持原逻辑）
         if tool_func is None and self._is_mcp_tool_name(tool_name):
             mcp_client = self._mcp_client_manager
             if mcp_client is None:
@@ -236,6 +198,32 @@ class ToolAgent:
                 else:
                     success = True
                     error_message = None
+
+                # ── 如果 result 是 MCP 格式，检查 content[0].text 里的 status ──
+                # result 是 call_tool 的返回值（dict），不是 ToolCallResult
+                if isinstance(result, dict):
+                    blocks = result.get("content")
+                    if isinstance(blocks, list) and blocks:
+                        first = blocks[0]
+                        if isinstance(first, dict) and first.get("type") == "text":
+                            try:
+                                inner = json.loads(first.get("text", "{}"))
+                                if (
+                                    isinstance(inner, dict)
+                                    and inner.get("status") == "error"
+                                ):
+                                    success = False
+                                    error_message = (
+                                        inner.get("error")
+                                        or "tool returned error status"
+                                    )
+                                    logger.info(
+                                        "[dsh][mcp] tool %s returned status=error: %s",
+                                        tool_name, error_message[:200],
+                                    )
+                            except (json.JSONDecodeError, TypeError):
+                                pass
+
                 return ToolCallResult(
                     tool_name=tool_name, success=success, result=result,
                     error=error_message, execution_time=time.time() - start_time,
@@ -269,8 +257,6 @@ class ToolAgent:
                 execution_time=time.time() - start_time,
                 parameters=params,
             )
-
-        # ── 已删除：内置工具必填参数预校验（网关 + _fill_params 兜底已覆盖） ──
 
         try:
             result = tool_func(**params)
@@ -317,7 +303,7 @@ class ToolAgent:
                 execution_time=time.time() - start_time,
                 parameters=params,
             )
-            
+
     def format_tool_result(self, result: ToolCallResult) -> str:
         from .format import format_tool_result as _fmt
         try:

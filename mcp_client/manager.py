@@ -362,43 +362,37 @@ class MCPClientManager:
             "append", "upload", "post", "put",
         )
 
-        # ── MCP 工具元数据：在循环外定义一次 ──
-        # 按 remote_name 查 essential_when / capability_tags。
-        # 新增 MCP 生成工具时只改这里，不用改 core.py / mcp_discovery.py。
+        # ── MCP 工具元数据：只声明 capability_tags ──
+        # essential_when 由 register_tool 里自动推导（从 capability_tags），
+        # 不再手动维护。新增 MCP 工具只需要写 capability_tags。
         _MCP_TOOL_META = {
             "create_pptx": {
-                "essential_when": ("generate", "presentation"),
                 "capability_tags": (
                     "generate", "presentation", "ppt", "pptx",
                     "slide", "slides", "deck", "powerpoint",
                 ),
             },
             "create_word": {
-                "essential_when": ("generate", "document"),
                 "capability_tags": (
                     "generate", "document", "docx", "word", "report",
                 ),
             },
             "create_excel": {
-                "essential_when": ("generate", "spreadsheet"),
                 "capability_tags": (
                     "generate", "spreadsheet", "xlsx", "excel",
                     "sheet", "table", "csv",
                 ),
             },
             "create_book": {
-                "essential_when": ("generate", "document"),
                 "capability_tags": ("generate", "document", "book", "epub"),
             },
             "convert_to_pdf": {
                 "capability_tags": ("convert", "pdf"),
             },
             "read_office": {
-                "essential_when": ("read",),
                 "capability_tags": ("read", "document", "office"),
             },
             "read_pdf": {
-                "essential_when": ("read", "pdf"),
                 "capability_tags": ("read", "pdf", "document"),
             },
             "edit_pptx": {
@@ -411,11 +405,9 @@ class MCPClientManager:
                 "capability_tags": ("modify", "spreadsheet", "excel"),
             },
             "write_file": {
-                "essential_when": ("generate",),
                 "capability_tags": ("generate", "file", "write"),
             },
             "read_file": {
-                "essential_when": ("read",),
                 "capability_tags": ("read", "file"),
             },
             "search": {
@@ -423,6 +415,9 @@ class MCPClientManager:
             },
             "search_news": {
                 "capability_tags": ("query", "search", "news"),
+            },
+            "render_document": {
+                "capability_tags": ("generate", "pdf", "document"),
             },
         }
 
@@ -454,10 +449,37 @@ class MCPClientManager:
                     public_name, server_name,
                 )
 
-            # 按 remote_name 查元数据
+            # 按 remote_name 查 capability_tags；essential_when 自动推导
+            # ── capability_tags / essential_when 三级 fallback ──
+            # 1. _MCP_TOOL_META 里手写的（静态 MCP，如 office-worker）
+            # 2. config.capability_tags（动态发现的 server，由 registry_client
+            #    从 description 推断）
+            # 3. 都没有 → infer_essential_when 靠 name+description 推断
             _tool_meta = _MCP_TOOL_META.get((tool.name or "").lower(), {})
-            _essential = _tool_meta.get("essential_when", ())
-            _caps = _tool_meta.get("capability_tags", ())
+            _caps = tuple(_tool_meta.get("capability_tags", ()))
+            if not _caps:
+                _caps = tuple(getattr(config, "capability_tags", ()) or ())
+            try:
+                from tools.semantics import infer_essential_when
+                _essential = infer_essential_when(
+                    tool.name or "",
+                    tool.description or "",
+                    _caps,
+                )
+                # 如果 _MCP_TOOL_META 里显式写了 essential_when，优先用它
+                _explicit = _tool_meta.get("essential_when")
+                if _explicit:
+                    _essential = tuple(_explicit)
+            except Exception:
+                logger.exception(
+                    "[dsh][mcp] infer_essential_when failed for %s", tool.name,
+                )
+                _essential = ()
+            except Exception:
+                logger.exception(
+                    "[dsh][mcp] infer_essential_when failed for %s", tool.name,
+                )
+                _essential = ()
 
             spec = MCPToolSpec(
                 public_name=public_name,

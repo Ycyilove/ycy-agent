@@ -217,7 +217,8 @@ def analyze_csv(file_path: str, encoding: str = "utf-8") -> Dict[str, Any]:
         "read_excel(file_path='data.xlsx', sheet_name='Sheet2', max_rows=20)"
     ],
     category="data",
-    danger_level="safe"
+    danger_level="safe",
+    essential_when=("read", "spreadsheet")
 )
 def read_excel(file_path: str, sheet_name: str = None, max_rows: int = 50) -> Dict[str, Any]:
     """读取Excel文件"""

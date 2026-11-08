@@ -22,6 +22,8 @@ from backend.config import (
 )
 from .local_model import get_local_model_service, ModelSource
 
+import logging
+logger = logging.getLogger(__name__)
 
 class ContextLengthExceeded(RuntimeError):
     """prompt 超出模型 context 上限。
@@ -64,7 +66,7 @@ class ModelScopeLLM:
             return
         # 用 lazy_loader 统一管理（与 app.py 共享同一个注册表）
         try:
-            from .lazy_loader import ensure_module_loaded_sync
+            from infra.lazy_loader import ensure_module_loaded_sync
             ensure_module_loaded_sync("langchain_openai")
         except Exception:
             # lazy_loader 未注册/不可用时，降级为直接 import
@@ -77,14 +79,10 @@ class ModelScopeLLM:
             max_tokens=self.max_tokens,
             api_key=YUNDU_API_KEY,
             base_url=YUNDU_BASE_URL,
+            max_retries=2
         )
 
-    def generate(
-        self,
-        messages: List[Dict[str, str]],
-        mode: str = 'quick',
-        timeout: float | None = None,
-    ) -> str:
+    def generate(self, messages, mode='quick', timeout=None) -> str:
         processed_messages = self._add_mode_prompt(messages, mode)
         if self.use_local:
             if not self.local_service or not self.local_service.is_loaded:
@@ -111,7 +109,12 @@ class ModelScopeLLM:
                 ) from e
             raise
 
-    def stream_generate(self, messages: List[Dict[str, str]], mode: str = 'quick', timeout: float | None = None,):
+    def stream_generate(
+        self,
+        messages: List[Dict[str, str]],
+        mode: str = 'quick',
+        timeout: float | None = None,
+    ):
         processed_messages = self._add_mode_prompt(messages, mode)
         if self.use_local:
             if not self.local_service or not self.local_service.is_loaded:
@@ -121,7 +124,7 @@ class ModelScopeLLM:
             yield from self.local_service.stream_generate(processed_messages)
             return
 
-        self._ensure_llm()   # 在 thread pool 里加载，安全
+        self._ensure_llm()
         try:
             for chunk in self.llm.stream(
                 self._convert_to_langchain(processed_messages),
@@ -206,7 +209,7 @@ class MultimodalClient:
         if self.client is not None:
             return
         try:
-            from .lazy_loader import ensure_module_loaded_sync
+            from infra.lazy_loader import ensure_module_loaded_sync
             ensure_module_loaded_sync("anthropic")
         except Exception:
             pass

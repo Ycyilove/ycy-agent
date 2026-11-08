@@ -113,6 +113,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+import psutil
+
+def _rss():
+    return psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
 
 # ─────────────────────────────────────────────────────────────
 # 全局单例
@@ -134,18 +138,13 @@ multimodal_client = None
 
 @asynccontextmanager
 async def app_lifespan(_app: FastAPI):
-    """启动 MCP worker task，所有连接操作在 worker task 里执行。"""
     global mcp_client_manager, mcp_worker
 
-    # ── Langfuse 初始化（未配置时静默 no-op） ──
     try:
         init_langfuse()
     except Exception:
         logger.exception("Langfuse 初始化失败")
 
-    # ── Mem0 初始化（后台异步，不阻塞启动；可用 MEM0_ENABLED=0 关闭） ──
-    # 关键：先让 RAG / 短列表的 SentenceTransformer 完成首次加载，
-    # mem0 的 embedder 再初始化时命中进程内 HF cache，避免并发联网校验。
     async def _init_mem0_background():
         if os.getenv("MEM0_ENABLED", "1") == "0":
             logger.info("[boot] mem0 disabled by MEM0_ENABLED=0")
@@ -158,10 +157,9 @@ async def app_lifespan(_app: FastAPI):
             logger.exception("Mem0 初始化失败")
 
     async def _warmup_embeddings_then_mem0():
-        # 1) 先同步预热 RAG embedding（触发本地加载，写进程内 cache）
         try:
             rag = get_local_rag_service()
-            vec_store = rag.vector_store  # LocalRAGService.__init__ 里已确认此属性名
+            vec_store = rag.vector_store
             if vec_store is not None:
                 await asyncio.to_thread(
                     lambda: vec_store._generate_embeddings(["warmup"])
@@ -171,12 +169,10 @@ async def app_lifespan(_app: FastAPI):
                 logger.warning("[boot] RAG vector_store is None, skip warmup")
         except Exception:
             logger.exception("[boot] RAG embedding warmup failed (non-fatal)")
-        # 2) 再起 mem0 后台线程
         await _init_mem0_background()
 
     asyncio.create_task(_warmup_embeddings_then_mem0())
 
-    # ── 清理过期的 agent 资源 ──
     try:
         from core.resource.store import cleanup_expired
         await asyncio.to_thread(cleanup_expired)
@@ -189,34 +185,23 @@ async def app_lifespan(_app: FastAPI):
         logger.error("MCP 配置加载失败: %s", error)
         configs = []
 
-    # 真 manager（无 async 副作用，构造安全）
     real_manager = MCPClientManager(configs)
-
-    # worker + proxy：所有 async 有状态操作都路由到 worker task
     worker = MCPWorker(real_manager)
     await worker.start()
     proxy = MCPManagerProxy(worker, real_manager)
 
-    # 注入 ToolAgent（拿到的是 proxy）
     agent = get_tool_agent()
     agent.set_mcp_client_manager(proxy)
 
-    # 启动连接（走 proxy → worker）
     if configs:
-        # stdio 命令预检：命令不存在直接跳过，不浪费 3 次重试
         from backend.routes.mcp import _resolve_command
         filtered = []
         for c in configs:
             if c.transport == "stdio":
                 if _resolve_command(c.command) is None:
-                    logger.warning(
-                        "[boot] skip MCP %s: command not found (%s)",
-                        c.name, c.command,
-                    )
+                    logger.warning("[boot] skip MCP %s: command not found (%s)", c.name, c.command)
                     continue
             filtered.append(c)
-        # 用过滤后的 configs 重建 manager（或直接跳过失败项）
-        # 简化：只对 filtered 里的 server 调 start
         try:
             await proxy.start(
                 agent.register_dynamic_tool,
@@ -228,10 +213,6 @@ async def app_lifespan(_app: FastAPI):
     mcp_worker = worker
     mcp_client_manager = proxy
 
-    # ── 后台构建 MCP 语义索引（不阻塞启动） ──
-    # 工具集不变时 load_or_build_index 直接加载 records.json（零编码）；
-    # 变了才增量编码新增工具。索引建好前 search_intents 返回空列表，
-    # _select_shortlist 走静态 MCP 兜底（tavily/fetch），降级可接受。
     async def _build_mcp_index_background():
         try:
             await asyncio.to_thread(load_or_build_index, proxy)
@@ -241,7 +222,6 @@ async def app_lifespan(_app: FastAPI):
 
     asyncio.create_task(_build_mcp_index_background())
 
-    # 注入 discovery context（也用 proxy）
     try:
         from tools import mcp_discovery
         mcp_discovery.set_mcp_discovery_context(
@@ -253,24 +233,20 @@ async def app_lifespan(_app: FastAPI):
     except Exception:
         logger.exception("MCP discovery context 注入失败")
 
-    # ── 启动后台预加载 ──
     try:
         preload_all_in_background()
         logger.info("[boot] background preload scheduled")
     except Exception:
         logger.exception("[boot] background preload failed to schedule")
 
-    # ── 预热工具筛选器的 embedding 模型 ──
     async def _warmup_shortlister():
         try:
             sl = get_tool_shortlister()
             if sl is None:
                 return
-            # 在 executor 里跑（模型加载是同步阻塞）
             await asyncio.to_thread(sl.warmup)
-            # 顺便索引一次当前工具集
-            agent = get_tool_agent()
-            tools_map = agent.list_all_tools()
+            agent2 = get_tool_agent()
+            tools_map = agent2.list_all_tools()
             await asyncio.to_thread(sl._ensure_index, tools_map)
             logger.info("[boot] ToolShortlister warmed up")
         except Exception:
@@ -284,8 +260,6 @@ async def app_lifespan(_app: FastAPI):
     try:
         yield
     finally:
-
-
         try:
             if worker is not None:
                 await worker.stop()
@@ -294,12 +268,11 @@ async def app_lifespan(_app: FastAPI):
         mcp_worker = None
         mcp_client_manager = None
 
-        # ── 关闭 E2B 沙箱 ──
         try:
             close_sandbox_backend()
         except Exception:
             logger.exception("关闭 E2B 沙箱失败")
-
+            
 # ─────────────────────────────────────────────────────────────
 # FastAPI app
 # ─────────────────────────────────────────────────────────────
@@ -335,7 +308,7 @@ def get_tool_shortlister():
         try:
             from tools.orchestration.tool_shortlister import ToolShortlister
             tool_shortlister = ToolShortlister(
-                top_k=15,
+                top_k=8,
                 min_score=0.10,
                 min_keep=3,
             )

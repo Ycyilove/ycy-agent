@@ -17,6 +17,8 @@ from typing import Dict, List, Callable, Any, Optional
 from dataclasses import dataclass, field
 from functools import wraps
 
+import logging
+logger = logging.getLogger(__name__)
 
 # ── Python 类型名 → JSON Schema 类型名 ──
 _PY_TYPE_MAP = {
@@ -202,10 +204,28 @@ class ToolRegistry:
         if input_schema is None and parameters:
             input_schema = _build_input_schema(parameters, required)
 
+        _desc = description or getattr(func, "__doc__", "") or ""
+        _caps = tuple(capability_tags or ())
+        _ess = tuple(essential_when or ())
+        # essential_when 为空时自动推导（内置 + 静态 MCP + 动态 MCP 统一）
+        if not _ess:
+            try:
+                from tools.semantics import infer_essential_when
+                _ess = infer_essential_when(name, _desc, _caps)
+                if _ess:
+                    logger.info(
+                        "[dsh][registry] inferred essential_when: %s → %r",
+                        name, _ess,
+                    )
+            except Exception:
+                logger.exception(
+                    "[dsh][registry] infer_essential_when failed for %s", name,
+                )
+
         self._tools[name] = func
         self._metadata[name] = ToolMetadata(
             name=name,
-            description=description or getattr(func, "__doc__", "") or "",
+            description=_desc,
             parameters=dict(parameters or {}),
             examples=examples or [],
             category=category,
@@ -215,8 +235,8 @@ class ToolRegistry:
             idempotent=idempotent,
             resource_kinds=list(resource_kinds or []),
             trust_level=trust_level,
-            essential_when=tuple(essential_when or ()),
-            capability_tags=tuple(capability_tags or ()),
+            essential_when=_ess,
+            capability_tags=_caps,
         )
         return func
         

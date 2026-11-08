@@ -31,7 +31,7 @@ SHORTLIST_EMBEDDING_MODEL = os.getenv(
 )
 
 # 检索混合策略
-RAG_TOP_K_DEFAULT = int(os.getenv('RAG_TOP_K_DEFAULT', '15'))
+RAG_TOP_K_DEFAULT = int(os.getenv('RAG_TOP_K_DEFAULT', '8'))
 RAG_BM25_ENABLED = os.getenv('RAG_BM25_ENABLED', 'true').lower() in ('1', 'true', 'yes')
 RAG_QUERY_REWRITE_ENABLED = os.getenv('RAG_QUERY_REWRITE_ENABLED', 'true').lower() in ('1', 'true', 'yes')
 RAG_RRF_K = int(os.getenv('RAG_RRF_K', '20'))

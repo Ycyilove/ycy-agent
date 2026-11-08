@@ -1,7 +1,14 @@
-"""AgentOrchestrator 主类。"""
+"""AgentOrchestrator 主类。
+
+重构后设计：
+    - 工具筛选只保留两段：场景过滤 + embedding shortlist
+    - 决策权交给 LLM prompt（工具链/前置条件/失败切换都在 prompt 里）
+    - 代码只保留安全兜底：环境不可用工具过滤、幂等拦截、完成度校验
+"""
 
 from __future__ import annotations
 
+import os
 import asyncio
 import json
 import logging
@@ -23,7 +30,6 @@ from tools.semantics import get_intent_tags
 from .prompt import ORCHESTRATOR_PROMPT
 from .state import OrchestratorState, params_key
 from .validator import requires_tool_call
-from .intent_router import route_intent
 from .task_classifier import classify_task
 from .task_types import (
     TaskType, StopReason, AssessResult, GapKind, can_upgrade,
@@ -35,14 +41,8 @@ from core.llm.provider import ContextLengthExceeded
 
 logger = logging.getLogger(__name__)
 
-
-# ─────────────────────────────────────────────────────────────
-# 多文档覆盖：文件名归一化 + 目标文档集提取
-# ─────────────────────────────────────────────────────────────
-
 import os as _os
 
-# 读类工具名特征（不按任务类型，按工具能力）
 _READ_TOOL_HINTS = (
     "read", "list", "search", "get_file_info", "stat", "fetch", "crawl",
 )
@@ -52,18 +52,13 @@ def _is_read_like(name: str) -> bool:
     low = (name or "").lower()
     return any(h in low for h in _READ_TOOL_HINTS)
 
-def _norm_filename(name: str) -> str:
-    """归一化文件名：去路径前缀、去首尾空白、统一分隔符。
 
-    knowledge_stats 返回的 filename 与 search_knowledge 返回的
-    chunks[i].filename 理论上一致，但实际可能带路径前缀或大小写差异，
-    统一做 basename 归一化，避免 covered / target 匹配不上。
-    """
+def _norm_filename(name: str) -> str:
+    """归一化文件名：去路径前缀、去首尾空白、统一分隔符。"""
     if not isinstance(name, str):
         return ""
     s = name.replace("\\", "/").strip()
     return _os.path.basename(s)
-
 
 
 @dataclass
@@ -73,20 +68,11 @@ class OrchestratorStep:
     tool_name: Optional[str] = None
     parameters: Dict[str, Any] = field(default_factory=dict)
     done: bool = False
-    # 模型自主声明的搜索覆盖策略（仅外部搜索类工具使用）
-    # {"source_tiers": ["official","forum"], "breadth": "medium", "queries": [...]}
     search_plan: Optional[Dict[str, Any]] = None
 
 
-# ─────────────────────────────────────────────────────────────
-# 结构化历史（跨 turn 上下文）
-# ─────────────────────────────────────────────────────────────
-
 def _format_relative_time(iso_ts: Optional[str], now_ts: float) -> str:
-    """把 ISO 时间戳转成「刚刚」/「3 分钟前」/「昨天」这类相对时间。
-
-    空输入 / 解析失败 → 返回空字符串。
-    """
+    """把 ISO 时间戳转成「刚刚」/「3 分钟前」/「昨天」这类相对时间。"""
     if not iso_ts:
         return ""
     try:
@@ -113,14 +99,7 @@ def _build_structured_history(
     max_items: int = 6,
     now_ts: Optional[float] = None,
 ) -> str:
-    """把原始消息列表压成结构化历史块。
-
-    设计意图：
-        - **用户消息**：保留内容（截断到 300 字符）——这是用户意图
-        - **assistant 消息**：只标记「已回复」，**不带原文**
-          —— 避免历史里的绝对化结论（如"无法渲染"）污染当前决策
-        - 每条消息带**相对时间**，让 LLM 区分"过去"和"现在"
-    """
+    """把原始消息列表压成结构化历史块。"""
     if not messages:
         return ""
     import time as _time
@@ -146,16 +125,12 @@ def _build_structured_history(
         elif role == "assistant":
             prefix = f"[{rel}] " if rel else ""
             lines.append(f"- {prefix}Agent 已回复（内容省略）")
-        # 其他 role 忽略
 
     return "\n".join(lines)
 
-class _SucceededSeqView:
-    """把 state.succeeded_tool_names（dict）适配成 list 序列。
 
-    validator.check_web_query_completion 遍历它找 tags；
-    每次访问都从 state 实时读，不缓存。
-    """
+class _SucceededSeqView:
+    """把 state.succeeded_tool_names（dict）适配成 list 序列。"""
 
     def __init__(self, state):
         self._state = state
@@ -170,43 +145,40 @@ class _SucceededSeqView:
 
     def __bool__(self):
         return len(self) > 0
-        
+
+
 class AgentOrchestrator:
     _MCP_DISCOVERY_TOOLS = frozenset({"search_and_connect_mcp"})
 
-    # 静态配置的 MCP server（与 mcp_servers.json 对齐）。
-    # 意图索引无命中时，只保留这些，不把动态发现的 MCP 全量塞给 LLM。
+    # 当前运行环境不可用的工具（Windows 裸机缺 WeasyPrint → render_document 不可用）
+    _UNAVAILABLE_TOOLS = frozenset({
+        "mcp__office-worker__render_document",
+        "mcp__office-worker__pdf_ocr",
+        "mcp__office-worker__create_book",
+    })
+
+    # 静态配置的 MCP server
     _STATIC_MCP_SERVERS = frozenset({"tavily", "fetch"})
 
-    # 单步工具结果进 state.history 的字符上限。
-    # 设计原则：
-    #   - 读/检索类：保留足够内容供后续步推理，但不必全量
-    #     （全文在 last_read_content 或 tool_result_store 落盘）
-    #   - 写/改类：状态和路径就够，结果不需要长 history
-    #   - 未列出的工具用 _DEFAULT_HISTORY_LIMIT
+    # 单步工具结果进 state.history 的字符上限
     _HISTORY_LIMITS = {
-        # 检索类（结果本身是摘要）
         "search_knowledge": 3000,
         "knowledge_stats": 1500,
         "list_knowledge_sources": 1500,
-        # 读文件类（核心内容要进 history）
-        "read_text_file": 1500,        # ← 本次修复的关键
+        "read_text_file": 1500,
         "read_file_range": 1500,
         "read_pdf_text": 2000,
         "read_docx_text": 2000,
         "read_csv": 1200,
         "search_content": 1200,
         "search_files": 1200,
-        # 抓取类
         "fetch_url": 2000,
         "http_get": 2000,
-        # 写/改类（状态为主）
         "write_file": 300,
         "edit_file": 300,
         "create_directory": 200,
         "move_file": 200,
         "delete_file": 200,
-        # 验证类
         "run_tests": 2000,
     }
     _DEFAULT_HISTORY_LIMIT = 1000
@@ -216,16 +188,13 @@ class AgentOrchestrator:
         agent_provider: Callable[[], ToolAgent],
         llm_provider: Callable[[], Any],
         max_steps: int = 10,
-        enable_intent_router: bool = True,
         shortlister_provider: Optional[Callable[[], Any]] = None,
     ):
         self._agent_provider = agent_provider
         self._llm_provider = llm_provider
         self._max_steps = max_steps
-        self._enable_intent_router = enable_intent_router
         self._shortlister_provider = shortlister_provider
 
-        # ── 上下文预算（短上下文模型友好） ──
         try:
             from backend.config import (
                 LLM_PROMPT_BUDGET_CHARS,
@@ -240,30 +209,23 @@ class AgentOrchestrator:
             self._compact_trigger_ratio = LLM_COMPACT_TRIGGER_RATIO
             self._compact_keep_recent = LLM_COMPACT_KEEP_RECENT
         except Exception:
-            # config 不可用时用保守默认，不阻塞
             self._prompt_budget_chars = 24000
             self._history_budget_ratio = 0.4
             self._history_entry_chars = 1000
             self._compact_trigger_ratio = 0.8
             self._compact_keep_recent = 5
 
-
     def _format_tool_directory(self, tools: Dict[str, Any]) -> str:
-        """只给工具名 + 一句描述 + tags，用于「选工具」阶段。
-
-        不带参数 schema，避免干扰 LLM 的语义匹配。
-        """
+        """只给工具名 + 一句描述 + tags，用于「选工具」阶段。"""
         if not tools:
             return "(无可用工具)"
 
-        # discovery 类工具：完整保留描述，避免截断掉关键引导句
         _FULL_DESC_TOOLS = frozenset({"search_and_connect_mcp"})
 
         lines = []
         for name, meta in tools.items():
             desc_raw = (getattr(meta, "description", "") or "").strip()
             if name in _FULL_DESC_TOOLS:
-                # 取前 3 行（保留 "Use this when..." 这类引导）
                 desc = "\n    ".join(desc_raw.split("\n")[:3]).strip()
             else:
                 desc = desc_raw.split("\n")[0].strip()
@@ -275,11 +237,8 @@ class AgentOrchestrator:
             if tags:
                 tag_str = f"  [tags: {','.join(str(t) for t in tags[:4])}]"
 
-            # 内置工具打 ⭐，仅表示"来源=内置"；是否优先由任务场景决定，
-            # 见 prompt.py 的"优先级（按任务场景，不按工具来源）"
             marker = "" if name.startswith("mcp__") else "⭐ "
 
-            # MCP 工具：附上 server 名，让 LLM 知道来源
             server_note = ""
             if name.startswith("mcp__"):
                 parts = name.split("__", 2)
@@ -290,10 +249,7 @@ class AgentOrchestrator:
         return "\n".join(lines)
 
     def _format_single_tool_schema(self, meta: Any) -> str:
-        """给单个工具的完整 schema，用于「填参数」阶段。
-
-        包括嵌套结构、enum、默认值、必填标记。
-        """
+        """给单个工具的完整 schema，用于「填参数」阶段。"""
         properties, required_list = self._read_tool_schema(meta)
         required = set(required_list)
         if not properties:
@@ -318,7 +274,6 @@ class AgentOrchestrator:
                 line += f"\n    默认: {pinfo['default']}"
             lines.append(line)
 
-            # 嵌套对象：展示 1 层
             nested = pinfo.get("properties")
             if isinstance(nested, dict) and nested:
                 nested_required = set(pinfo.get("required") or [])
@@ -333,7 +288,6 @@ class AgentOrchestrator:
                         sub += f": {ndesc}"
                     lines.append(sub)
 
-            # 数组元素
             items = pinfo.get("items")
             if isinstance(items, dict):
                 itype = items.get("type", "any")
@@ -352,114 +306,24 @@ class AgentOrchestrator:
 
         return "\n".join(lines)
 
-
-    # ── 工具名解析（容错 LLM 幻觉出的简写） ──
     @staticmethod
     def _resolve_tool_name(requested: str, available: Dict[str, Any]) -> Optional[str]:
-        """把 LLM 幻觉出的简写工具名映射到实际存在的工具。
-
-        例：write_file → mcp__filesystem__write_file
-        唯一匹配才返回；多个匹配返回 None（不猜）。
-        """
+        """把 LLM 幻觉出的简写工具名映射到实际存在的工具。"""
         if not requested:
             return None
         if requested in available:
             return requested
 
-        # 后缀匹配 __<requested>
         suffix = f"__{requested}"
         matches = [n for n in available if n.endswith(suffix)]
         if len(matches) == 1:
             return matches[0]
 
-        # 包含匹配（唯一才用）
         contains = [n for n in available if requested in n]
         if len(contains) == 1:
             return contains[0]
 
         return None
-
-    # 内置工具覆盖列表：内置版本存在时，同名 MCP 版本可能参数不同
-    _BUILTIN_EDIT_TOOLS = frozenset({"edit_file"})
-
-    @staticmethod
-    def _adapt_params_for_tool(
-        tool_name: str,
-        params: dict,
-        available: Dict[str, Any],
-    ) -> dict:
-        """按工具 schema 适配参数名。
-
-        处理 LLM 混淆「内置 edit_file」和「MCP filesystem edit_file」的情况：
-        LLM 选了内置 `edit_file`，但传了 MCP 格式的 `path` + `edits`。
-        这里自动转成内置格式 `file_path` + `old_text` + `new_text`。
-        """
-        if not isinstance(params, dict):
-            return params
-
-        meta = available.get(tool_name)
-        if meta is None:
-            return params
-
-        schema = getattr(meta, "input_schema", None) or {}
-        allowed = set((schema.get("properties") or {}).keys())
-        if not allowed:
-            return params
-
-        # 参数已全部合法：不动
-        if set(params.keys()).issubset(allowed):
-            return params
-
-        # ── 特化规则：内置 edit_file 收到 MCP 格式 ──
-        if tool_name in AgentOrchestrator._BUILTIN_EDIT_TOOLS:
-            if "path" in params and "edits" in params:
-                edits = params.get("edits") or []
-                if isinstance(edits, list) and edits:
-                    first = edits[0]
-                    if isinstance(first, dict):
-                        old_text = (
-                            first.get("oldText")
-                            or first.get("old_text")
-                            or ""
-                        )
-                        new_text = (
-                            first.get("newText")
-                            or first.get("new_text")
-                            or ""
-                        )
-                        return {
-                            "file_path": params.get("path"),
-                            "old_text": old_text,
-                            "new_text": new_text,
-                        }
-
-        # ── 通用规则：path → file_path ──
-        result = dict(params)
-        if "file_path" in allowed and "path" in result:
-            result["file_path"] = result.pop("path")
-
-        # ── 通用规则：oldText/newText → old_text/new_text ──
-        if "old_text" in allowed and "oldText" in result:
-            result["old_text"] = result.pop("oldText")
-        if "new_text" in allowed and "newText" in result:
-            result["new_text"] = result.pop("newText")
-
-        # ── 通用规则：常见别名 → schema 字段名 ──
-        _ALIASES = {
-            "limit": ("max_results", "count", "top_k", "size"),
-            "max_results": ("limit", "count", "top_k"),
-            "query": ("q", "keyword", "search_query"),
-            "days": ("time_range", "since_days", "within_days"),
-        }
-        for target, aliases in _ALIASES.items():
-            if target in allowed:
-                continue
-            for alias in aliases:
-                if alias in result and target not in result:
-                    result[target] = result.pop(alias)
-                    break
-
-        return result
 
     def _format_history(self, history: List[str], goal: str, state: OrchestratorState) -> str:
         reminder = (
@@ -474,24 +338,12 @@ class AgentOrchestrator:
         body = "\n".join(history)
         return f"{body}\n\n{reminder}"
 
-    # ── 解析 JSON ──
-
     def _parse_json(self, text: str) -> Optional[dict]:
-        """从模型输出里提取第一个合法 JSON 对象。
-
-        修复点：旧实现用 find("{") + rfind("}") 截取，
-        遇到 `{obj1}\n{obj2}\n{obj3}`（模型一次输出多个对象）时
-        会得到非法 JSON → json.loads 抛错 → 返回 None，
-        导致 _fill_params 拿不到参数、工具报"缺少必填参数"。
-
-        新实现：整体解析失败时，用 raw_decode 从头扫描，
-        返回第一个合法 dict（丢弃后续多余对象）。
-        """
+        """从模型输出里提取第一个合法 JSON 对象。"""
         if not text:
             return None
         clean = text.strip()
 
-        # 去 markdown 代码块包裹
         if clean.startswith("```json"):
             clean = clean[7:]
         if clean.startswith("```"):
@@ -500,7 +352,6 @@ class AgentOrchestrator:
             clean = clean[:-3]
         clean = clean.strip()
 
-        # 1. 整体解析（最常见：单个对象）
         try:
             data = json.loads(clean)
             if isinstance(data, dict):
@@ -508,8 +359,6 @@ class AgentOrchestrator:
         except json.JSONDecodeError:
             pass
 
-        # 2. 逐段 raw_decode，取第一个合法 dict
-        #    兼容模型一次输出多个 JSON 对象的情况
         decoder = json.JSONDecoder()
         idx = 0
         while idx < len(clean):
@@ -519,43 +368,12 @@ class AgentOrchestrator:
             try:
                 obj, end = decoder.raw_decode(clean, pos)
                 if isinstance(obj, dict):
-                    return obj  # 取第一个，丢弃后续
+                    return obj
                 idx = end
             except json.JSONDecodeError:
                 idx = pos + 1
 
         return None
-
-    def _try_fast_path(
-        self,
-        goal: str,
-        state: OrchestratorState,
-        tools: Dict[str, Any],
-    ) -> Optional[OrchestratorStep]:
-        if not self._enable_intent_router:
-            return None
-        if state.history:
-            # 只在第一步走快速路径；后续步骤状态已经变了，不能套模板
-            return None
-        if not requires_tool_call(goal):
-            return None
-
-        tool_name = route_intent(goal, tools)
-        if not tool_name:
-            return None
-
-        logger.info(
-            "[dsh][orchestrator] fast-path intent → %s", tool_name
-        )
-        return OrchestratorStep(
-            step_index=1,
-            thought=f"[快速路径] 意图匹配：{tool_name}",
-            tool_name=tool_name,
-            parameters={},   # 待 _fill_params 补
-            done=False,
-        )
-
-    # ── LLM 决策 ──
 
     _SCENE_BLOCKLIST = {
         "code": {"mysql_query", "mysql_execute", "edit_excel", "write_excel",
@@ -569,11 +387,7 @@ class AgentOrchestrator:
 
     @staticmethod
     def _is_external_fact_query(goal: str) -> bool:
-        """结构化判断是否需要外部信息，不依赖窄词表。
-
-        与 validator._looks_like_external_fact_query 保持同口径，
-        但额外包含明确时效词（实时/最新/今天/现在）。
-        """
+        """结构化判断是否需要外部信息。"""
         if not goal:
             return False
         g = goal.lower()
@@ -586,7 +400,6 @@ class AgentOrchestrator:
         from tools.orchestration.validator import _looks_like_external_fact_query
         return _looks_like_external_fact_query(goal)
 
-    # ── 外部搜索结果的来源分桶（供呈现和偏差提示，不做硬性覆盖检查） ──
     _SOURCE_BUCKET_RULES = (
         ("official", (
             "gov", "edu", "official", "docs.", "/docs/", "/api/",
@@ -618,7 +431,6 @@ class AgentOrchestrator:
 
     @classmethod
     def _bucket_source_url(cls, url: str) -> str:
-        """把 URL 归到 official/news/forum/blog/unknown 之一。"""
         if not url:
             return "unknown"
         low = url.lower()
@@ -629,7 +441,6 @@ class AgentOrchestrator:
 
     @classmethod
     def _extract_web_results(cls, payload: Any) -> List[Dict[str, Any]]:
-        """从 tavily/fetch 的返回里抽出带 url 的结果条目。"""
         items: List[Dict[str, Any]] = []
         if not isinstance(payload, dict):
             return items
@@ -646,13 +457,10 @@ class AgentOrchestrator:
                         "score": r.get("score"),
                     })
 
-        # tavily_search: {"results": [...]}
         _collect(payload.get("results"))
-        # 部分 MCP 包装：{"structuredContent": {"results": [...]}}
         sc = payload.get("structuredContent")
         if isinstance(sc, dict):
             _collect(sc.get("results"))
-        # fetch: {"url": ..., "content": ...} 单条
         if payload.get("url") and payload.get("content"):
             items.append({
                 "url": payload["url"],
@@ -663,10 +471,7 @@ class AgentOrchestrator:
         return items
 
     @classmethod
-    def _bucket_web_results(
-        cls, payload: Any
-    ) -> Dict[str, List[Dict[str, Any]]]:
-        """把一次 web 工具返回按来源类型分桶。"""
+    def _bucket_web_results(cls, payload: Any) -> Dict[str, List[Dict[str, Any]]]:
         bucketed: Dict[str, List[Dict[str, Any]]] = {}
         for it in cls._extract_web_results(payload):
             b = cls._bucket_source_url(it["url"])
@@ -674,21 +479,15 @@ class AgentOrchestrator:
         return bucketed
 
     @classmethod
-    def _filter_builtin_by_scene(
-        cls, goal: str, tools: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """按 goal 场景过滤内置工具，排除明显无关的（mysql/excel 等）。
-
-        保守策略：无法判断场景时不过滤（返回原 tools），避免误删。
-        """
+    def _filter_builtin_by_scene(cls, goal: str, tools: Dict[str, Any]) -> Dict[str, Any]:
+        """按 goal 场景过滤内置工具，排除明显无关的（mysql/excel 等）。"""
         if not goal:
             return tools
         g = goal.lower()
 
-        # 场景判断
         scene = None
-        if any(k in g for k in ("修复", "代码", "bug", "test", "tests",
-                                 ".py", ".js", ".ts", "重构", "函数")):
+        if any(k in g for k in ("修复", "代码", "bug", "单元测试", "pytest",
+                                ".py", ".js", ".ts", "重构", "函数")):
             scene = "code"
         elif any(k in g for k in ("excel", "csv", "表格", "数据", "统计")):
             scene = "data"
@@ -698,23 +497,41 @@ class AgentOrchestrator:
             scene = "db"
 
         if scene is None:
-            return tools  # 不确定场景，不过滤
+            return tools
 
         blocklist = cls._SCENE_BLOCKLIST.get(scene, set())
         filtered = {n: m for n, m in tools.items() if n not in blocklist}
-        return filtered or tools
-        
-    def _select_shortlist(
-        self, goal: str, tools: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """MCP 工具走意图索引，内置工具走 embedding shortlist。
 
-        - MCP 工具：用 tools/mcp_intent_index.search_intents 检索，
-          比 embedding 直接匹配 tool name 准得多。
-        - 内置工具：沿用 shortlister（已换成 bge-small-zh）。
-        - 任一步失败都退回全量，不阻塞。
+        _removed = set(tools.keys()) - set(filtered.keys())
+        logger.info(
+            "[dsh][orchestrator][debug] filter_builtin_by_scene: "
+            "scene=%s, before=%d, after=%d, removed=%r",
+            scene, len(tools), len(filtered), sorted(_removed),
+        )
+
+        return filtered or tools
+
+    def _select_shortlist(self, goal: str, tools: Dict[str, Any]) -> Dict[str, Any]:
+        """工具筛选只做两段：场景过滤 + embedding shortlist。
+
+        决策权交给 LLM prompt，不再有多层兜底。
         """
         picked: Dict[str, Any] = {}
+
+        # 闲聊：不召回任何工具
+        try:
+            from tools.semantics import classify_intent as _ci
+            _g_intent = _ci(goal or "")
+            if _g_intent.primary == "chitchat":
+                logger.info(
+                    "[dsh][orchestrator] chitchat goal=%r, skip all tools",
+                    goal[:60],
+                )
+                return {}
+        except Exception:
+            logger.exception(
+                "[dsh][orchestrator] chitchat pre-check failed, continue"
+            )
 
         builtin_tools = {
             n: m for n, m in tools.items() if not n.startswith("mcp__")
@@ -723,7 +540,7 @@ class AgentOrchestrator:
             n: m for n, m in tools.items() if n.startswith("mcp__")
         }
 
-        # ── 1. 内置工具：先按任务场景过滤，再 embedding shortlist ──
+        # ── 1. 内置工具：场景过滤 + embedding shortlist ──
         if builtin_tools:
             builtin_tools = self._filter_builtin_by_scene(goal, builtin_tools)
             if self._shortlister_provider is not None:
@@ -740,100 +557,28 @@ class AgentOrchestrator:
             if not picked:
                 picked.update(builtin_tools)
 
-            # ── 声明式保底：按 intent 标签保留"必需工具" ──
-            # 工具通过 @tool(essential_when=(...)) 或 manager.discover 的推断，
-            # 声明"我在什么意图场景下必需"。这里按 intent.tags + intent.secondary
-            # 做交集保底，不硬编码工具名。
+        # ── 2. MCP 工具：同样走 embedding shortlist ──
+        if mcp_tools and self._shortlister_provider is not None:
             try:
-                from tools.semantics import classify_intent
-                _intent = classify_intent(goal or "")
-                _wanted_tags = set(_intent.tags) | set(_intent.secondary)
-                if _wanted_tags:
-                    for _name, _meta in builtin_tools.items():
-                        _ess = getattr(_meta, "essential_when", ()) or ()
-                        if _ess and set(_ess) & _wanted_tags:
-                            if _name not in picked:
-                                picked[_name] = _meta
-                                logger.info(
-                                    "[dsh][orchestrator] essential tool kept: "
-                                    "%s (matched=%r)",
-                                    _name,
-                                    sorted(set(_ess) & _wanted_tags),
-                                )
+                sl = self._shortlister_provider()
+                if sl is not None:
+                    sub = sl.shortlist(goal, mcp_tools)
+                    if sub:
+                        picked.update(sub)
+                        logger.info(
+                            "[dsh][orchestrator] shortlister kept %d/%d MCP tools",
+                            len(sub), len(mcp_tools),
+                        )
             except Exception:
                 logger.exception(
-                    "[dsh][orchestrator] essential_when fallback failed"
+                    "[dsh][orchestrator] shortlister raised for MCP"
                 )
 
-            # ── last-resort 兜底：写工具强制可见 ──
-            # 防止 @tool 装饰器没传 essential_when 时写工具仍被筛掉。
-            # 等所有写工具都声明了 essential_when 后可以删。
-            _WRITE_FALLBACK = (
-                "write_file", "write_excel", "write_docx",
-                "edit_file", "edit_excel", "edit_docx",
-            )
-            for _name in _WRITE_FALLBACK:
-                if _name in builtin_tools and _name not in picked:
-                    picked[_name] = builtin_tools[_name]
-                    logger.info(
-                        "[dsh][orchestrator] write tool force-kept "
-                        "(fallback): %s", _name,
-                    )
-
-        # ── 2. MCP 工具：语义召回 → 阈值过滤 → capability_tags 精确过滤 ──
-        if mcp_tools:
-            picked_mcp = self._select_mcp_tools_semantic(goal, mcp_tools)
-            if picked_mcp:
-                picked.update(picked_mcp)
-                logger.info(
-                    "[dsh][orchestrator] semantic recall kept %d/%d MCP tools",
-                    len(picked_mcp), len(mcp_tools),
-                )
-            else:
-                # 语义召回无命中（阈值过滤后为空）：
-                # 1. 网页/实时信息任务 → 保留静态 MCP（tavily/fetch）
-                # 2. 本地任务 → 不保留任何 MCP，只留 discovery 入口
-                # 3. 最近 discovery 注册的由 _decide 补回
-                is_web_task = self._is_external_fact_query(goal)
-                if is_web_task:
-                    static_mcp = {
-                        n: m for n, m in mcp_tools.items()
-                        if len(n.split("__", 2)) == 3
-                        and n.split("__", 2)[1] in self._STATIC_MCP_SERVERS
-                    }
-                    if static_mcp:
-                        picked.update(static_mcp)
-                    logger.info(
-                        "[dsh][orchestrator] web task, pass %d static MCP "
-                        "(semantic recall empty)",
-                        len(static_mcp),
-                    )
-                else:
-                    logger.info(
-                        "[dsh][orchestrator] non-web task, "
-                        "skip static MCP (semantic recall empty)"
-                    )
-
-        # ── 诊断：web 任务但没有任何 MCP 搜索/抓取工具 ──
-        if self._is_external_fact_query(goal):
-            _mcp_web = [
-                n for n in picked
-                if n.startswith("mcp__") and (
-                    "search" in n.lower() or "tavily" in n.lower()
-                    or "fetch" in n.lower()
-                )
-            ]
-            if not _mcp_web:
-                logger.warning(
-                    "[dsh][orchestrator] web task but no MCP search/fetch tool "
-                    "in shortlist (tavily may be disconnected); "
-                    "fallback to http_get + fetch"
-                )
-                
+        # ── 3. 兜底：picked 为空时用全量 ──
         if not picked:
             picked = dict(tools)
 
-        # ── 3. discovery 入口必须始终可用（功能性必需，不是召回兜底） ──
+        # ── 4. discovery 入口必须始终可用 ──
         for name in self._MCP_DISCOVERY_TOOLS:
             if name in tools and name not in picked:
                 picked[name] = tools[name]
@@ -843,97 +588,6 @@ class AgentOrchestrator:
 
         return picked
 
-    def _select_mcp_tools_semantic(
-        self, goal: str, mcp_tools: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """语义召回 + capability_tags 精确过滤。
-
-        流程：
-            1. search_intents 语义召回（阈值过滤在函数内部，min_score=0.5）
-            2. 把聚合结果展开成 {tool_name: meta}
-            3. capability_tags 精确过滤：intent.tags & capability_tags 非空才保留
-               （避免"语义相似但领域不对"的工具混进来，如 create_word 在 PPT 任务里）
-            4. 返回过滤后的工具子集
-
-        任一步失败返回空 dict，由调用方走静态 MCP 兜底。
-        """
-        from tools.mcp_intent_index import search_intents
-
-        # 1. 语义召回（聚合结构：[{server_name, top_score, matched_tools}]）
-        try:
-            from tools.intent_frame.normalizer import IntentNormalizer
-            _frame = IntentNormalizer().normalize(goal or "")
-            hits = search_intents(
-                goal, top_k=20, min_score=0.5, frame=_frame,
-            )
-        except Exception:
-            logger.exception(
-                "[dsh][orchestrator] search_intents failed, "
-                "fallback to static MCP"
-            )
-            return {}
-
-        if not hits:
-            return {}
-
-        # 2. 展开成 {tool_name: score}
-        scored: Dict[str, float] = {}
-        for h in hits:
-            for t in h.get("matched_tools", []):
-                name = t.get("tool_name")
-                if name in mcp_tools:
-                    scored[name] = max(scored.get(name, 0.0), t.get("score", 0.0))
-
-        if not scored:
-            return {}
-
-        # 3. capability_tags 精确过滤
-        #    intent.tags + intent.secondary 和工具的 capability_tags 取交集，
-        #    非空才保留。create_word 在"做 PPT"任务里 tags 有 generate 但
-        #    secondary 只有 presentation —— capability_tags 没 presentation 就剔除。
-        try:
-            from tools.semantics import classify_intent
-            _intent = classify_intent(goal or "")
-            _wanted = set(_intent.tags) | set(_intent.secondary)
-        except Exception:
-            logger.exception(
-                "[dsh][orchestrator] classify_intent failed, "
-                "skip capability_tags filter"
-            )
-            _wanted = set()
-
-        filtered: Dict[str, Any] = {}
-        for name, score in scored.items():
-            meta = mcp_tools[name]
-            if _wanted:
-                caps = set(getattr(meta, "capability_tags", ()) or ())
-                if caps and not (caps & _wanted):
-                    logger.info(
-                        "[dsh][orchestrator] capability_tags reject: %s "
-                        "(caps=%r, wanted=%r, score=%.2f)",
-                        name, sorted(caps), sorted(_wanted), score,
-                    )
-                    continue
-                # caps 为空（工具没声明标签）→ 保留，靠语义分数兜底
-            filtered[name] = meta
-
-        if not filtered:
-            logger.info(
-                "[dsh][orchestrator] capability_tags filtered out all %d "
-                "semantic hits (wanted=%r)",
-                len(scored), sorted(_wanted) if _wanted else [],
-            )
-            return {}
-
-        logger.info(
-            "[dsh][orchestrator] semantic+caps: %d recalled → %d kept "
-            "(wanted=%r, top5=%r)",
-            len(scored), len(filtered),
-            sorted(_wanted) if _wanted else [],
-            sorted(scored.items(), key=lambda kv: -kv[1])[:5],
-        )
-        return filtered
-
     def _assemble_decide_prompt(
         self,
         shortlist: Dict[str, Any],
@@ -941,63 +595,30 @@ class AgentOrchestrator:
         goal: str,
         conversation_block: str = "",
     ) -> str:
-        """按预算组装 decide prompt。
-
-        优先级：goal > tool_directory > conversation > history
-        history 从尾部倒序保留（近期步比早期步重要）。
-
-        关键：prompt 必须与实际工具目录一致。
-        如果 shortlist 里没有 search_and_connect_mcp（ask 模式 / 关闭 discovery），
-        就把 prompt 里所有引导调用它的段落替换为"当前不可用"的说明，
-        避免模型反复选一个不存在的工具。
-        """
+        """按预算组装 decide prompt。"""
         budget = getattr(self, "_prompt_budget_chars", 24000)
 
         has_discovery = "search_and_connect_mcp" in shortlist
 
-        # 骨架（不含可变块）
         skeleton = (
             ORCHESTRATOR_PROMPT
             .replace("{goal}", goal)
             .replace("{max_steps}", str(self._max_steps))
         )
 
-        # ── 条件化：无 discovery 工具时，替换所有引导调用它的段落 ──
         if not has_discovery:
             skeleton = skeleton.replace(
                 "## 关于 search_and_connect_mcp 的返回",
                 "## 关于外部搜索（当前无 discovery 工具）\n\n"
                 "当前工具目录里**没有** `search_and_connect_mcp`，"
-                "**不要选它**。你只能用目录里实际存在的工具：\n"
-                "- 有名字含 search / query 的 MCP 工具 → 直接用它搜关键词；\n"
-                "- 只有 `fetch` / `http_get` / `fetch_url`：\n"
-                "  * 有已知 URL → 用 `fetch` 抓取；\n"
-                "  * 只有关键词 → 用 `http_get` 请求 "
-                "`https://www.bing.com/search?q=<URL编码关键词>` 或 "
-                "`https://duckduckgo.com/html/?q=<关键词>`，"
-                "从返回 HTML 里提取候选 URL，再用 `fetch` 抓最相关的 1~2 个；\n"
-                "  * 不要因为“没有 search 工具”就 done=true——先用 http_get 试一次；\n"
-                "- 有 `search_knowledge` → 外部搜不到时再查本地知识库。\n\n"
+                "**不要选它**。你只能用目录里实际存在的工具。\n\n"
                 "（以下原始 discovery 说明已停用）\n"
                 "## 关于 search_and_connect_mcp 的返回",
             )
-            skeleton = skeleton.replace(
-                "   - **需要新外部服务** → 调 `search_and_connect_mcp`：",
-                "   - **需要新外部服务**（当前模式不可用，跳过本项）：",
-            )
-            skeleton = skeleton.replace(
-                "     用 `search_and_connect_mcp` 发现一个搜索服务，\n"
-                "       或如果有已知 URL，直接用 `fetch_url` 读取；",
-                "     用 `http_get` 请求一个搜索页（如 Bing / DuckDuckGo），"
-                "从 HTML 提取候选 URL，再用 `fetch` 抓取；\n"
-                "       如果有已知 URL，直接用 `fetch` 读取；",
-            )
 
-        # 减去占位符本身的长度（替换后会被实际内容替代）
         skeleton_len = len(skeleton) - len("{tool_directory}") - len("{history}")
         remaining = max(2000, budget - skeleton_len)
 
-        # tool_directory：优先保留，工具太多时截断
         tool_dir = self._format_tool_directory(shortlist)
         tool_dir_budget = max(1000, int(remaining * 0.35))
         if len(tool_dir) > tool_dir_budget:
@@ -1006,7 +627,6 @@ class AgentOrchestrator:
             tool_dir = "\n".join(lines[:keep_lines]) + "\n...(工具列表已截断)"
         remaining -= len(tool_dir)
 
-        # conversation_block：最近一轮用户意图，优先保留
         if conversation_block:
             conv_budget = max(500, int(remaining * 0.25))
             if len(conversation_block) > conv_budget:
@@ -1015,7 +635,6 @@ class AgentOrchestrator:
                 )
             remaining -= len(conversation_block)
 
-        # history：剩余预算全给，从尾部倒序保留
         if not history_text:
             history_text = "(尚无步骤)"
         elif remaining <= 0:
@@ -1039,13 +658,17 @@ class AgentOrchestrator:
         state: OrchestratorState,
         tools: Dict[str, Any],
         prior_messages: Optional[List[Dict[str, str]]] = None,
+        expand_recall: bool = False,
     ) -> Optional[OrchestratorStep]:
-        # 预筛：优先 embedding，退关键词
-        shortlist = self._select_shortlist(goal, tools)
+        if expand_recall:
+            shortlist = dict(tools)
+            logger.info(
+                "[dsh][orchestrator] _decide expand_recall=True, "
+                "using full tools (%d)", len(shortlist),
+            )
+        else:
+            shortlist = self._select_shortlist(goal, tools)
 
-        # 补：最近 discovery 注册的工具（LLM 刚发现它们，应可见）。
-        # _select_shortlist 在意图索引无命中时只留静态 MCP，
-        # 会筛掉刚发现的动态工具；这里补回，保证"发现→用"闭环。
         recent = getattr(state, "recent_discovered_tools", set()) or set()
         if recent:
             added = []
@@ -1059,7 +682,6 @@ class AgentOrchestrator:
                     added,
                 )
 
-        # 对话历史（结构化）——只保留用户意图，不保留 assistant 结论
         conversation_block = ""
         if prior_messages:
             structured = _build_structured_history(prior_messages, max_items=6)
@@ -1073,16 +695,15 @@ class AgentOrchestrator:
                     "重新审视当前工具目录再决策。\n\n"
                 )
 
-        # ── 长期记忆：注入本会话已知事实（供决策参考） ──
         memory_facts_block = ""
         if state is not None and getattr(state, "session_id", None):
             try:
                 from core.memory.mem0_layer import recall_recent_facts
-                _facts = recall_recent_facts(state.session_id, limit=8)
+                _facts = recall_recent_facts(state.session_id, limit=4)
                 if _facts:
                     _lines = ["## 本会话已知事实（长期记忆，供决策参考）"]
-                    for f in _facts[:8]:
-                        _lines.append(f"- {f[:300]}")
+                    for f in _facts[:4]:
+                        _lines.append(f"- {f[:150]}")
                     _lines.append(
                         "\n**注意**：以上是历史事实，可能已过时；"
                         "如果与当前目标无关，忽略即可。"
@@ -1095,10 +716,8 @@ class AgentOrchestrator:
             except Exception:
                 logger.exception("[dsh][orchestrator] recall_recent_facts failed")
 
-        # 如果之前读过文件，把它放进 prompt 的 history 部分
         history_text = self._format_history(state.history, goal, state)
 
-        # 上一步思考摘要（短上下文下，计划比早期工具结果更有用）
         if getattr(state, "last_thinking", None):
             history_text += (
                 f"\n\n## 上一步思考摘要\n"
@@ -1119,7 +738,7 @@ class AgentOrchestrator:
         prompt = self._assemble_decide_prompt(
             shortlist, history_text, goal, conversation_block + memory_facts_block
         )
-        
+
         import time as _time
         _t0 = _time.time()
 
@@ -1141,7 +760,6 @@ class AgentOrchestrator:
             duration_ms = (_time.time() - _t0) * 1000
             logger.info("[dsh][orchestrator] raw LLM response: %r", response)
 
-            # 落盘
             dump_llm_call(
                 kind="decide",
                 prompt=prompt,
@@ -1163,7 +781,6 @@ class AgentOrchestrator:
                 kind="decide", prompt=prompt, response=None,
                 duration_ms=duration_ms, error=f"context_exceeded: {exc}",
             )
-            # 降级：只留 goal + 工具目录，history 置空，重试一次
             fallback_prompt = (
                 ORCHESTRATOR_PROMPT
                 .replace("{tool_directory}", self._format_tool_directory(shortlist))
@@ -1234,7 +851,6 @@ class AgentOrchestrator:
             logger.warning("_decide non-JSON: %s", response[:200])
             return None
 
-        # 工具名容错
         raw_name = data.get("tool_name")
         resolved_name = raw_name
         if raw_name and raw_name not in tools:
@@ -1246,7 +862,6 @@ class AgentOrchestrator:
                     raw_name, resolved_name,
                 )
 
-        # ── 解析模型声明的搜索覆盖策略（仅外部搜索类工具会用到） ──
         search_plan = None
         raw_plan = data.get("search_plan")
         if isinstance(raw_plan, dict):
@@ -1282,30 +897,20 @@ class AgentOrchestrator:
             step_index=len(state.history) + 1,
             thought=str(data.get("thought", "")),
             tool_name=resolved_name,
-            parameters={},   # ← 参数一律交给 _fill_params
+            parameters={},
             done=bool(data.get("done", False)),
             search_plan=search_plan,
         )
-
-    # ── 决策校验（策略 B） ──
 
     def _validate_done(
         self,
         goal: str,
         state: OrchestratorState,
     ) -> Optional[str]:
-        """如果 done=true 不合理，返回拒绝原因；合理则返回 None。
-
-        统一走 audit（要求-证据），不按 task_type / classify_request 分支。
-        """
-
-        # 无工具调用需求的请求（闲聊/教程）直接放行
+        """如果 done=true 不合理，返回拒绝原因；合理则返回 None。"""
         if not requires_tool_call(goal):
             return None
 
-        # ── 硬拦截：需要工具但一步都没成功执行过 ──
-        # 不依赖 audit 的判据，防止"生成 Excel"这类任务因
-        # classify_request 词表缺口被误判成 smalltalk 而放行。
         if not state.succeeded_tool_names:
             logger.info(
                 "[dsh][orchestrator] done rejected: requires_tool_call=True "
@@ -1342,8 +947,6 @@ class AgentOrchestrator:
             f"{audit.next_hint}"
         )
 
-    # ── 调用拦截（策略 E） ──
-
     def _intercept_call(
         self,
         tool_name: str,
@@ -1351,8 +954,7 @@ class AgentOrchestrator:
         state: OrchestratorState,
         tools: Dict[str, Any],
     ) -> Optional[str]:
-        """返回拦截原因（字符串）；允许则返回 None。"""
-        # ── discovery 总次数上限 ──
+        """只做幂等拦截。失败切换交给 prompt 约束。"""
         if tool_name in self._MCP_DISCOVERY_TOOLS:
             count = getattr(state, "discovery_count", 0)
             if count >= 5:
@@ -1362,16 +964,6 @@ class AgentOrchestrator:
                     f"找不到合适的外部服务。"
                 )
 
-        # ── 连续失败拦截：同工具 + 同参数连续失败 3 次 → 强制停止 ──
-        _fk = (tool_name, params_key(params))
-        _fail_count = state._consecutive_failures.get(_fk, 0)
-        if _fail_count >= 3:
-            return (
-                f"⛔ {tool_name} 已连续失败 {_fail_count} 次（同参数），强制停止。\n"
-                f"**下一步**：done=true，如实告知用户该工具不可用，"
-                f"不要继续重试。"
-            )
-            
         metadata = tools.get(tool_name)
         idem = classify_tool_idempotency(tool_name, metadata)
 
@@ -1387,7 +979,6 @@ class AgentOrchestrator:
             and state.last_successful_call_key is not None
             and (tool_name, params_key(params)) == state.last_successful_call_key
         ):
-            # 标记已搜过的 query，供 _fill_params 排除
             if tool_name == "search_knowledge":
                 q = params.get("query", "")
                 if q:
@@ -1400,8 +991,6 @@ class AgentOrchestrator:
 
         return None
 
-    # ── 状态标记 ──
-
     @staticmethod
     def _classify_status(log: str, success: bool) -> str:
         if "⛔" in log or "❌ 工具调用被 MCP 服务器拒绝" in log:
@@ -1410,14 +999,26 @@ class AgentOrchestrator:
             return "OPTIONAL_HINT"
         return "OK" if success else "FAIL"
 
-    # ── 主循环 ──
-
     @staticmethod
     def _read_tool_schema(meta: Any) -> tuple[Dict[str, Any], List[str]]:
-        """统一读取工具 schema（委托 tools.schema_utils，与 ToolAgent 共用口径）。"""
         from tools.schema_utils import read_tool_schema
         return read_tool_schema(meta)
-         
+
+    @staticmethod
+    def _format_discovery_schema_brief(meta: Any) -> str:
+        from tools.schema_utils import read_tool_schema
+        props, required = read_tool_schema(meta)
+        required_set = set(required or [])
+        lines = []
+        for name, info in props.items():
+            if not isinstance(info, dict):
+                lines.append(f"- `{name}` (any)")
+                continue
+            ptype = info.get("type", "any")
+            mark = "必填" if name in required_set else "可选"
+            lines.append(f"- `{name}` ({ptype}, {mark})")
+        return "\n".join(lines) if lines else "(该工具无参数)"
+
     async def _fill_params(
         self,
         goal: str,
@@ -1430,7 +1031,8 @@ class AgentOrchestrator:
     ) -> Dict[str, Any]:
         """阶段 2：给单个工具填参数。
 
-        prompt 里只放这一个工具的完整 schema；带 history 让 LLM 知道上下文。
+        路径参数不交给 LLM 猜——prompt 里给 workspace 真实路径，
+        LLM 只需按 schema 填内容类字段。
         """
         meta = tools.get(tool_name)
         if meta is None:
@@ -1439,15 +1041,10 @@ class AgentOrchestrator:
             )
             return {}
 
-        # ── 零参数工具：直接返回空 dict，不让 LLM 编字段 ──
         _props, _required = self._read_tool_schema(meta)
         _is_mcp = tool_name.startswith("mcp__")
         _is_discovery = tool_name in self._MCP_DISCOVERY_TOOLS
 
-        # 零参数早退：discovery 工具和 MCP 工具除外
-        # （它们的 input_schema 可能来自 manager.discover 的 spec，
-        #   register_dynamic_tool 没透传到 meta.input_schema，
-        #   直接 return {} 会导致参数全空、调用失败）
         if (
             not _props and not _required
             and not _is_discovery and not _is_mcp
@@ -1459,10 +1056,8 @@ class AgentOrchestrator:
             )
             return {}
 
-        # discovery 工具 / MCP 工具：schema 读不到时用 parameters 兜底
         if (_is_discovery or _is_mcp) and not _props:
             _props = getattr(meta, "parameters", None) or {}
-            # 如果 parameters 里有必填信息，也兜底
             if not _required and hasattr(meta, "required"):
                 _required = list(getattr(meta, "required", []) or [])
             logger.info(
@@ -1472,18 +1067,27 @@ class AgentOrchestrator:
             )
 
         schema_text = self._format_single_tool_schema(meta)
+
+        if _is_discovery:
+            schema_text = self._format_discovery_schema_brief(meta)
+
         tool_desc = getattr(meta, "description", "") or ""
 
-        # history
         history_text = ""
         if state is not None and state.history:
+            compact_steps = []
+            for h in state.history[-5:]:
+                idx = h.find(" → ")
+                if idx > 0:
+                    compact_steps.append(h[:idx])
+                else:
+                    compact_steps.append(h[:200])
             history_text = (
-                "## 已执行步骤\n"
-                + "\n".join(state.history[-5:])
+                "## 已执行步骤（只列动作，产出见下方文件路径）\n"
+                + "\n".join(compact_steps)
                 + "\n\n"
             )
 
-        # ── 编辑类工具：把最近读到的文件内容拼进 prompt ──
         NEEDS_FILE_CONTENT_TOOLS = {
             "edit_file", "write_file",
             "mcp__filesystem__edit_file", "mcp__filesystem__write_file",
@@ -1515,40 +1119,22 @@ class AgentOrchestrator:
                     f"```\n{content}\n```\n"
                 )
 
-        # 对话历史（最近 6 条）——关键：让 LLM 知道用户上句说的文件在哪
-        # 【安全】discovery 工具不注入任何历史/记忆：
-        #   - prior_messages 含上一轮实体，会污染 capability
-        #   - mem0_block 含本会话文件路径，属于用户私有上下文，
-        #     不应随发现请求发给外部 Registry / MCP server
         conversation_block = ""
         if prior_messages and tool_name not in self._MCP_DISCOVERY_TOOLS:
-            recent = prior_messages[-6:]
-            lines = []
-            for m in recent:
-                role = m.get("role", "user")
-                content = (m.get("content") or "").strip()
-                if not content:
-                    continue
-                # assistant 原文只保留"已回复"标记：
-                # 上一轮 assistant 的输出可能是幻觉（如"已在 D:/... 生成 xxx"），
-                # 原样放进 fill_params 的 prompt 会污染本轮参数生成。
-                # 只保留 user 原文（截断），assistant 一律脱敏。
-                if role == "assistant":
-                    lines.append("- assistant: （已回复，内容省略）")
-                    continue
+            last_user = None
+            for m in reversed(prior_messages):
+                if m.get("role") == "user" and (m.get("content") or "").strip():
+                    last_user = m
+                    break
+            if last_user:
+                content = (last_user.get("content") or "").strip()
                 if len(content) > 400:
                     content = content[:400] + "..."
-                lines.append(f"- {role}: {content}")
-            if lines:
                 conversation_block = (
-                    "## 对话历史（最近几条）\n"
-                    + "\n".join(lines)
-                    + "\n\n**注意**：assistant 的历史回复内容已省略，"
-                    "不要假设上一轮执行过任何操作——以当前「已执行步骤」为准。\n\n"
+                    "## 上一轮用户消息（供填参参考）\n"
+                    f"- {content}\n\n"
                 )
 
-        # ── Mem0 检索：本会话已知文件路径 ──
-        # 【安全】discovery 工具不注入 mem0：文件路径属于用户私有上下文
         mem0_block = ""
         if (
             tool_name not in self._MCP_DISCOVERY_TOOLS
@@ -1558,7 +1144,6 @@ class AgentOrchestrator:
             try:
                 from core.memory.mem0_layer import recall_file_paths
                 known_paths = recall_file_paths(state.session_id, limit=5)
-                # 过滤根路径/盘符，避免 LLM 拿 "/" 当 PDF 路径
                 known_paths = [
                     p for p in known_paths
                     if isinstance(p, str)
@@ -1579,10 +1164,11 @@ class AgentOrchestrator:
             except Exception:
                 logger.exception("recall_file_paths 失败")
 
-        # ── 注入 workspace 真实路径（供文件工具填参） ──
         workspace_block = ""
         if state is not None:
             ws_roots = getattr(state, "workspace_roots", None)
+            if not ws_roots:
+                ws_roots = [os.getcwd()]
             if ws_roots:
                 workspace_block = (
                     "## 工作区真实路径（重要）\n"
@@ -1592,7 +1178,6 @@ class AgentOrchestrator:
                     "不要用进程 cwd 或相对路径。**\n\n"
                 )
 
-        # ── 多文档任务：注入已覆盖 / 待覆盖 / 已搜过 ──
         coverage_block = ""
         if tool_name == "search_knowledge" and state is not None:
             target_raw = getattr(state, "_target_files_cache", None) or set()
@@ -1621,11 +1206,6 @@ class AgentOrchestrator:
                     f"{sorted(searched)}\n\n"
                 )
 
-                
-        # discovery 工具：强制把原始 goal 塞进 user_query
-        # 【重要】只对 discovery 工具拼这段，否则会污染 search_knowledge /
-        # read_pdf_text / mcp__*__search_news 等工具的 _fill_params prompt，
-        # 导致 LLM 给这些工具编造 user_query / capability 字段。
         discovery_block = ""
         if tool_name in self._MCP_DISCOVERY_TOOLS:
             goal_json = json.dumps(goal, ensure_ascii=False)
@@ -1648,7 +1228,6 @@ class AgentOrchestrator:
                 "\"capability\": \"news,sports\", \"limit\": 100}}\n\n"
             )
 
-        # ── 搜索计划块：仅对 web 类工具注入，让 LLM 按计划填参 ──
         search_plan_block = ""
         _is_web_tool = (
             tool_name.startswith("mcp__tavily")
@@ -1683,7 +1262,21 @@ class AgentOrchestrator:
             )
             search_plan_block = "\n".join(_lines) + "\n\n"
 
-        task_text = raw_goal or goal
+        # ── 剥离 goal 开头的路径前缀，避免 LLM 把 goal 当 file_path ──
+        def _strip_goal_path_prefix(text: str) -> str:
+            if not text:
+                return text
+            m = re.match(
+                r"^\s*(?:[A-Za-z]:[\\/]|/)[^\s]*?[\\/](?=[\u4e00-\u9fff]|\s|$)",
+                text,
+            )
+            if m:
+                stripped = text[m.end():].strip()
+                if stripped:
+                    return stripped
+            return text
+
+        task_text = _strip_goal_path_prefix(raw_goal or goal)
         prompt = (
             f"## 任务\n{task_text}\n\n"
             f"{conversation_block}"
@@ -1697,19 +1290,17 @@ class AgentOrchestrator:
             f"{discovery_block}"
             f"{search_plan_block}"
             f"## 参数表\n{schema_text}\n\n"
-            f"## 路径参数规则（重要）\n"
-            f"1. **如果任务里给的路径是相对路径或不完整，"
-            f"从「对话历史」里找最近一次明确的完整路径**。\n"
-            f"2. **绝对不要编造路径**（不要用 `./data`、`D:/data` 等占位）。\n"
-            f"3. **优先复用对话历史里出现过的完整路径**。\n"
-            f"4. 对话历史里的 `user` 是用户原话，`assistant` 是 Agent 回复——"
-            f"两边都可能包含真实路径。\n\n"
+            f"## 路径参数规则（强制）\n"
+            f"1. **路径类参数（file_path / path / output_path）必须用"
+            f"「工作区真实路径」里的绝对路径 + 一个合理文件名**。\n"
+            f"2. **绝对不要从「任务」描述里抄路径**——任务描述里的路径"
+            f"是用户上下文，不是输出路径。\n"
+            f"3. **如果「工作区真实路径」为空，用 `output.<扩展名>` 作为文件名**，"
+            f"不要用任务描述里的任何路径。\n"
+            f"4. **绝对不要编造不存在的目录**（不要用 `D:/data`、`/tmp` 等占位）。\n\n"
             f"## 输出要求\n"
             f"- 只输出**一个** JSON 对象，代表**本次一次**工具调用。\n"
-            f"- **禁止**输出多个 JSON 对象、JSON 数组，"
-            f"也**禁止**把多个目标（如多个文档）的参数合并输出。\n"
-            f"- 若需要处理多个目标，编排层会多次调用本工具；"
-            f"本次只填当前这一次的参数。\n"
+            f"- **禁止**输出多个 JSON 对象、JSON 数组。\n"
             f"- 不要任何解释，不要包裹在 markdown 代码块里。\n"
             f"- 确保 JSON 合法、字段名与**参数表完全一致**——"
             f"**只输出参数表里列出的字段**，不要凭经验添加其他字段。\n"
@@ -1750,7 +1341,6 @@ class AgentOrchestrator:
                 tool_name, raw,
             )
 
-            # 落盘
             dump_llm_call(
                 kind="fill_params",
                 prompt=prompt,
@@ -1771,7 +1361,6 @@ class AgentOrchestrator:
                 duration_ms=duration_ms, tool_name=tool_name,
                 error=f"context_exceeded: {exc}",
             )
-            # 降级：必填 query 类参数用 goal 填，其余留给工具层报错
             fallback: Dict[str, Any] = {}
             if _required:
                 for k in _required:
@@ -1793,7 +1382,6 @@ class AgentOrchestrator:
                 tool_name=tool_name,
                 error="timeout(120s)",
             )
-            # 超时兜底：必填的检索类参数用 goal 填，避免空参数必失败
             fallback: Dict[str, Any] = {}
             if _required:
                 for k in _required:
@@ -1824,9 +1412,6 @@ class AgentOrchestrator:
                 "[dsh][orchestrator] _fill_params non-JSON for %s: %s",
                 tool_name, (raw or "")[:200],
             )
-            # 兜底：解析彻底失败时，至少把必填的 query 用 goal 填上，
-            # 避免空参数进入执行层导致"缺少必填参数"必然失败。
-            # （_parse_json 已用 raw_decode 取第一个对象，正常不会再走到这里）
             fallback: Dict[str, Any] = {}
             if _required:
                 for k in _required:
@@ -1841,22 +1426,8 @@ class AgentOrchestrator:
                 return fallback
             return {}
 
-        # 参数名自适应
-        adapted = self._adapt_params_for_tool(tool_name, data, tools)
-        if adapted != data:
-            logger.info(
-                "[dsh][orchestrator] _fill_params params adapted for %s: "
-                "%r → %r",
-                tool_name, data, adapted,
-            )
-        else:
-            logger.info(
-                "[dsh][orchestrator] _fill_params params unchanged for %s: "
-                "keys=%r",
-                tool_name, list(adapted.keys()),
-            )
+        adapted = data
 
-        # ── 参数名校验：LLM 可能编造 schema 外的字段 ──
         allowed = set(_props.keys())
         if allowed:
             unknown = [k for k in adapted.keys() if k not in allowed]
@@ -1874,7 +1445,6 @@ class AgentOrchestrator:
                     tool_name, missing,
                 )
 
-        # ── discovery 工具兜底：user_query 空时用 goal 填 ──
         if _is_discovery:
             if not adapted.get("user_query"):
                 adapted["user_query"] = goal
@@ -1882,7 +1452,6 @@ class AgentOrchestrator:
                     "[dsh][orchestrator] _fill_params: %s user_query empty, "
                     "filled with goal", tool_name,
                 )
-            # 过滤已失败的关键词（LLM 不一定遵守 prompt 里的负面指令）
             failed = getattr(state, "failed_capabilities", set()) if state else set()
             if failed:
                 cap = adapted.get("capability", "")
@@ -1906,10 +1475,6 @@ class AgentOrchestrator:
                             tool_name,
                         )
 
-        # ── 必填参数兜底：query 类空时用 goal 填（对所有工具生效） ──
-        # 旧逻辑只对 MCP 工具（_is_mcp）生效，导致内置 search_knowledge
-        # 解析失败时 query 为空、直接报"缺少必填参数"。
-        # 这里对所有工具统一兜底，作为最后一道防线。
         if _required:
             missing = [k for k in _required if not adapted.get(k)]
             if missing:
@@ -1921,71 +1486,52 @@ class AgentOrchestrator:
                             "required %r empty, filled with goal",
                             tool_name, k,
                         )
-                    elif k in ("path", "file_path", "url"):
-                        # 从 goal 里抽路径/URL
+                    elif k in ("path", "file_path"):
+                        ws = (
+                            getattr(state, "workspace_roots", None)
+                            if state else None
+                        )
+                        _base_dir = ws[0] if ws else os.getcwd()
+                        if "docx" in tool_name or "word" in tool_name:
+                            _ext = ".docx"
+                        elif "excel" in tool_name or "xlsx" in tool_name:
+                            _ext = ".xlsx"
+                        elif "pptx" in tool_name or "ppt" in tool_name:
+                            _ext = ".pptx"
+                        elif "pdf" in tool_name:
+                            _ext = ".pdf"
+                        else:
+                            _ext = ".txt"
+                        adapted[k] = os.path.join(_base_dir, f"output{_ext}")
+                        logger.info(
+                            "[dsh][orchestrator] _fill_params: %s "
+                            "required %r empty, filled with default: %r "
+                            "(workspace=%r)",
+                            tool_name, k, adapted[k],
+                            bool(ws),
+                        )
+                    elif k == "url":
                         import re as _re
                         m = _re.search(r'https?://[^\s"\']+', goal)
                         if m:
                             adapted[k] = m.group(0)
-                    # 其他必填参数不猜，留给工具层报错
 
-        # ── 重试：必填仍缺 → 把"缺 X"反馈给 LLM 再问一次 ──
-        _still_missing = [
-            k for k in (_required or [])
-            if k not in adapted or adapted.get(k) in (None, "")
-        ]
-        if _still_missing and not _is_discovery:
-            logger.info(
-                "[dsh][orchestrator] _fill_params: %s still missing %r, retry once",
-                tool_name, _still_missing,
-            )
-            retry_suffix = (
-                f"\n\n## ⚠️ 上一次输出缺少必填参数：{_still_missing}\n"
-                f"**必须补上这些字段**，字段名与参数表完全一致。"
-                f"只输出一个合法 JSON 对象，不要输出其他工具的字段。\n"
-            )
-            try:
-                raw2 = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        self._llm_provider().generate,
-                        [{"role": "user", "content": prompt + retry_suffix}],
-                        mode="quick",
-                        timeout=110.0,
-                    ),
-                    timeout=120.0,
+        for _pk in ("file_path", "path", "output_path"):
+            _v = adapted.get(_pk)
+            if isinstance(_v, str) and len(_v) > 200:
+                logger.warning(
+                    "[dsh][orchestrator] _fill_params: %s %s looks like "
+                    "goal text (len=%d), dropping",
+                    tool_name, _pk, len(_v),
                 )
-                data2 = self._parse_json(raw2)
-                if isinstance(data2, dict):
-                    adapted2 = self._adapt_params_for_tool(tool_name, data2, tools)
-                    # 只接受"补上了必填"的结果，否则保留原 adapted
-                    _missing2 = [
-                        k for k in _required
-                        if k not in adapted2 or adapted2.get(k) in (None, "")
-                    ]
-                    if len(_missing2) < len(_still_missing):
-                        adapted = adapted2
-                        logger.info(
-                            "[dsh][orchestrator] _fill_params retry ok for %s: %r",
-                            tool_name, adapted,
-                        )
-            except Exception:
-                logger.exception(
-                    "[dsh][orchestrator] _fill_params retry failed for %s",
-                    tool_name,
-                )
+                adapted.pop(_pk, None)
 
         return adapted
 
-    # ── 结果达标评估 ──
-
-    # 执行类工具特征：不限定具体测试工具名，按"能执行命令"分类
     _VERIFY_TOOL_HINTS = (
-        # Python / JS 测试
         "run_test", "pytest", "test_runner", "jest", "vitest", "mocha",
-        # 通用执行
         "run_python", "run_shell", "run_command", "run_script",
         "bash", "shell", "execute", "exec",
-        # 检查类
         "lint", "typecheck", "check",
     )
 
@@ -1997,7 +1543,6 @@ class AgentOrchestrator:
                 return name
         return None
 
-    # 验证信号：覆盖多场景（测试/文档/API/数据库/配置/纯查询）
     _VERIFY_PATTERN = (
         r"(测试|tests?|验证|确保.{0,8}通过|make.{0,8}pass|run.{0,8}test|"
         r"检查.{0,8}(通过|内容|包含|是否|结果)|"
@@ -2005,7 +1550,6 @@ class AgentOrchestrator:
         r"启动.{0,8}确认|查询.{0,8}确认|"
         r"npm\s+test|jest|vitest|mocha|"
         r"verify|validate|confirm|check.{0,8}(pass|success|200|ok)|"
-        # 纯查询也要"实际抓取"验证，不凭记忆
         r"查一下|查询一下|搜一下|最新状态|最新情况|当前状态)"
     )
 
@@ -2022,13 +1566,6 @@ class AgentOrchestrator:
         state: OrchestratorState,
         tools: Dict[str, Any],
     ) -> Optional[AssessResult]:
-        """通用验证提示：不自动执行，返回 MISSING_VERIFICATION 让 LLM 决策。
-
-        设计理由：
-            - 验证场景开放（pytest / npm test / curl / read 文件检查 / SQL 查询）
-            - 编排层不知道该项目该跑什么命令
-            - LLM 看到"可用执行工具"和"验证要求"后自己决定
-        """
         verify_tool = self._find_verify_tool(tools)
         if not verify_tool:
             return AssessResult(
@@ -2078,28 +1615,24 @@ class AgentOrchestrator:
         result: ToolCallResult,
         state: OrchestratorState,
     ) -> Optional[AssessResult]:
-        """评估最近一次工具结果。
-
-        统一走通用审计（要求 → 证据），不按 task_type 分支。
-        返回 None 表示"本步无需打扰 LLM，继续循环"。
-        """
-        # 闲聊/无工具需求：直接完成，不进入审计
         if not requires_tool_call(goal):
             return AssessResult(sufficient=True, stop_reason=StopReason.DONE)
 
         from tools.security.gateway import SecurityGateway
 
-        # 1. 工具失败 → 通用失败评估
         if not result.success:
             return AssessResult(
                 sufficient=False,
                 stop_reason=StopReason.NEEDS_USER,
                 gap=f"工具 {tool_name} 失败：{result.error or ''}",
                 gap_kind=GapKind.MISSING_ACTION,
-                next_hint="检查参数/路径/权限后重试，或换工具",
+                next_hint=(
+                    "**下一步**：读错误原因。如果是「未安装/not installed/"
+                    "not found in PATH」，该工具在当前环境不可用，"
+                    "换工具或 done=true。其他错误可换参数重试一次。"
+                ),
             )
 
-        # 2. 写操作成功 → 记录证据；是否 DONE 交给 audit
         if SecurityGateway.is_write_operation(tool_name):
             wp = self._extract_path_from_params(params)
             if wp:
@@ -2117,7 +1650,6 @@ class AgentOrchestrator:
                 next_hint=audit.next_hint,
             )
 
-        # ── 执行类工具成功 → 记录 verification_evidence ──
         if any(k in tool_name.lower() for k in self._VERIFY_TOOL_HINTS):
             try:
                 payload = result.result
@@ -2138,7 +1670,6 @@ class AgentOrchestrator:
             except Exception:
                 logger.exception("record verification evidence failed")
 
-        # 3. 读/检索类成功 → 记录证据，交给 audit
         if result.success:
             if "read" in (tool_name or "").lower() or _is_read_like(tool_name):
                 p = self._extract_path_from_params(params)
@@ -2159,17 +1690,14 @@ class AgentOrchestrator:
 
         return None
 
-    # 输出路径类参数名（写工具常用这些键）
     _OUTPUT_PATH_KEYS = (
         "file_path", "path", "output_path", "new_path", "old_path",
-        # 生成类工具常见别名
         "filename", "file", "output", "save_path", "target_path",
         "destination", "dest", "out_path",
     )
 
     @classmethod
     def _extract_path_from_params(cls, params: Dict[str, Any]) -> Optional[str]:
-        """从参数里抽文件路径，供 read_paths/written_paths 证据用。"""
         if not isinstance(params, dict):
             return None
         for key in cls._OUTPUT_PATH_KEYS:
@@ -2200,7 +1728,6 @@ class AgentOrchestrator:
             goal[:100],
         )
 
-        # ── 等 mem0 ready ──
         try:
             from core.memory.mem0_layer import wait_until_ready
             ready = await wait_until_ready(timeout=30.0)
@@ -2208,7 +1735,6 @@ class AgentOrchestrator:
         except Exception:
             logger.exception("wait_until_ready 失败，继续执行")
 
-        # 重置 tried servers
         try:
             from tools.mcp_discovery import reset_tried_servers
             reset_tried_servers()
@@ -2217,7 +1743,6 @@ class AgentOrchestrator:
 
         agent = self._agent_provider()
 
-        # ── Skills 注入 ──
         raw_goal = goal
         try:
             from tools.skills.session_skills import build_skills_prompt_block
@@ -2238,6 +1763,10 @@ class AgentOrchestrator:
                     name: meta for name, meta in t.items()
                     if name not in self._MCP_DISCOVERY_TOOLS
                 }
+            t = {
+                name: meta for name, meta in t.items()
+                if name not in self._UNAVAILABLE_TOOLS
+            }
             return t
 
         tools = _refresh_tools()
@@ -2253,10 +1782,8 @@ class AgentOrchestrator:
             yield {"type": "error", "message": "当前模式下没有可用的工具"}
             return
 
-        # ── 初始化 state（可能从快照恢复） ──
         if resume_state is not None:
             state = resume_state
-            # 旧快照没有 session_id → 用本次传入的补上
             if state.session_id is None:
                 state.session_id = session_id
             if state.task_id is None:
@@ -2274,14 +1801,11 @@ class AgentOrchestrator:
             )
             start_step = 1
 
-        # 同步 workspace_roots 到 state（供 _fill_params 注入）
         if workspace_paths:
             state.workspace_roots = list(workspace_paths)
         elif resume_state is not None and resume_state.workspace_roots:
             state.workspace_roots = list(resume_state.workspace_roots)
 
-        # ── 兼容：validator.check_web_query_completion 需要
-        #    state.successful_tool_sequence（list）。
         try:
             if not hasattr(state, "successful_tool_sequence"):
                 object.__setattr__(
@@ -2290,14 +1814,10 @@ class AgentOrchestrator:
                 )
         except Exception:
             logger.exception("failed to attach successful_tool_sequence view")
-            
+
         for step_index in range(start_step, self._max_steps + 1):
-            # ── 每步刷新工具列表 ──
-            # 上一步的 search_and_connect_mcp 可能刚注册了新 MCP 工具，
-            # 不刷新会导致 LLM 选了新工具却被判定为"不存在"。
             tools = _refresh_tools()
 
-            # ── L1→L4 自动发现流水线（LLM 不参与） ──
             if allow_mcp_discovery:
                 try:
                     from tools.capability.pipeline import maybe_discover
@@ -2316,20 +1836,61 @@ class AgentOrchestrator:
                         "[dsh][orchestrator] capability pipeline failed, "
                         "continue with current tools"
                     )
-                    
-            decision = self._try_fast_path(goal, state, tools)
-            if decision is None:
+
+            decision = await self._decide(
+                goal, state, tools, prior_messages=prior_messages,
+            )
+
+            if (
+                decision is not None
+                and decision.tool_name == "__need_more_tools__"
+                and not getattr(state, "_expanded_recall", False)
+            ):
+                logger.info(
+                    "[dsh][orchestrator] LLM requested __need_more_tools__, "
+                    "expanding recall"
+                )
+                state._expanded_recall = True
+                state.add_history(
+                    f"Step {step_index}: 工具目录不足，扩大召回重试"
+                )
+                yield {
+                    "type": "thinking",
+                    "step": step_index,
+                    "thought": "[扩大召回] 工具目录不足，重新召回",
+                }
                 decision = await self._decide(
                     goal, state, tools, prior_messages=prior_messages,
+                    expand_recall=True,
                 )
+
+            if (
+                decision is not None
+                and decision.tool_name == "__need_more_tools__"
+                and getattr(state, "_expanded_recall", False)
+            ):
+                logger.warning(
+                    "[dsh][orchestrator] __need_more_tools__ again after "
+                    "expand, force done"
+                )
+                state.stop_reason = StopReason.PARTIAL.value
+                state.stop_detail = "当前工具集确实无法完成该任务"
+                state.add_history(
+                    f"Step {step_index}: 工具集不足（已扩大召回仍无解），终止"
+                )
+                yield {
+                    "type": "done",
+                    "steps": step_index - 1,
+                    "reason": StopReason.PARTIAL.value,
+                    "detail": state.stop_detail,
+                }
+                return
 
             if decision is None:
                 yield {"type": "error", "message": "编排决策失败"}
                 return
 
-            # 决策要调工具 → 必填参数（渐进式披露第 2 阶段）
             if decision.tool_name and not decision.done:
-                # 记录模型声明的搜索计划（供 _fill_params 和最终呈现使用）
                 if decision.search_plan:
                     state.last_search_plan = decision.search_plan
                 decision.parameters = await self._fill_params(
@@ -2342,7 +1903,6 @@ class AgentOrchestrator:
                     "[dsh][orchestrator] filled params for %s: %r",
                     decision.tool_name, decision.parameters,
                 )
-                # ── 必填参数校验：缺失则跳过本步，让 LLM 重选 ──
                 _meta = tools.get(decision.tool_name)
                 _props, _required = (
                     self._read_tool_schema(_meta) if _meta else ({}, [])
@@ -2369,7 +1929,6 @@ class AgentOrchestrator:
                         ),
                     }
                     continue
-                # 记录已搜 query
                 if decision.tool_name == "search_knowledge":
                     q = decision.parameters.get("query")
                     if q:
@@ -2381,7 +1940,6 @@ class AgentOrchestrator:
                 "thought": decision.thought,
                 "log": decision.thought,
             }
-            # 短上下文下保留"上一步计划"，供下一轮 _decide 参考
             if decision.thought:
                 state.last_thinking = str(decision.thought)[:1000]
 
@@ -2446,7 +2004,6 @@ class AgentOrchestrator:
 
             params = decision.parameters or {}
 
-            # ── 策略 E：拦截重复调用 ──
             intercept = self._intercept_call(tool_name, params, state, tools)
             if intercept:
                 state.add_history(f"Step {step_index}: {intercept}")
@@ -2462,7 +2019,6 @@ class AgentOrchestrator:
             if tool_name in self._MCP_DISCOVERY_TOOLS:
                 state.discovery_count += 1
 
-            # ── 安全预检：网关会拦写操作越界 / 需审批 ──
             from tools.security.gateway import (
                 get_gateway, get_security_context,
             )
@@ -2477,7 +2033,6 @@ class AgentOrchestrator:
 
             if sec_decision is not None and not sec_decision.allowed:
                 if sec_decision.needs_approval:
-                    # 生成服务端审批 ID（params_hash 绑定）
                     store = get_approval_store()
                     rec = store.create(
                         task_id=getattr(state, "task_id", "") or "",
@@ -2502,7 +2057,6 @@ class AgentOrchestrator:
                         "next_step": step_index + 1,
                     }
                     return
-                # 非审批类拒绝 → 记录历史，本步跳过
                 state.add_history(
                     f"Step {step_index}: 安全网关拒绝 {tool_name} —— {sec_decision.reason}"
                 )
@@ -2556,7 +2110,6 @@ class AgentOrchestrator:
             )
 
             def _strip_format_noise(log: str) -> str:
-                """剥掉 format_tool_result 的展示性噪声，只留内容。"""
                 if not log:
                     return ""
                 lines = []
@@ -2583,11 +2136,7 @@ class AgentOrchestrator:
 
             if result.success:
                 state.mark_success(tool_name, params, step_index)
-                # 连续失败计数清零
-                _fk = (tool_name, params_key(params))
-                state._consecutive_failures.pop(_fk, None)
 
-                # ── web 结果分桶：记录实际命中的来源类型（供呈现/偏差提示） ──
                 _is_web_tool_now = (
                     tool_name.startswith("mcp__tavily")
                     or tool_name == "fetch_url"
@@ -2619,8 +2168,7 @@ class AgentOrchestrator:
                             )
                     except Exception:
                         logger.exception("bucket web results failed")
-                        
-                # ── discovery 成功：记录新注册的工具名（供下一步 _decide 补进候选） ──
+
                 if tool_name in self._MCP_DISCOVERY_TOOLS:
                     try:
                         payload = result.result
@@ -2631,7 +2179,6 @@ class AgentOrchestrator:
                                 new_tools = [t for t in tl if isinstance(t, str)]
                         if new_tools:
                             state.recent_discovered_tools.update(new_tools)
-                            # 只保留最近 10 个，避免累积
                             if len(state.recent_discovered_tools) > 10:
                                 state.recent_discovered_tools = set(
                                     sorted(state.recent_discovered_tools)[-10:]
@@ -2643,7 +2190,6 @@ class AgentOrchestrator:
                     except Exception:
                         logger.exception("record discovered tools failed")
 
-                # ── 通用写证据 + 验证采集（不按 task_type） ──
                 from tools.security.gateway import SecurityGateway
                 if SecurityGateway.is_write_operation(tool_name):
                     _wp = self._extract_path_from_params(params)
@@ -2667,7 +2213,6 @@ class AgentOrchestrator:
                                     "detail": verify.gap,
                                 }
                                 return
-                            # 不自动执行；把"该验证了"写进 history，LLM 下一步决策
                             if verify.gap:
                                 state.add_history(
                                     f"Step {step_index} 验证提示：{verify.gap}\n"
@@ -2677,7 +2222,6 @@ class AgentOrchestrator:
                                     "[dsh][orchestrator] verification hint: %s",
                                     verify.gap[:120],
                                 )
-                                # 连续 3 次验证提示未响应 → 强制 partial done
                                 state._verification_hint_count += 1
                                 if state._verification_hint_count >= 3:
                                     state.stop_reason = StopReason.PARTIAL.value
@@ -2693,7 +2237,6 @@ class AgentOrchestrator:
                                     }
                                     return
 
-                # ── 缓存目标文档集（knowledge_stats / list_knowledge_sources） ──
                 if tool_name in ("knowledge_stats", "list_knowledge_sources"):
                     try:
                         payload = result.result
@@ -2714,7 +2257,6 @@ class AgentOrchestrator:
                     except Exception:
                         logger.exception("cache target files failed")
 
-                # ── 结果达标评估 ──
                 assessment = await self._assess_result(
                     goal, tool_name, params, result, state
                 )
@@ -2764,7 +2306,6 @@ class AgentOrchestrator:
                         "thought": f"[结果评估] 不达标：{gap}",
                     }
 
-                # ── Mem0 写入：工具成功后提取结构化事实 ──
                 try:
                     from core.memory.mem0_layer import remember_tool_success
                     _meta_for_origin = tools.get(tool_name)
@@ -2779,7 +2320,6 @@ class AgentOrchestrator:
                 except Exception:
                     logger.exception("remember_tool_success 失败")
 
-                # 记录最近一次读到的文件内容，供 _fill_params 用
                 if "read" in tool_name.lower():
                     try:
                         payload = result.result
@@ -2805,7 +2345,6 @@ class AgentOrchestrator:
                         logger.exception("记录读取内容失败")
             else:
                 state.mark_failure(tool_name, params, result.error or "")
-                # 连续失败计数 +1
                 _fk = (tool_name, params_key(params))
                 state._consecutive_failures[_fk] = (
                     state._consecutive_failures.get(_fk, 0) + 1

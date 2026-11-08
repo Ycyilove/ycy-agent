@@ -80,6 +80,9 @@ class OrchestratorState:
     stop_reason: Optional[str] = None
     stop_detail: str = ""
 
+    # 是否已扩展召回（防止 __need_more_tools__ 无限重试）
+    _expanded_recall: bool = False
+    
     def add_history(self, entry: str) -> None:
         self.history.append(entry)
 

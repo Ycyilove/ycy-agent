@@ -119,12 +119,16 @@ function TaskItem({ task, isActive }) {
     event.stopPropagation();
     if (!window.confirm(`删除任务「${task.title}」？`)) return;
 
-    // 本地任务未提交到后端（id 以 task- 开头且无 createdAt 服务端字段）
-    // 直接本地删除即可
+    // ── 本地占位（从未提交到后端，status=idle）→ 直接删本地，不发请求 ──
+    if (task.status === 'idle') {
+      dispatch({ type: 'DELETE_TASK', id: task.id });
+      return;
+    }
+
+    // ── 已提交到后端 → 调 DELETE；404 视为后端已不存在，本地仍删 ──
     try {
       await deleteAgentTask(task.id, task.sessionId);
     } catch (error) {
-      // 404 说明后端已不存在，本地删除仍然正确
       const status = error?.status ?? error?.response?.status;
       if (status !== 404) {
         console.error('[dsh][task] 删除任务失败', error);
@@ -134,7 +138,7 @@ function TaskItem({ task, isActive }) {
 
     dispatch({ type: 'DELETE_TASK', id: task.id });
   };
-
+  
   return (
     <div
       className={`group flex w-full items-center gap-1 rounded-md border px-2.5 py-2 transition-colors ${
