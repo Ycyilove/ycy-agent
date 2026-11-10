@@ -99,7 +99,7 @@ def _load_encoder_impl(model_name: str, local_files_only: bool):
         try:
             with offline_mode():
                 enc = SentenceTransformer(local_dir, local_files_only=True)
-            dim = enc.get_sentence_embedding_dimension()
+            dim = enc.get_embedding_dimension() if hasattr(enc, "get_embedding_dimension") else enc.get_sentence_embedding_dimension()
             logger.info("[embedding] local hit: %s (dim=%d)", local_dir, dim)
             return enc
         except Exception as exc:
@@ -114,7 +114,7 @@ def _load_encoder_impl(model_name: str, local_files_only: bool):
             model_name,
         )
     enc = SentenceTransformer(model_name)
-    dim = enc.get_sentence_embedding_dimension()
+    dim = enc.get_embedding_dimension() if hasattr(enc, "get_embedding_dimension") else enc.get_sentence_embedding_dimension()
     logger.info("[embedding] hub load: %s (dim=%d)", model_name, dim)
     return enc
 
@@ -130,6 +130,17 @@ def get_encoder(model_name: str, local_files_only: bool = True):
         SentenceTransformer 实例（同参数返回同一对象）。
     """
     return _load_encoder(model_name, local_files_only)
+
+
+
+
+def get_shared_encoder():
+    """统一入口：所有调用方用 RAG_EMBEDDING_MODEL（B12 新增）。"""
+    try:
+        from backend.config import RAG_EMBEDDING_MODEL
+    except ImportError:
+        RAG_EMBEDDING_MODEL = "BAAI/bge-small-zh-v1.5"
+    return get_encoder(RAG_EMBEDDING_MODEL, local_files_only=True)
 
 
 def clear_encoder_cache() -> None:

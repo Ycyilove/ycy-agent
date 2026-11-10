@@ -8,10 +8,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from rag import DocumentParserFactory
 
 
-TEXT_EXTENSIONS = {".csv", ".json", ".md", ".txt", ".xml", ".yaml", ".yml"}
 
 
 def attachment_label(attachment: Dict[str, Any]) -> str:
@@ -20,29 +18,9 @@ def attachment_label(attachment: Dict[str, Any]) -> str:
 
 
 def attachment_context(attachments: List[Dict[str, Any]]) -> str:
-    """把附件里的文本内容拼成 prompt 片段。
-
-    支持：
-        - 纯文本扩展名（直接 decode）
-        - .docx / .pdf（用 DocumentParserFactory）
-    """
-    parts: List[str] = []
-    for attachment in attachments:
-        filename = attachment_label(attachment)
-        content = attachment.get("content") or b""
-        suffix = Path(filename).suffix.lower()
-        text = ""
-        try:
-            if suffix in TEXT_EXTENSIONS:
-                text = content.decode("utf-8", errors="replace")
-            elif suffix in {".docx", ".pdf"}:
-                text = DocumentParserFactory.parse_file(content, filename)
-        except (OSError, ValueError, TypeError):
-            text = ""
-
-        if text.strip():
-            parts.append(f"【附件 {filename}】\n{text[:12000]}")
-    return "\n\n".join(parts)
+    """附件上下文。B15 起委托 core.attachments。"""
+    from core.attachments import attachment_context as _ac
+    return _ac(attachments)
 
 
 _INSTRUCTIONS = {

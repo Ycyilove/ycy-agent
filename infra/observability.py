@@ -25,9 +25,16 @@ from core import ports
 
 
 def _cfg():
+    """运行时配置。未注入时降级返回默认值（infra import 期还没注入）。"""
     cfg = ports.get_config()
     if cfg is None:
-        raise RuntimeError("core.ports.config 未注入")
+        import types
+        return types.SimpleNamespace(
+            LANGFUSE_ENABLED=False,
+            LANGFUSE_PUBLIC_KEY="",
+            LANGFUSE_SECRET_KEY="",
+            LANGFUSE_HOST="https://cloud.langfuse.com",
+        )
     return cfg
 
 logger = logging.getLogger(__name__)

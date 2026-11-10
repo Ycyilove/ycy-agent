@@ -1,0 +1,132 @@
+[
+  {
+    "goal": "帮我生成一份 PPT，主题是季度总结",
+    "shortlist": [
+      "http_get",
+      "list_files",
+      "read_docx_text",
+      "read_pdf_text",
+      "search_and_connect_mcp",
+      "search_knowledge",
+      "write_docx",
+      "write_excel"
+    ]
+  },
+  {
+    "goal": "做一个 Excel 表格，统计销售额",
+    "shortlist": [
+      "http_get",
+      "list_files",
+      "read_docx_text",
+      "read_pdf_text",
+      "search_and_connect_mcp",
+      "search_knowledge",
+      "write_docx",
+      "write_excel"
+    ]
+  },
+  {
+    "goal": "写一个 Word 文档，介绍 AI",
+    "shortlist": [
+      "http_get",
+      "list_files",
+      "read_csv",
+      "read_docx_text",
+      "read_pdf_text",
+      "search_knowledge",
+      "write_docx",
+      "write_excel"
+    ]
+  },
+  {
+    "goal": "读取 data.csv 的内容",
+    "shortlist": [
+      "http_get",
+      "list_files",
+      "read_csv",
+      "read_docx_text",
+      "read_pdf_text",
+      "search_and_connect_mcp",
+      "search_knowledge",
+      "write_docx"
+    ]
+  },
+  {
+    "goal": "列出当前目录的文件",
+    "shortlist": [
+      "fetch_url",
+      "http_get",
+      "list_files",
+      "read_csv",
+      "read_docx_text",
+      "read_pdf_text",
+      "search_knowledge",
+      "write_docx"
+    ]
+  },
+  {
+    "goal": "搜索最近的 AI 新闻",
+    "shortlist": [
+      "http_get",
+      "list_files",
+      "read_csv",
+      "read_docx_text",
+      "read_pdf_text",
+      "search_and_connect_mcp",
+      "search_knowledge",
+      "write_excel"
+    ]
+  },
+  {
+    "goal": "查一下维基百科上维尼修斯的当前状态",
+    "shortlist": [
+      "fetch_url",
+      "http_get",
+      "list_files",
+      "read_docx_text",
+      "search_and_connect_mcp",
+      "search_knowledge",
+      "write_docx",
+      "write_excel"
+    ]
+  },
+  {
+    "goal": "知识库里记录了哪些获得最佳女队称号的学校",
+    "shortlist": [
+      "fetch_url",
+      "http_get",
+      "list_files",
+      "read_csv",
+      "read_docx_text",
+      "read_pdf_text",
+      "search_knowledge",
+      "write_excel"
+    ]
+  },
+  {
+    "goal": "怎么用 Python 读取 Excel",
+    "shortlist": [
+      "http_get",
+      "list_files",
+      "read_csv",
+      "read_docx_text",
+      "read_pdf_text",
+      "search_knowledge",
+      "write_docx",
+      "write_excel"
+    ]
+  },
+  {
+    "goal": "修复 calculator/core.py 的 divide 函数",
+    "shortlist": [
+      "fetch_url",
+      "list_files",
+      "read_csv",
+      "read_docx_text",
+      "read_pdf_text",
+      "search_and_connect_mcp",
+      "search_knowledge",
+      "write_excel"
+    ]
+  }
+]

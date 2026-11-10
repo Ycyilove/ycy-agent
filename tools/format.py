@@ -94,6 +94,16 @@ def format_tool_result(
     # 成功分支
     if result.success:
         output = directive_block
+        
+        # ── 新增：产物真实性物理校验注入 ──
+        for art in getattr(result, "artifacts", []):
+            if art.is_truncated:
+                output += "⚠️ [系统警告] 文件内容过大，当前仅读取了部分内容（已截断）。你无法基于此声称已读全文，必须如实告知用户。\n"
+            if art.path and art.size == 0:
+                output += "⚠️ [系统警告] 生成的文件大小为 0 字节，可能是空文件或执行失败。你不得声称已成功生成有效内容。\n"
+            if art.path and art.size > 0 and art.path.lower().endswith(".pdf") and art.size < 1000:
+                output += "⚠️ [系统警告] 该 PDF 文件极小（可能包含乱码或黑框），请勿声称已成功生成有效 PDF。\n"
+                
         output += f"✅ 工具 [{result.tool_name}] 执行成功\n"
         output += f"⏱️ 耗时: {result.execution_time:.3f}s\n\n"
 

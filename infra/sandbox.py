@@ -24,9 +24,15 @@ from core import ports
 
 
 def _cfg():
+    """运行时配置。未注入时降级返回默认值（infra import 期还没注入）。"""
     cfg = ports.get_config()
     if cfg is None:
-        raise RuntimeError("core.ports.config 未注入")
+        import types
+        return types.SimpleNamespace(
+            SANDBOX_BACKEND="local",
+            E2B_API_KEY="",
+            E2B_TEMPLATE="base",
+        )
     return cfg
 
 logger = logging.getLogger(__name__)

@@ -1,0 +1,24 @@
+B5 完成于 2026-11-08 23:58:25
+
+新增：
+- tools/semantics/vocab.py（词表唯一真源，7 大类）
+- devtools/check_intent_stability.py（20 goal 基线比对）
+- devtools/intent_baseline.json（基线快照）
+
+改动：
+- tools/semantics/intent.py：删 16 组本地词表（L39-L175），改为 from .vocab import
+- tools/intent_frame/normalizer.py：删 3 组本地词表，改为 from tools.semantics.vocab import
+- tags.py / essential.py 未动（它们是工具元数据映射，不是分类词表）
+
+验收：
+- 20 goal 意图分类结果完全一致（primary/tags/secondary/frame）
+- b0 / b1 仍绿
+- deps 仍 2 条（B5 不动 deps）
+
+B0-B5 累计：
+- B0: 9 个 bug 修复
+- B1: core/task/answer/ 8 文件，_stream_answer 287 -> 44 行
+- B2: core/ports.py + bootstrap/，deps 7 -> 2
+- B3: fallback_search 走 SearchPort
+- B4: 审批唯一真源 + 8 个单测
+- B5: semantics/vocab.py 收敛 4 套词表，20 goal 稳定性验证通过

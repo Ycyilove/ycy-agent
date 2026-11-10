@@ -1,0 +1,602 @@
+"""Mem0 结构化事实层（方向 B，方案 A）。
+
+设计：
+    - 增强而非替换 session_memory：session_memory 存全量消息，
+      本模块只存从消息/工具结果里抽出的结构化事实
+    - 事实提取用正则规则（不调 LLM），符合"零额外 LLM 成本"约束
+    - add(..., infer=False)：跳过 Mem0 的 LLM 提取
+    - embedder 用本地 sentence-transformers，向量库用 Qdrant 本地文件
+    - 未配置 / init 失败时静默 no-op，不影响主流程
+
+事实类型（先做 3 种）：
+    - file_path      任意出现的文件路径
+    - file_modified  写类工具成功操作的文件
+    - user_intent    预留（本版未启用）
+
+对外接口：
+    init_mem0() -> bool
+    remember_tool_success(session_id, tool_name, params, result) -> None
+    remember_user_message(session_id, message) -> None
+    recall_file_paths(session_id, limit=5) -> List[str]
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import re
+import threading
+import time
+from typing import Any, Dict, List, Optional
+
+from core import ports
+
+
+def _mem0_cfg():
+    """运行时配置。未注入时降级返回默认值（import 期还没注入）。"""
+    cfg = ports.get_config()
+    if cfg is None:
+        import types
+        return types.SimpleNamespace(
+            MEM0_ENABLED=os.getenv("MEM0_ENABLED", "1") != "0",
+            MEM0_API_KEY=os.getenv("MEM0_API_KEY", ""),
+            MEM0_CONFIG=os.getenv("MEM0_CONFIG", ""),
+        )
+    return cfg
+from infra.embedding import resolve_local_model_dir
+
+from infra.debug_log.mem0 import (
+    begin_task,
+    end_task,
+    record_add,
+    record_recall,
+    record_skip,
+)
+
+logger = logging.getLogger(__name__)
+
+_memory: Optional[Any] = None
+_enabled: bool = False
+
+# ── 初始化完成事件 ──
+# init_mem0() 跑在线程池（asyncio.to_thread），必须用 threading.Event
+# 才能跨线程 set；主 loop 侧用 asyncio.to_thread(ev.wait, timeout) 等待。
+import threading
+
+_ready_event: Optional[threading.Event] = None
+_ready_event_lock = threading.Lock()
+_init_started_at: Optional[float] = None
+_init_error: Optional[BaseException] = None
+
+
+def _get_ready_event() -> threading.Event:
+    """懒创建线程安全的 ready event（模块级单例）。"""
+    global _ready_event
+    if _ready_event is None:
+        with _ready_event_lock:
+            if _ready_event is None:
+                _ready_event = threading.Event()
+    return _ready_event
+
+
+# ─────────────────────────────────────────────────────────────
+# 事实提取（正则规则，不调 LLM）
+# ─────────────────────────────────────────────────────────────
+
+# 路径模式：
+#   - Windows: D:\a\b.py  C:/a/b.py
+#   - Unix:    /home/user/a.py
+#   - 相对:    ./data/a.py   data/broken.py
+_PATH_PATTERN = re.compile(
+    r"(?:[A-Za-z]:[\\/][^\s'\"<>|*?]+"
+    r"|\.{1,2}[\\/][^\s'\"<>|*?]+"
+    r"|/[^\s'\"<>|*?]+"
+    r"|[\w\-]+(?:[\\/][\w\-]+)+)"
+    r"\.\w{1,10}",
+    re.IGNORECASE,
+)
+
+# 写类工具关键词（对齐 orchestrator 的 _WRITE_TOOL_HINTS）
+_WRITE_TOOL_HINTS = (
+    "write", "edit", "create", "delete", "remove",
+    "move", "rename", "mkdir", "append", "insert",
+    "update", "patch", "save", "overwrite",
+)
+
+_PATH_KEYS = ("file_path", "path", "old_path", "output_path", "directory")
+
+
+def _is_write_tool(tool_name: str) -> bool:
+    lower = (tool_name or "").lower()
+    return any(h in lower for h in _WRITE_TOOL_HINTS)
+
+
+def _extract_paths_from_text(text: str) -> List[str]:
+    if not text:
+        return []
+    found = _PATH_PATTERN.findall(text)
+    seen = set()
+    result = []
+    for p in found:
+        p = p.strip()
+        if p and p not in seen:
+            seen.add(p)
+            result.append(p)
+    return result
+
+
+def _extract_paths_from_params(tool_name: str, params: Dict[str, Any]) -> List[str]:
+    if not isinstance(params, dict):
+        return []
+    result = []
+    for key in _PATH_KEYS:
+        value = params.get(key)
+        if isinstance(value, str) and value.strip():
+            result.append(value.strip())
+    # 写类工具：额外扫描其它字符串参数里的路径
+    if _is_write_tool(tool_name):
+        for key, value in params.items():
+            if key in _PATH_KEYS:
+                continue
+            if isinstance(value, str):
+                result.extend(_extract_paths_from_text(value))
+    return result
+
+
+def _extract_paths_from_result(result: Any) -> List[str]:
+    """从工具返回值里抽路径（dict / str）。"""
+    if result is None:
+        return []
+    if isinstance(result, str):
+        return _extract_paths_from_text(result)
+    if isinstance(result, dict):
+        paths: List[str] = []
+        for key, value in result.items():
+            if not isinstance(value, str):
+                continue
+            if key.lower() in {"new_path", "path", "file_path", "output_path"}:
+                paths.append(value.strip())
+            elif _is_write_tool(str(key)) or key.lower() in {"message", "output"}:
+                paths.extend(_extract_paths_from_text(value))
+        return paths
+    return []
+
+
+def _dedup(paths: List[str]) -> List[str]:
+    seen = set()
+    out = []
+    for p in paths:
+        if p and p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out
+
+
+# ─────────────────────────────────────────────────────────────
+# 初始化
+# ─────────────────────────────────────────────────────────────
+
+def _resolve_local_snapshot(models_dir: str, model_name: str) -> Optional[str]:
+    import glob
+    hf_dir = os.path.join(models_dir, f"models--{model_name.replace('/', '--')}")
+    if not os.path.isdir(hf_dir):
+        return None
+    snaps = sorted(glob.glob(os.path.join(hf_dir, "snapshots", "*")),
+                   key=os.path.getmtime, reverse=True)
+    for s in snaps:
+        if os.path.isfile(os.path.join(s, "config.json")):
+            return s
+    return None
+    
+def _build_config() -> Dict[str, Any]:
+    """构造 Mem0 config。
+
+    方案 A：事实提取用规则（infer=False），不调 LLM。
+    """
+    project_root = os.path.dirname(
+        os.path.dirname(os.path.dirname(__file__))
+    )
+    # B12 改：用 RAG_EMBEDDING_MODEL（bge-small-zh-v1.5），与 RAG 同模型
+    try:
+        from backend.config import RAG_EMBEDDING_MODEL as _embed_model
+    except ImportError:
+        _embed_model = "BAAI/bge-small-zh-v1.5"
+    _mini_name = _embed_model
+    _local_snap = resolve_local_model_dir(_mini_name) or _mini_name
+    hf_cache = os.path.join(project_root, "models")
+    qdrant_path = os.path.join(project_root, "data", "mem0_qdrant")
+
+    return {
+        "llm": {
+            # infer=False 时不会真正调用，但 Mem0 需要占位配置
+            "provider": "openai",
+            "config": {
+                "model": "gpt-4o-mini",
+                "api_key": "sk-placeholder",
+            },
+        },
+        "embedder": {
+            "provider": "huggingface",
+            "config": {
+                "model": _local_snap,
+                "embedding_dims": 512,   # B12 改：bge-small-zh-v1.5 dim=512
+                "model_kwargs": {
+                    "device": "cpu",
+                    "cache_folder": hf_cache,
+                },
+            },
+        },
+        "vector_store": {
+            "provider": "qdrant",
+            "config": {
+                "collection_name": "agent_facts",
+                "path": qdrant_path,
+                "embedding_model_dims": 512,   # B12 改：bge-small-zh-v1.5 dim=512
+            },
+        },
+    }
+
+
+def init_mem0() -> bool:
+    """启动时调用（在线程池里跑）。未启用 / 依赖缺失时静默返回 False。
+
+    无论成功失败，都会 set ready event，让 wait_until_ready() 不再阻塞。
+    """
+    global _memory, _enabled, _init_started_at, _init_error
+
+    _init_started_at = time.time()
+
+    def _finish(ok: bool) -> bool:
+        _get_ready_event().set()
+        elapsed = time.time() - (_init_started_at or time.time())
+        if ok:
+            logger.info("[mem0] init done in %.1fs (enabled=True)", elapsed)
+        else:
+            logger.info("[mem0] init done in %.1fs (enabled=False)", elapsed)
+        return ok
+
+    if not getattr(_mem0_cfg(), "MEM0_ENABLED", True):
+        logger.info("[mem0] MEM0_ENABLED=false，结构化记忆关闭")
+        _enabled = False
+        return _finish(False)
+
+    try:
+        from mem0 import Memory  # noqa: F401
+    except ImportError:
+        logger.info("[mem0] 未安装 mem0ai，结构化记忆关闭")
+        _enabled = False
+        return _finish(False)
+
+    # ── 关键：Mem0 的 embedder 走 HF，先强制离线，避免联网校验卡 30s+ ──
+    _offline_keys = ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")
+    _backup = {k: os.environ.get(k) for k in _offline_keys}
+    for k in _offline_keys:
+        os.environ[k] = "1"
+
+    try:
+        config = _build_config()
+        from mem0 import Memory
+        _memory = Memory.from_config(config)
+        _enabled = True
+        logger.info("[mem0] 已启用 (backend=local, embed=hf, store=qdrant)")
+        return _finish(True)
+    except Exception as exc:
+        _init_error = exc
+        logger.exception("[mem0] 初始化失败，结构化记忆关闭")
+        _memory = None
+        _enabled = False
+        return _finish(False)
+    finally:
+        for k, v in _backup.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+async def wait_until_ready(timeout: float = 60.0) -> bool:
+    """等 mem0 初始化完成。返回是否 enabled。
+
+    - 已 ready → 立即返回
+    - 未 ready → 最多等 timeout 秒（默认从 30 提到 60，给首次 Qdrant 建库留余量）
+    - 超时 → 返回 False，不抛异常
+    """
+    ev = _get_ready_event()
+    if ev.is_set():
+        return _enabled
+
+    start = time.time()
+    # threading.Event.wait 是阻塞的，用 to_thread 包，不阻塞主 loop
+    ok = await asyncio.to_thread(ev.wait, timeout)
+    if not ok:
+        elapsed = time.time() - (_init_started_at or start)
+        err = f"，init_error={_init_error!r}" if _init_error else ""
+        logger.warning(
+            "[mem0] wait_until_ready 超时 (%.1fs)，后台已运行 %.1fs%s，本任务将无 mem0",
+            timeout, elapsed, err,
+        )
+        return False
+    return _enabled
+
+
+# ─────────────────────────────────────────────────────────────
+# 写入
+# ─────────────────────────────────────────────────────────────
+
+def _add_fact(session_id: str, fact: str, fact_type: str) -> None:
+    if not _enabled or _memory is None:
+        logger.info(
+            "[mem0] _add_fact 跳过：enabled=%r memory=%r",
+            _enabled, _memory is not None,
+        )
+        record_skip(
+            reason="mem0_disabled" if not _enabled else "memory_none",
+            tool_name=None,
+            params={"fact_type": fact_type, "fact": (fact or "")[:200]},
+        )
+        return
+    if not session_id or not fact:
+        logger.warning(
+            "[mem0] _add_fact 跳过：session_id=%r fact=%r",
+            session_id, fact,
+        )
+        record_skip(
+            reason="empty_session_or_fact",
+            tool_name=None,
+            params={"fact_type": fact_type, "fact": (fact or "")[:200]},
+        )
+        return
+    try:
+        # 去重：同一 session 下同类型同内容只写一次
+        try:
+            existing = _memory.get_all(
+                filters={"user_id": session_id}, limit=200,
+            )
+            for t in _iter_results(existing):
+                if t == fact:
+                    logger.info(
+                        "[mem0] _add_fact 去重跳过: type=%s fact=%r",
+                        fact_type, fact[:120],
+                    )
+                    record_skip(
+                        reason="duplicate_fact",
+                        tool_name=None,
+                        params={"fact_type": fact_type, "fact": fact[:200]},
+                    )
+                    return
+        except Exception:
+            logger.exception("[mem0] dedup check failed, continue add")
+
+        logger.info(
+            "[mem0] _add_fact 写入: session=%s type=%s fact=%r",
+            session_id, fact_type, fact,
+        )
+        _memory.add(
+            [{"role": "user", "content": fact}],
+            user_id=session_id,
+            infer=False,
+            metadata={"fact_type": fact_type},
+        )
+        record_add(
+            session_id=session_id,
+            fact=fact,
+            fact_type=fact_type,
+            success=True,
+        )
+    except Exception as exc:
+        logger.exception(
+            "[mem0] add 失败: type=%s fact=%r", fact_type, fact[:120]
+        )
+        record_add(
+            session_id=session_id,
+            fact=fact,
+            fact_type=fact_type,
+            success=False,
+            error=str(exc),
+        )
+
+# 允许写入 mem0 的工具：内置 + 只读
+_MEM0_WRITABLE_ORIGINS = frozenset({"builtin", "skill"})
+_MEM0_READ_HINTS = ("read", "search", "list", "get", "info", "stats", "knowledge")
+
+
+def remember_tool_success(
+    session_id: str,
+    tool_name: str,
+    params: Dict[str, Any],
+    result: Any,
+    *,
+    origin: str,
+) -> None:
+    """工具成功后提取事实。
+
+    ⚠️ 安全：只对内置/技能来源、且非写类的工具写 mem0。
+    外部 MCP 工具的返回内容不可信，写入会污染后续 prompt。
+    origin 必须由调用方从工具元数据显式传入，不能默认 builtin。
+    """
+    if not _enabled:
+        record_skip(reason="mem0_disabled", tool_name=tool_name, params=params)
+        return
+    if not session_id:
+        record_skip(reason="no_session", tool_name=tool_name, params=params)
+        return
+
+    # ── origin 过滤：外部 MCP 不写 ──
+    if origin not in _MEM0_WRITABLE_ORIGINS:
+        record_skip(
+            reason="origin_not_writable", tool_name=tool_name,
+            params={"origin": origin, **dict(params or {})},
+        )
+        return
+
+    # 写类工具不写（避免把"删了 X"记成事实）
+    if _is_write_tool(tool_name):
+        params_paths = _extract_paths_from_params(tool_name, params)
+        result_paths = _extract_paths_from_result(result)
+        for p in _dedup(params_paths + result_paths):
+            _add_fact(session_id, p, "file_modified")
+        return
+
+    # 读类：只记参数里明确出现的路径
+    for p in _dedup(_extract_paths_from_params(tool_name, params)):
+        _add_fact(session_id, p, "file_path")
+
+def remember_user_message(session_id: str, message: str) -> None:
+    """从用户消息提取路径 + 用户意图。
+
+    设计：
+        - 有路径 → 写 file_path 事实
+        - 无论有无路径 → 写一条 user_intent 事实（消息截断 500 字符）
+        这样普通对话也能进长期记忆，events.json 至少有记录。
+    """
+    if not _enabled or not session_id or not message:
+        record_skip(
+            reason="remember_user_message_skipped",
+            tool_name=None,
+            params={
+                "enabled": _enabled,
+                "has_session": bool(session_id),
+                "has_message": bool(message),
+            },
+        )
+        return
+
+    text = (message or "").strip()
+    if not text:
+        return
+
+    # 1. 路径事实
+    for p in _dedup(_extract_paths_from_text(text)):
+        _add_fact(session_id, p, "file_path")
+
+    # 2. 用户意图事实（截断 500 字符，避免超长）
+    intent = text[:500]
+    _add_fact(session_id, intent, "user_intent")
+
+
+# ─────────────────────────────────────────────────────────────
+# 检索
+# ─────────────────────────────────────────────────────────────
+
+def _iter_results(hits: Any) -> List[str]:
+    """兼容 Mem0 search / get_all 的返回格式。"""
+    if not hits:
+        return []
+    if isinstance(hits, dict):
+        items = hits.get("results") or hits.get("memories") or []
+    elif isinstance(hits, list):
+        items = hits
+    else:
+        return []
+
+    texts: List[str] = []
+    for h in items:
+        if isinstance(h, dict):
+            t = h.get("memory") or h.get("text") or h.get("content")
+        elif isinstance(h, str):
+            t = h
+        else:
+            t = None
+        if t:
+            texts.append(str(t))
+    return texts
+
+
+def recall_file_paths(session_id: str, limit: int = 5) -> List[str]:
+    """检索本会话的文件路径。失败返回空列表。
+
+    优先 get_all（拿最近写入的），退到 search。
+    """
+    if not _enabled or _memory is None or not session_id:
+        return []
+
+    texts: List[str] = []
+    try:
+        if hasattr(_memory, "get_all"):
+            try:
+                hits = _memory.get_all(
+                    filters={"user_id": session_id},
+                    limit=limit * 3,
+                )
+            except TypeError:
+                hits = _memory.get_all(user_id=session_id, limit=limit * 3)
+            texts = _iter_results(hits)
+        else:
+            hits = _memory.search(
+                query="file path", user_id=session_id, limit=limit * 3
+            )
+            texts = _iter_results(hits)
+    except Exception:
+        logger.exception("[mem0] recall 失败")
+        record_recall(session_id=session_id, limit=limit, results=[])
+        return []
+
+    # 去重 + 截断
+    out: List[str] = []
+    seen = set()
+    for t in texts:
+        if t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+        if len(out) >= limit:
+            break
+
+    record_recall(session_id=session_id, limit=limit, results=out)
+    return out
+
+def recall_recent_facts(session_id: str, limit: int = 8) -> List[str]:
+    """检索本会话最近的结构化事实（含 user_intent / file_path / file_modified）。
+
+    与 recall_file_paths 的区别：
+        - recall_file_paths 只返回路径，供 _fill_params 用；
+        - recall_recent_facts 返回全部类型事实，供 _decide / 最终回答用。
+    """
+    if not _enabled or _memory is None or not session_id:
+        record_skip(
+            reason="recall_recent_facts_skipped",
+            tool_name=None,
+            params={"enabled": _enabled, "has_session": bool(session_id)},
+        )
+        return []
+
+    texts: List[str] = []
+    try:
+        if hasattr(_memory, "get_all"):
+            try:
+                hits = _memory.get_all(
+                    filters={"user_id": session_id}, limit=limit * 3,
+                )
+            except TypeError:
+                hits = _memory.get_all(user_id=session_id, limit=limit * 3)
+            texts = _iter_results(hits)
+        else:
+            hits = _memory.search(
+                query="recent facts", user_id=session_id, limit=limit * 3,
+            )
+            texts = _iter_results(hits)
+    except Exception:
+        logger.exception("[mem0] recall_recent_facts 失败")
+        record_recall(session_id=session_id, limit=limit, results=[])
+        return []
+
+    out: List[str] = []
+    seen = set()
+    intent_count = 0  # 通用：user_intent 只取最近 1 条（避免多轮意图污染）
+    import re as _re
+    for t in texts:
+        if t in seen:
+            continue
+        seen.add(t)
+        is_path = bool(_re.match(r"^[A-Za-z]:[\\/]|^/", t))
+        if not is_path:
+            if intent_count >= 1:
+                continue
+            intent_count += 1
+        out.append(t)
+        if len(out) >= limit:
+            break
+
+    record_recall(session_id=session_id, limit=limit, results=out)
+    return out

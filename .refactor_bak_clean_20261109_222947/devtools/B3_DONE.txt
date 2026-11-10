@@ -1,0 +1,11 @@
+B3 完成于 2026-11-08 23:53:14
+
+改动：
+- core/task/answer/fallback_search.py::run_fallback 改为走 core.ports.SearchPort
+- 未注入 SearchPort 时返回 None，answer_stream 优雅跳过
+- 不再直接 import tools.mcp_discovery
+
+验收：
+- fallback 单测通过（未注入 -> None，注入 -> 格式化文本）
+- deps 仍 2 条（与 B2 一致，无新增）
+- b0 / b1 仍绿

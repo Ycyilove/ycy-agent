@@ -12,6 +12,8 @@ import re
 from typing import Any, Dict, List, Optional
 
 from .state import OrchestratorState
+from tools.types import ToolCallResult
+from .helpers import _is_read_like
 from .task_types import AssessResult, GapKind, StopReason
 from .audit import run_audit, collect_evidence
 from .validator import requires_tool_call
@@ -156,10 +158,9 @@ class AssessMixin:
                 ),
             )
 
-        if SecurityGateway.is_write_operation(tool_name):
-            wp = self._extract_path_from_params(params)
-            if wp:
-                state.written_paths.add(wp)
+        if SecurityGateway.is_write_operation(tool_name, None, params):
+            # 产物记录已由 run.py 统一处理，这里不再重复添加
+            pass
             audit = run_audit(goal, state, evidence=collect_evidence(state))
             if audit.satisfied:
                 return AssessResult(

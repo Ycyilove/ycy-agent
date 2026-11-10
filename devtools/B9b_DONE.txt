@@ -1,0 +1,25 @@
+B9-b 完成于 2026-11-09 20:45:09
+
+改动：
+- backend/app.py 从 355 行 -> 281 行
+  - 删 _rss()（挪 deps.py）
+  - 删 8 个全局变量（挪 deps.py）
+  - 删 7 个 factory（挪 deps.py）
+  - 加 from .deps import (get_tool_agent, get_tool_shortlister, get_local_rag_service, get_agent_task_service, get_llm, get_multimodal_client)
+  - app_lifespan 里 global mcp_worker -> from . import deps; deps.mcp_worker = worker
+
+修复：
+- infra/sandbox.py::_cfg 降级（未注入时返回 SANDBOX_BACKEND="local" 默认值）
+- infra/observability.py::_cfg 降级（未注入时返回 LANGFUSE_ENABLED=False）
+  - 原因：tools/loader.py 顶层 _register_sandbox_if_available() 在 import 期触发 _cfg，此时 ports.config 未注入
+- backend/deps.py 加 import tools.loader（get_tool_agent 用）
+- app_lifespan 的 @asynccontextmanager 去重（B9-b-1 留了 2 个，手动删到 1 个）
+
+验收：
+- app_lifespan 完整跑通（boot_all + shutdown）
+- deps.mcp_worker / deps.mcp_client_manager 正确设置
+- b0 / b1 仍绿
+
+已知问题（非 B9 引入，留后续）：
+- mcp_client/worker.py::stop 的 RuntimeError: Attempted to exit a cancel scope
+  （mcp SDK 的 anyio task group 跨 task 退出问题，不影响功能）

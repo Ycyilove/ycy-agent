@@ -39,6 +39,17 @@ from backend.config import (
     SILICONFLOW_API_KEY,
     SILICONFLOW_BASE_URL,
 )
+
+# ── B9-b：7 个 factory 从 backend.deps 取 ──
+from .deps import (
+    get_tool_agent,
+    get_tool_shortlister,
+    get_local_rag_service,
+    get_agent_task_service,
+    get_llm,
+    get_multimodal_client,
+)
+from . import deps
 from core.memory.session import get_session_memory
 from infra.observability import init_langfuse
 from infra.sandbox import close_backend as close_sandbox_backend
@@ -115,21 +126,11 @@ logger = logging.getLogger(__name__)
 
 import psutil
 
-def _rss():
-    return psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
 
 # ─────────────────────────────────────────────────────────────
 # 全局单例
 # ─────────────────────────────────────────────────────────────
 
-tool_agent: Optional[ToolAgent] = None
-mcp_client_manager: Optional[MCPManagerProxy] = None
-mcp_worker: Optional[MCPWorker] = None
-agent_task_service: Optional[AgentTaskService] = None
-tool_shortlister = None
-local_rag_service = None
-llm_instance = None
-multimodal_client = None
 
 
 # ─────────────────────────────────────────────────────────────
@@ -137,14 +138,13 @@ multimodal_client = None
 # ─────────────────────────────────────────────────────────────
 
 @asynccontextmanager
-@asynccontextmanager
 async def app_lifespan(_app: FastAPI):
     """启动装配：MCP 建连 + boot_all；关闭：shutdown_all。
 
     具体启动步骤在 bootstrap/startup.py::boot_all，
     端口注入在 bootstrap/ports.py::wire_ports。
     """
-    global mcp_client_manager, mcp_worker
+    from . import deps
 
     # ── 1. 建 MCP（必须最早，boot_all 依赖） ──
     try:
@@ -181,8 +181,8 @@ async def app_lifespan(_app: FastAPI):
         except Exception:
             logger.exception("MCP 客户端初始化失败")
 
-    mcp_worker = worker
-    mcp_client_manager = proxy
+    deps.mcp_worker = worker
+    deps.mcp_client_manager = proxy
 
     # ── 2. 其余全部交给 boot_all ──
     from bootstrap.startup import boot_all, shutdown_all
@@ -198,8 +198,8 @@ async def app_lifespan(_app: FastAPI):
         yield
     finally:
         await shutdown_all(mcp_worker=worker)
-        mcp_worker = None
-        mcp_client_manager = None
+        deps.mcp_worker = None
+        deps.mcp_client_manager = None
 
 app = FastAPI(title="LLM API 服务", lifespan=app_lifespan)
 
@@ -216,80 +216,6 @@ app.add_middleware(
 # 服务工厂
 # ─────────────────────────────────────────────────────────────
 
-def get_tool_agent() -> ToolAgent:
-    """获取工具 Agent 实例（延迟初始化）。"""
-    global tool_agent
-    if tool_agent is None:
-        tools.loader.load_all_tools()
-        tool_agent = ToolAgent()
-    return tool_agent
-
-
-def get_tool_shortlister():
-    """获取工具筛选器（延迟初始化）。失败返回 None。"""
-    global tool_shortlister
-    if tool_shortlister is None:
-        try:
-            from tools.orchestration.tool_shortlister import ToolShortlister
-            tool_shortlister = ToolShortlister(
-                top_k=8,
-                min_score=0.10,
-                min_keep=3,
-            )
-            logger.info("[boot] ToolShortlister created")
-        except Exception:
-            logger.exception("[boot] ToolShortlister 创建失败")
-            tool_shortlister = None
-    return tool_shortlister
-
-
-def get_local_rag_service():
-    """获取本地 RAG 服务实例。"""
-    global local_rag_service
-    if local_rag_service is None:
-        local_rag_service = LocalRAGService()
-    return local_rag_service
-
-
-def get_agent_task_service() -> AgentTaskService:
-    """获取工作台任务编排器（不提前加载模型依赖）。"""
-    global agent_task_service
-    if agent_task_service is None:
-        from tools.orchestrator import AgentOrchestrator
-
-        def _orchestrator_factory():
-            return AgentOrchestrator(
-                agent_provider=get_tool_agent,
-                llm_provider=get_llm,
-                max_steps=10,
-                shortlister_provider=get_tool_shortlister,
-            )
-
-        agent_task_service = AgentTaskService(
-            agent_provider=get_tool_agent,
-            llm_provider=get_llm,
-            multimodal_provider=get_multimodal_client,
-            session_provider=get_session_memory,
-            rag_provider=get_local_rag_service,
-            orchestrator_provider=_orchestrator_factory,
-        )
-    return agent_task_service
-
-
-def get_llm():
-    """延迟获取 LLM 实例。"""
-    global llm_instance
-    if llm_instance is None:
-        llm_instance = LLMService()
-    return llm_instance
-
-
-def get_multimodal_client():
-    """延迟获取多模态客户端。"""
-    global multimodal_client
-    if multimodal_client is None:
-        multimodal_client = MultimodalService()
-    return multimodal_client
 
     
 # ─────────────────────────────────────────────────────────────
@@ -303,33 +229,38 @@ knowledge_tools.set_rag_provider(get_local_rag_service)
 # 注册路由
 # ─────────────────────────────────────────────────────────────
 
+# ═══════════════════════════════════════════════════════════
+# 注册路由（B9-c 按 domain 分组）
+# ═══════════════════════════════════════════════════════════
+
+# ── Health ──
 app.include_router(create_health_router(get_all_module_status))
 
+# ── Sessions（会话 + 回收站）──
+app.include_router(create_sessions_router(get_session_memory))
 app.include_router(create_trash_router())
 
+# ── Workbench（任务 + 审批 + 资源下载）──
+app.include_router(create_agent_router(get_agent_task_service, get_session_memory))
 app.include_router(create_resource_router())
 
+# ── Capabilities（工具 + 技能 + MCP）──
 app.include_router(create_tools_router(get_tool_agent))
-
 app.include_router(create_skills_router(get_tool_agent))
-
 app.include_router(
     create_mcp_router(
-        mcp_manager_provider=lambda: mcp_client_manager,
+        mcp_manager_provider=lambda: deps.mcp_client_manager,
         agent_provider=get_tool_agent,
     )
 )
 
+# ── Knowledge（RAG）──
 app.include_router(
     create_rag_router(
         local_rag_provider=get_local_rag_service,
         llm_provider=get_llm,
     )
 )
-
-app.include_router(create_sessions_router(get_session_memory))
-
-app.include_router(create_agent_router(get_agent_task_service, get_session_memory))
 
 
 if __name__ == "__main__":

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 
 @dataclass
@@ -16,6 +16,15 @@ class ToolCallRequest:
 
 
 @dataclass
+class Artifact:
+    """工具产生的物理产物证据（文件、截断信号等）。"""
+    path: str = ""
+    size: int = 0
+    mime: str = ""
+    is_truncated: bool = False
+    content_preview: str = ""
+
+@dataclass
 class ToolCallResult:
     tool_name: str
     success: bool
@@ -23,6 +32,7 @@ class ToolCallResult:
     error: str = None
     execution_time: float = 0.0
     parameters: Dict[str, Any] = field(default_factory=dict)
+    artifacts: List[Artifact] = field(default_factory=list)
 
 
 @dataclass

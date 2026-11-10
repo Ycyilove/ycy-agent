@@ -42,11 +42,13 @@ class MCPWorker:
             if op == "__stop__":
                 try:
                     await self.manager.close()
-                    if not future.done():
-                        future.set_result(None)
                 except Exception as e:
-                    if not future.done():
-                        future.set_exception(e)
+                    # anyio task group 跨 task 退出的 RuntimeError 是已知问题，降级为 warning
+                    logger.warning(
+                        "[dsh][mcp] manager.close() raised (ignored): %r", e
+                    )
+                if not future.done():
+                    future.set_result(None)   # 无论 close 成败都 set_result
                 return
             try:
                 method = getattr(self.manager, op)
@@ -102,10 +104,11 @@ class MCPWorker:
                 await self._task
             except (asyncio.CancelledError, Exception):
                 pass
-        except (asyncio.CancelledError, Exception):
-            logger.exception("MCP worker task 退出异常")
+        except (asyncio.CancelledError, Exception) as e:
+            logger.warning("[dsh][mcp] worker task 退出异常（忽略）: %r", e)
 
         self._task = None
+        await asyncio.sleep(0)   # 让 event loop 处理残留的 cancel scope 回调
 
 
 class MCPManagerProxy:

@@ -16,6 +16,9 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "asyncio: async test (requires pytest-asyncio)"
     )
+    config.addinivalue_line(
+        "markers", "slow: \u6162\u6d4b\u8bd5\uff08\u52a0\u8f7d\u6a21\u578b/\u7d22\u5f15\uff09"
+    )
 
 
 @pytest.fixture
@@ -42,3 +45,10 @@ def rag_service():
     except Exception:
         pass
     return svc
+
+
+@pytest.fixture
+def fake_session():
+    """纯内存 FakeSession，供 e2e / 审批 / 工具执行测试用。"""
+    from tests.fakes import FakeSession
+    return FakeSession()

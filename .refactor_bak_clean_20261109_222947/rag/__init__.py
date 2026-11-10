@@ -1,0 +1,35 @@
+"""
+RAG知识库模块
+包含文档解析、文本分块、向量存储、检索调用等功能
+"""
+from .document_parser import DocumentParser, DocumentParserFactory
+from .text_chunker import TextChunker
+from .query_rewriter import QueryRewriter, get_query_rewriter
+from .bm25_store import BM25Store, rrf_fuse
+from .vector_store import FAISSVectorStore
+from .retrieval import RetrievalService
+from .resources import ResourceKind, ResourceManager, ResourceRecord
+
+# ── 新增：Docling 适配 ──
+from .docling_parser import DoclingParser, parse_file_to_chunks
+
+__all__ = [
+    'DocumentParser',
+    'DocumentParserFactory',
+    'TextChunker',
+    'FAISSVectorStore',
+    'RetrievalService',
+    'ResourceKind',
+    'ResourceManager',
+    'ResourceRecord',
+    'QueryRewriter',
+    'get_query_rewriter',
+    'BM25Store',
+    'rrf_fuse',
+    # Docling
+    'DoclingParser',
+    'parse_file_to_chunks',
+]
+
+# 应用层入口（放最后，避免与 service.py 的相对 import 形成循环）
+from .service import LocalRAGService

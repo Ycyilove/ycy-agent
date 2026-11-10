@@ -1,0 +1,40 @@
+B8 fix 完成于 2026-11-09 21:49:36
+
+4 批通用改进（无特化，无强制保留）：
+
+批 A：_format_single_tool_schema 递归展示 array<object> 字段
+- 改 decision.py::DecisionMixin._format_single_tool_schema
+- 递归展示 items.properties（含 array<object> 的字段描述）
+- 解决 office_batch 的 operations[].tool 字段没展示，模型填成 operation
+
+批 B：_TOOL_PREREQUISITES 工具依赖图
+- 改 decision.py::DecisionMixin
+- 加 _TOOL_PREREQUISITES（convert_to_pdf -> write_docx 等）
+- _select_shortlist 的 return 前补全前置工具
+- 解决 write_docx 在"生成 PDF"场景没进 shortlist（语义不匹配 PDF）
+
+批 C-1：stream_approval 加 turn 上下文
+- 改 core/task/service.py::stream_approval
+- 在 pending 拿到后 begin_turn，try/finally: end_turn
+- 解决 dump_llm_call(approval_take / approval_decision / decide) 无当前 turn
+
+批 C-2：_decide 超时降级到规则
+- 改 decision.py::DecisionMixin._decide 的 except asyncio.TimeoutError
+- 加 DecisionMixin._fallback_decide（classify_intent + _FALLBACK_MAP 规则选工具）
+- 解决 _decide LLM 超时 120s 后返回 None，前端只看到按钮复位、无错误提示
+
+验收：
+- 4 批均 b0 / b1 / deps 全绿
+- _format_single_tool_schema 能展示 operations[].tool
+- _select_shortlist("生成一个 PDF", ...) 含 write_docx
+- _fallback_decide("生成 Word") 返回 write_docx
+- b0 / b1 / deps 仍绿
+
+设计原则：
+- 不特化（无 if tool_name == "office_batch"）
+- 不强制保留（_TOOL_PREREQUISITES 是通用规则，不是强制保留 write_docx）
+- 递归 schema 展示、工具依赖图、turn 上下文、超时降级都是通用设计
+
+后续（批 D，未做）：
+- goal 转英文关键词（cross-lingual 对齐，提升召回）
+- _decide + _fill_params 合并为 1 次 LLM 调用（省 1 次 LLM）

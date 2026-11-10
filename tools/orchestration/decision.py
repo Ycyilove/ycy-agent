@@ -23,6 +23,8 @@ from infra.debug_log.llm import dump_llm_call
 
 from .prompt import ORCHESTRATOR_PROMPT
 from .state import OrchestratorState, params_key
+from .helpers import _build_structured_history
+from tools.semantics import get_intent_tags
 from .task_types import TaskType
 from core.llm.provider import ContextLengthExceeded
 
@@ -40,19 +42,66 @@ class OrchestratorStep:
     search_plan: Optional[Dict[str, Any]] = None
 
 
+def _extract_instruction(goal: str, max_len: int = 5000) -> str:
+    """从 goal 里抽"指令部分"，剥离引用内容 + 分段取有意图标签的段。
+
+    目的：goal 里的"无关关键词"（"另外提 Excel、Word、MySQL、Python..."）
+    会稀释 embedding shortlist 的语义（"生成 PPT" 的 cosine 被稀释）。
+    只对 shortlist.encode 用 instruction，classify_intent / scene 判定仍用原 goal。
+    """
+    if not goal:
+        return ""
+    try:
+        from tools.semantics.intent import _strip_quoted_content, _split_goal_segments
+        from tools.semantics import classify_intent
+    except Exception:
+        return (goal or "")[:max_len]
+
+    stripped = _strip_quoted_content(goal)
+    segs = _split_goal_segments(stripped, max_seg_len=200)
+    parts = []
+    for seg, _s, _e in segs:
+        if not seg:
+            continue
+        try:
+            it = classify_intent(seg)
+        except Exception:
+            it = None
+        if it is not None and getattr(it, "tags", None):
+            parts.append(seg)
+    out = " ".join(parts) if parts else stripped[:2000]
+    return out[:max_len]
+
+
 class DecisionMixin:
     """工具选择相关方法。self 是 AgentOrchestrator。"""
-    def _format_tool_directory(self, tools: Dict[str, Any]) -> str:
-        """只给工具名 + 一句描述 + tags，用于「选工具」阶段。"""
+    def _format_tool_directory(self, tools: Dict[str, Any], compact: bool = False) -> str:
+        """只给工具名 + 一句描述 + tags，用于「选工具」阶段。
+
+        通用规则：
+            - essential_when 非空的工具（"必须先用"的前置工具）排前面
+            - 无 essential_when 的工具排后面，按名字稳定排序
+            - 这样即使后续 prompt 截断，前置工具也不会被截掉
+        """
         if not tools:
             return "(无可用工具)"
 
         _FULL_DESC_TOOLS = frozenset({"search_and_connect_mcp"})
 
+        def _sort_key(item):
+            name, meta = item
+            has_essential = bool(getattr(meta, "essential_when", ()))
+            return (0 if has_essential else 1, name)
+
         lines = []
-        for name, meta in tools.items():
+        for name, meta in sorted(tools.items(), key=_sort_key):
             desc_raw = (getattr(meta, "description", "") or "").strip()
-            if name in _FULL_DESC_TOOLS:
+            is_essential = bool(getattr(meta, "essential_when", ()))
+            if compact:
+                # 扩召回时用紧凑格式：只名字 + tags + [essential]，不列 description
+                desc = ""
+            elif name in _FULL_DESC_TOOLS or is_essential:
+                # essential 工具给完整 description（不截断），让 LLM 知道它"必须先用"
                 desc = "\n    ".join(desc_raw.split("\n")[:3]).strip()
             else:
                 desc = desc_raw.split("\n")[0].strip()
@@ -65,13 +114,17 @@ class DecisionMixin:
                 tag_str = f"  [tags: {','.join(str(t) for t in tags[:4])}]"
 
             marker = "" if name.startswith("mcp__") else "⭐ "
+            essential_mark = "  [essential]" if is_essential else ""
 
             server_note = ""
             if name.startswith("mcp__"):
                 parts = name.split("__", 2)
                 if len(parts) == 3:
                     server_note = f"  (MCP server: {parts[1]})"
-            lines.append(f"- {marker}`{name}`{server_note}{tag_str}\n    {desc}")
+            if compact or not desc:
+                lines.append(f"- {marker}`{name}`{server_note}{tag_str}{essential_mark}")
+            else:
+                lines.append(f"- {marker}`{name}`{server_note}{tag_str}{essential_mark}\n    {desc}")
 
         return "\n".join(lines)
 
@@ -118,46 +171,149 @@ class DecisionMixin:
             items = pinfo.get("items")
             if isinstance(items, dict):
                 itype = items.get("type", "any")
-                inested = items.get("properties")
                 lines.append(f"    数组元素类型: {itype}")
-                if isinstance(inested, dict) and inested:
-                    for iname, iinfo in inested.items():
+                iprops = items.get("properties")
+                if isinstance(iprops, dict) and iprops:
+                    irequired = set(items.get("required") or [])
+                    for iname, iinfo in iprops.items():
                         if not isinstance(iinfo, dict):
                             continue
                         itype2 = iinfo.get("type", "any")
+                        imark = "必填" if iname in irequired else "可选"
                         idesc = iinfo.get("description", "")
-                        sub = f"      - `{iname}` ({itype2})"
+                        sub = f"      - `{iname}` ({itype2}, {imark})"
                         if idesc:
                             sub += f": {idesc}"
                         lines.append(sub)
-
         return "\n".join(lines)
 
     @staticmethod
     def _resolve_tool_name(requested: str, available: Dict[str, Any]) -> Optional[str]:
-        """把 LLM 幻觉出的简写工具名映射到实际存在的工具。"""
+        """把 LLM 幻觉出的简写工具名映射到实际存在的工具（通用，不特化）。"""
         if not requested:
             return None
         if requested in available:
             return requested
 
+        # 1. 后缀匹配（mcp__server__requested）
         suffix = f"__{requested}"
         matches = [n for n in available if n.endswith(suffix)]
         if len(matches) == 1:
             return matches[0]
 
+        # 2. 包含匹配
         contains = [n for n in available if requested in n]
         if len(contains) == 1:
             return contains[0]
 
-        return None
+        # 3. 操作词 + 格式词同义词映射（通用）
+        _OPERATION_SYNONYMS = {
+            "write": {"write", "create", "make", "generate", "build", "produce", "render", "save", "export"},
+            "read": {"read", "get", "load", "open", "show", "display", "view"},
+            "search": {"search", "find", "query", "lookup", "retrieve"},
+            "delete": {"delete", "remove", "rm", "drop", "purge"},
+            "edit": {"edit", "modify", "update", "patch", "change"},
+            "move": {"move", "rename", "relocate"},
+            "list": {"list", "ls", "dir", "enumerate", "files"},
+            "convert": {"convert", "transform"},
+        }
+        _FORMAT_SYNONYMS = {
+            "pptx": {"ppt", "pptx", "powerpoint", "presentation", "slide", "slides", "deck"},
+            "docx": {"doc", "docx", "word", "document", "report"},
+            "xlsx": {"xls", "xlsx", "excel", "spreadsheet", "sheet", "table"},
+            "pdf": {"pdf"},
+            "text": {"txt", "text", "file"},
+            "csv": {"csv"},
+            "json": {"json"},
+            "md": {"md", "markdown"},
+        }
 
+        def _split_name(name: str):
+            """拆 name 为 (operation_group, format_group) 或 None。"""
+            base = name.rsplit("__", 1)[-1]
+            parts = base.split("_", 1)
+            if len(parts) != 2:
+                return None
+            prefix, rest = parts
+            op_group = None
+            for g, members in _OPERATION_SYNONYMS.items():
+                if prefix in members:
+                    op_group = g
+                    break
+            fmt_group = None
+            for g, members in _FORMAT_SYNONYMS.items():
+                if rest in members:
+                    fmt_group = g
+                    break
+            return (op_group, fmt_group)
+
+        req = _split_name(requested)
+        if req is not None:
+            req_op, req_fmt = req
+            for name in available:
+                cand = _split_name(name)
+                if cand is None:
+                    continue
+                cand_op, cand_fmt = cand
+                if req_op is not None and req_op != cand_op:
+                    continue
+                if req_fmt is not None and req_fmt != cand_fmt:
+                    continue
+                if req_op is not None or req_fmt is not None:
+                    return name
+
+        # 4. 编辑距离 ≤ 2 兜底（只对短名）
+        if len(requested) <= 20:
+            def _edit_distance(a: str, b: str) -> int:
+                if len(a) < len(b):
+                    return _edit_distance(b, a)
+                if not b:
+                    return len(a)
+                prev = list(range(len(b) + 1))
+                for i, ca in enumerate(a, 1):
+                    cur = [i]
+                    for j, cb in enumerate(b, 1):
+                        cur.append(min(
+                            prev[j] + 1,
+                            cur[j - 1] + 1,
+                            prev[j - 1] + (ca != cb),
+                        ))
+                    prev = cur
+                return prev[-1]
+
+            for name in available:
+                base = name.rsplit("__", 1)[-1]
+                if _edit_distance(requested, base) <= 2:
+                    return name
+
+        return None
     def _select_shortlist(self, goal: str, tools: Dict[str, Any]) -> Dict[str, Any]:
         """工具筛选只做两段：场景过滤 + embedding shortlist。
 
         决策权交给 LLM prompt，不再有多层兜底。
         """
         picked: Dict[str, Any] = {}
+
+        # 改进 1：抽 instruction 供 embedding shortlist 用（不改变 classify/scene 入参）
+        instruction = _extract_instruction(goal) or (goal or "")[:2000]
+
+        # 改进 4：动态 top_k = max(8, 2 * len(secondary) + 3)
+        _g_intent_for_k = None
+        try:
+            from tools.semantics import classify_intent as _ci_k
+            _g_intent_for_k = _ci_k(goal or "")
+        except Exception:
+            logger.exception("[dsh][orchestrator] classify_intent for top_k failed")
+        _sec_count = len(getattr(_g_intent_for_k, "secondary", ()) or ()) if _g_intent_for_k else 0
+        _dynamic_k = max(8, 2 * _sec_count + 3)
+
+        # 改进 3：scene 软过滤——不剔除，只拿 blocklist 降权
+        try:
+            _scene_block = self._scene_blocklist(goal)
+        except Exception:
+            logger.exception("[dsh][orchestrator] _scene_blocklist failed")
+            _scene_block = set()
+        _weight_overrides = {n: 0.5 for n in _scene_block}
 
         # 闲聊：不召回任何工具
         try:
@@ -183,12 +339,16 @@ class DecisionMixin:
 
         # ── 1. 内置工具：场景过滤 + embedding shortlist ──
         if builtin_tools:
-            builtin_tools = self._filter_builtin_by_scene(goal, builtin_tools)
+            # 改进 3：软过滤（不剔除，只降权）
+            # builtin_tools = self._filter_builtin_by_scene(goal, builtin_tools)
             if self._shortlister_provider is not None:
                 try:
                     sl = self._shortlister_provider()
                     if sl is not None:
-                        sub = sl.shortlist(goal, builtin_tools)
+                        try:
+                            sub = sl.shortlist(instruction, builtin_tools, top_k=_dynamic_k, weight_overrides=_weight_overrides)
+                        except TypeError:
+                            sub = sl.shortlist(instruction, builtin_tools)
                         if sub:
                             picked.update(sub)
                 except Exception:
@@ -203,7 +363,10 @@ class DecisionMixin:
             try:
                 sl = self._shortlister_provider()
                 if sl is not None:
-                    sub = sl.shortlist(goal, mcp_tools)
+                    try:
+                        sub = sl.shortlist(instruction, mcp_tools, top_k=_dynamic_k, weight_overrides=_weight_overrides)
+                    except TypeError:
+                        sub = sl.shortlist(instruction, mcp_tools)
                     if sub:
                         picked.update(sub)
                         logger.info(
@@ -227,6 +390,28 @@ class DecisionMixin:
                     "[dsh][orchestrator] force-kept discovery entry: %s", name
                 )
 
+
+        # ── 工具依赖图补全（通用规则）──
+        # 如果 shortlist 选中了 key，把它的前置工具也加进来
+        for _name in list(picked.keys()):
+            _prereqs = self._TOOL_PREREQUISITES.get(_name, frozenset())
+            for _p in _prereqs:
+                if _p in tools and _p not in picked:
+                    picked[_p] = tools[_p]
+
+        # 改进 5：补全后按 essential_when 非空优先 + 工具名 稳定排序
+        # essential_when tools first
+        try:
+            picked = dict(sorted(
+                picked.items(),
+                key=lambda kv: (
+                    0 if getattr(kv[1], "essential_when", ()) else 1,
+                    kv[0],
+                ),
+            ))
+        except Exception:
+            logger.exception("[dsh][orchestrator] sort picked failed")
+
         return picked
 
     def _assemble_decide_prompt(
@@ -235,6 +420,7 @@ class DecisionMixin:
         history_text: str,
         goal: str,
         conversation_block: str = "",
+        compact: bool = False,
     ) -> str:
         """按预算组装 decide prompt。"""
         budget = getattr(self, "_prompt_budget_chars", 24000)
@@ -260,7 +446,7 @@ class DecisionMixin:
         skeleton_len = len(skeleton) - len("{tool_directory}") - len("{history}")
         remaining = max(2000, budget - skeleton_len)
 
-        tool_dir = self._format_tool_directory(shortlist)
+        tool_dir = self._format_tool_directory(shortlist, compact=compact)
         tool_dir_budget = max(1000, int(remaining * 0.35))
         if len(tool_dir) > tool_dir_budget:
             lines = tool_dir.split("\n")
@@ -376,8 +562,15 @@ class DecisionMixin:
                 f"内容：\n```\n{content}\n```\n"
             )
 
+        # 改进 6：goal 截断到 5000 字符（10 万字符 goal 不进 prompt）
+        _goal_for_prompt = (goal or "")[:5000]
+        if goal and len(goal) > 5000:
+            _goal_for_prompt += "\n...(\u7528\u6237\u76ee\u6807\u5df2\u622a\u65ad\uff0c\u539f\u59cb %d \u5b57\u7b26)" % len(goal)
+
         prompt = self._assemble_decide_prompt(
-            shortlist, history_text, goal, conversation_block + memory_facts_block
+            shortlist, history_text, _goal_for_prompt,
+            conversation_block + memory_facts_block,
+            compact=expand_recall,
         )
 
         import time as _time
@@ -462,16 +655,20 @@ class DecisionMixin:
             )
         except asyncio.TimeoutError:
             duration_ms = (_time.time() - _t0) * 1000
-            logger.warning("[dsh][orchestrator] _decide LLM timed out after 120s")
+            logger.warning(
+                "[dsh][orchestrator] _decide LLM timed out after 120s, "
+                "fallback to rule-based"
+            )
             dump_llm_call(
                 kind="decide",
                 prompt=prompt,
                 response=None,
                 duration_ms=duration_ms,
-                error="timeout(120s)",
+                error="timeout(120s), fallback to rule-based",
                 extra={"tools_in_prompt": list(shortlist.keys())},
             )
-            return None
+            # ── 降级：用规则选工具（不返回 None）──
+            return self._fallback_decide(goal, tools, state)
         except asyncio.CancelledError:
             logger.warning("[dsh][orchestrator] _decide cancelled")
             raise
@@ -541,4 +738,114 @@ class DecisionMixin:
             parameters={},
             done=bool(data.get("done", False)),
             search_plan=search_plan,
+        )
+
+
+    def _fallback_decide(self, goal: str, tools: Dict[str, Any], state: Any = None):
+        """LLM 超时降级：规则选工具（不返回 None）。"""
+        from tools.semantics import classify_intent
+
+        try:
+            intent = classify_intent(goal or "")
+        except Exception:
+            intent = None
+
+        _FALLBACK_MAP = {
+            "generate": ["write_docx", "create_word", "create_pptx", "write_excel"],
+            "modify": ["edit_file", "edit_docx", "edit_excel"],
+            "read": ["read_text_file", "read_pdf_text", "read_docx_text"],
+            "query": ["search_knowledge", "http_get", "fetch_url"],
+            "code": ["read_text_file", "search_content"],
+        }
+
+        primary = getattr(intent, "primary", "") if intent else ""
+        # 改进 2：用 secondary_ordered 区分主格式（第 1 个是用户最先提到的）
+        _sec_ordered = list(getattr(intent, "secondary_ordered", ()) or ())
+        if not _sec_ordered:
+            # 兜底：老 IntentSet 没 ordered 时退回 set（无序）
+            _sec_ordered = [(s, 0) for s in (getattr(intent, "secondary", ()) or ())]
+        _primary_fmt = _sec_ordered[0][0] if _sec_ordered else ""
+        _all_fmts = {f for f, _pos in _sec_ordered}
+
+        # 通用：generate 时按"主格式"选工具（第 1 个 secondary 决定）
+        if primary == "generate":
+            if _primary_fmt == "presentation":
+                candidates = ["create_pptx", "office_batch"]
+            elif _primary_fmt == "spreadsheet":
+                candidates = ["write_excel", "create_excel"]
+            elif _primary_fmt == "document":
+                candidates = ["write_docx", "create_word"]
+            elif _primary_fmt == "pdf":
+                candidates = ["convert_to_pdf", "render_document"]
+            else:
+                candidates = _FALLBACK_MAP.get(primary, [])
+        elif primary == "modify":
+            if _primary_fmt == "document":
+                candidates = ["edit_docx", "edit_file"]
+            elif _primary_fmt == "spreadsheet":
+                candidates = ["edit_excel", "edit_file"]
+            else:
+                candidates = _FALLBACK_MAP.get(primary, [])
+        elif primary == "read":
+            if _primary_fmt == "pdf":
+                candidates = ["read_pdf_text", "read_pdf_metadata"]
+            elif _primary_fmt == "document":
+                candidates = ["read_docx_text", "read_office"]
+            elif _primary_fmt == "spreadsheet":
+                candidates = ["read_excel", "read_csv"]
+            else:
+                candidates = _FALLBACK_MAP.get(primary, [])
+        else:
+            candidates = _FALLBACK_MAP.get(primary, [])
+        step_index = len(getattr(state, "history", [])) + 1 if state else 1
+
+        for name in candidates:
+            if name in tools:
+                return OrchestratorStep(
+                    step_index=step_index,
+                    thought=f"[降级] LLM 超时，规则选 {name}",
+                    tool_name=name,
+                    parameters={},
+                    done=False,
+                )
+
+        # 通用：兜底按 essential_when 过滤，不选"看目录/搜文件"这种无状态工具
+        _INTENT_TO_ESSENTIAL = {
+            "generate": ("generate",),
+            "modify": ("modify",),
+            "read": ("read",),
+            "query": ("query", "read"),
+            "code": ("code", "read"),
+            "analyze": ("read",),
+        }
+        _want = _INTENT_TO_ESSENTIAL.get(primary, ())
+        _preferred = []
+        _others = []
+        for name, meta in tools.items():
+            ew = getattr(meta, "essential_when", ()) or ()
+            if _want and any(w in ew for w in _want):
+                _preferred.append(name)
+            else:
+                _others.append(name)
+        for name in _preferred:
+            return OrchestratorStep(
+                step_index=step_index,
+                thought=f"[降级] LLM 超时，选与意图匹配的 {name}",
+                tool_name=name,
+                parameters={},
+                done=False,
+            )
+        for name in _others:
+            return OrchestratorStep(
+                step_index=step_index,
+                thought=f"[降级] LLM 超时，无匹配意图工具，选 {name}",
+                tool_name=name,
+                parameters={},
+                done=False,
+            )
+
+        return OrchestratorStep(
+            step_index=step_index,
+            thought="[降级] LLM 超时且无可用工具",
+            done=True,
         )

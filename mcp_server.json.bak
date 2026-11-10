@@ -1,0 +1,32 @@
+{
+  "mcpServers": {
+    "fetch": {
+      "transport": "stdio",
+      "command": "uvx",
+      "args": ["mcp-server-fetch"],
+      "connect_timeout": 15,
+      "call_timeout": 60,
+      "retries": 2
+    },
+    "tavily": {
+      "transport": "stdio",
+      "command": "cmd",
+      "args": ["/c", "npx", "-y", "tavily-mcp"],
+      "env_from": {
+        "TAVILY_API_KEY": "TAVILY_API_KEY"
+      },
+      "connect_timeout": 15,
+      "call_timeout": 30,
+      "retries": 2
+    },
+    "office-worker": {
+      "transport": "stdio",
+      "command": "office-worker-mcp"
+    },
+    "docgen": {
+      "command": "uvx",
+      "args": ["mcp-docgen"],
+      "env": { "MCP_DOCGEN_OUTPUT_DIR": "D:\\Projects\\111\\LLM\\LLM" }
+    }
+  }
+}

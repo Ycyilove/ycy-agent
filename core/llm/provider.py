@@ -7,8 +7,7 @@
 """
 
 import json
-from typing import Dict, List
-
+from typing import Dict, List, Optional
 from core import ports
 
 
@@ -148,8 +147,8 @@ class ModelScopeLLM:
                 )
             else:
                 yield f"data: {json.dumps({'text': f'生成响应时发生错误: {error}', 'error': True}, ensure_ascii=False)}\n\n"
-        finally:
-            yield 'data: [DONE]\n\n'
+        # 不在 finally 里 yield（close() 时抛 RuntimeError）
+        yield 'data: [DONE]\n\n'
 
     def _add_mode_prompt(self, messages: List[Dict[str, str]], mode: str = 'quick'):
         system_prompt = self.QUICK_RESPONSE_PROMPT if mode == 'quick' else self.DEEP_THINKING_PROMPT

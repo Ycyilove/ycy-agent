@@ -1,0 +1,25 @@
+P1 完成于 2026-11-09 22:08:11
+
+P1-1：_resolve_tool_name 加操作词 + 格式词同义词映射
+- 改 tools/orchestration/decision.py::DecisionMixin._resolve_tool_name
+- _OPERATION_SYNONYMS（write/read/search/delete/edit/move/list/convert）
+- _FORMAT_SYNONYMS（pptx/docx/xlsx/pdf/text/csv/json/md）
+- 编辑距离 ≤ 2 兜底
+- 幻觉工具名映射率：2/10 -> 13/13
+
+P1-2：recall_recent_facts 只取最近 1 条 user_intent
+- 改 core/memory/mem0_layer.py::recall_recent_facts
+- 去重循环里，user_intent（非路径）只取最近 1 条
+- 避免多轮意图污染（第 1 轮 PDF 干扰第 2 轮 Word）
+- recall_recent_facts: ['再生成一个 Word 文档']（只 1 条）
+
+P1-3：office_batch 语义污染（不改）
+- create_pptx 0.6918 > write_docx 0.6069 > office_batch 0.4647
+- create_pptx 最高，模型会选它，不需改
+
+验收：
+- P1-1 13/13 / P1-2 1 条 intent / b0 / b1 / deps 全绿
+
+P0-3（_fallback_decide 用 secondary）待重做：
+- 上次用 @() 数组，PowerShell 解析错，L647 unmatched )
+- 这次用 @'...'@ here-string + -split，不用 @() 数组

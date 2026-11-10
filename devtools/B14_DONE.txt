@@ -1,0 +1,20 @@
+B14 完成于 2026-11-09 20:58:11
+
+新增：
+- rag/service/__init__.py（from .facade import LocalRAGService）
+- rag/service/facade.py（LocalRAGService 组合类，4 协作类 + 委托）
+- rag/service/ingest.py（IngestService，add_file 281 行原样 + 引用转发）
+- rag/service/search.py（SearchService，search 264 行原样 + 3 辅助 + 旧名别名）
+- rag/service/answer.py（AnswerService，4 方法原样）
+- rag/service/lifecycle.py（LifecycleService，3 方法原样）
+
+删除：
+- rag/service.py（823 行 -> 6 文件，公共 API 等价）
+
+验收：
+- rag.LocalRAGService 走 rag.service.facade
+- rag.service.__file__ = rag/service/__init__.py
+- 8 个公共方法签名不变
+- search('warmup') 返回 1 结果（总 chunks=1112）
+- get_stats 返回完整统计
+- b0 / b1 / deps 全绿

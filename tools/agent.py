@@ -16,7 +16,7 @@ from typing import Any, Dict, FrozenSet, List, Optional
 
 from . import registry, get_registry
 from .intent import LLMIntentRecognizer, IntentRecognizer
-from .types import ToolCallRequest, ToolCallResult, IntentAnalysis
+from .types import ToolCallRequest, ToolCallResult, IntentAnalysis, Artifact
 
 _allowed_tools_var: ContextVar[Optional[FrozenSet[str]]] = ContextVar(
     "tool_agent_allowed_tools", default=None
@@ -145,6 +145,47 @@ class ToolAgent:
             user_confirmation_needed=danger_level in ["medium", "high"],
         )
 
+    def _extract_artifacts(self, tool_name: str, result: Any) -> List[Artifact]:
+        """自动嗅探工具产物（通用，无视内置/MCP）。"""
+        import os as _os
+        from .types import Artifact
+        artifacts: List[Artifact] = []
+        if not isinstance(result, dict):
+            return artifacts
+
+        _PATH_KEYS = ("file_path", "output_path", "new_path", "output", "path")
+        path = None
+        for k in _PATH_KEYS:
+            v = result.get(k)
+            if isinstance(v, str) and v.strip():
+                path = v.strip()
+                break
+
+        if path:
+            try:
+                if _os.path.isfile(path):
+                    size = _os.path.getsize(path)
+                    preview = ""
+                    if size > 0 and size < 50000:
+                        try:
+                            with open(path, "r", encoding="utf-8") as f:
+                                preview = f.read(200)
+                        except Exception:
+                            preview = "<binary>"
+                    artifacts.append(Artifact(
+                        path=_os.path.abspath(path),
+                        size=size,
+                        content_preview=preview,
+                    ))
+            except Exception:
+                pass
+
+        # 嗅探截断信号
+        if result.get("truncated") or result.get("is_preview"):
+            artifacts.append(Artifact(path=path or "", is_truncated=True))
+
+        return artifacts
+
     async def execute_tool_async(self, tool_call: ToolCallRequest) -> ToolCallResult:
         import inspect
         import time
@@ -152,6 +193,8 @@ class ToolAgent:
         tool_name = tool_call.tool_name
         tool_func = self.registry.get_tool(tool_name)
         params = tool_call.parameters or {}
+        # ── 审批参数先保留：gateway.check / approval.verify 都要读它 ──
+        # 工具函数不认 __approval_id__，所以在 gateway + verify 之后、调 tool_func 之前剥（E3 修复）
 
         from tools.security.gateway import get_gateway, get_security_context
         ctx = get_security_context()
@@ -193,6 +236,10 @@ class ToolAgent:
                         execution_time=time.time() - start_time,
                         parameters=params,
                     )
+
+        # ── E3: gateway.check + L2 verify 都过了，现在才剥离 __approval_id__ ──
+        if isinstance(params, dict):
+            params.pop("__approval_id__", None)
 
         if tool_func is None and self._is_mcp_tool_name(tool_name):
             mcp_client = self._mcp_client_manager
@@ -299,10 +346,19 @@ class ToolAgent:
             else:
                 success = True
                 error_message = None
+            # 通用：失败但 error 为空 / result 为 None 时，补通用错误信息
+            # （MCP server 可能内部崩了但没抛异常，导致 error='' / result=None）
+            if not success and not error_message:
+                if result is None:
+                    error_message = "工具执行失败但未返回错误详情（result=None）"
+                else:
+                    error_message = "工具执行失败但未返回错误详情"
+            artifacts = self._extract_artifacts(tool_name, result)
             return ToolCallResult(
                 tool_name=tool_name, success=success, result=result,
                 error=error_message, execution_time=execution_time,
                 parameters=params,
+                artifacts=artifacts,
             )
         except TypeError as error:
             try:

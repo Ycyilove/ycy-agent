@@ -1,0 +1,28 @@
+B13 完成于 2026-11-09 20:51:56
+
+改动：
+- scripts/*.py -> devtools/scripts/*.py（7 个）
+- verify_all.ps1 -> devtools/verify_all.ps1
+- 删 scripts/ 目录
+
+验收：
+- devtools/scripts/ 7 个 .py 语法 OK
+- scripts/ 不存在
+- verify_all.ps1 在 devtools/
+- b0 / b1 仍绿
+- deps 仍 1 条（B11 解）
+
+B0-B13 累计：
+- B0: 9 bug
+- B1: core/task/answer/ 8 文件
+- B2: core/ports.py + bootstrap/，deps 7 -> 2
+- B3: fallback_search 走 SearchPort
+- B4: 审批唯一真源 + 8 单测
+- B5: semantics/vocab.py 词表收敛
+- B6: semantics/index/ 3 套索引统一
+- B7: capability/pipeline/ 7 阶段
+- B8: orchestration/core.py 2367 -> 156 行，拆 4 Mixin
+- B9: backend/app.py 355 -> ~290 行，拆 deps.py，deps 仍 1 条
+- B12: embedding 收敛，mem0 dim 对齐，deps 1 条
+- B13: scripts/ + verify_all.ps1 -> devtools/
+- B15: prompts.py 去 rag，deps 2 -> 1

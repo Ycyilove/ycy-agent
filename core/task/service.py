@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     # 仅类型检查器可见；运行期不 import，不触发 deps 违规
     from tools.types import ToolCallRequest, ToolCallResult
 
-from tools.orchestration.state import OrchestratorState
+from core.task.state import OrchestratorState
 from core.task.modes import MODE_ASK, MODE_AGENT, MODES, validate_mode
 
 from core.llm.prompts import (
@@ -1795,296 +1795,344 @@ class AgentTaskService:
             yield sse_event("done", task_status="stale")
             return
 
-        # ── 拿到 pending：落盘 approval_take ──
-        try:
-            from infra.debug_log.llm import dump_llm_call
-            dump_llm_call(
-                kind="approval_take",
-                prompt="",
-                response=None,
-                tool_name=pending.tool_call.tool_name,
-                extra={
-                    "approval_id": approval_id,
-                    "task_id": task_id,
-                    "session_id": pending.session_id,
-                    "tool_name": pending.tool_call.tool_name,
-                    "action": action,
-                    "params": pending.tool_call.parameters,
-                },
-            )
-        except Exception:
-            logger.exception("[dsh][task_service] dump approval_take failed")
-
-        # ── 同步 ApprovalStore 决策（供网关 verify 用） ──
-        try:
-            from tools.security.approval import get_approval_store
-            get_approval_store().decide(approval_id, pending.session_id, action)
-        except Exception:
-            logger.exception("同步 ApprovalStore.decide 失败: %s", approval_id)
-
-        # ── 落盘审批决策 ──
-        try:
-            from infra.debug_log.llm import dump_llm_call
-            dump_llm_call(
-                kind="approval_decision",
-                prompt="",
-                response=None,
-                tool_name=pending.tool_call.tool_name,
-                extra={
-                    "approval_id": approval_id,
-                    "task_id": task_id,
-                    "session_id": pending.session_id,
-                    "action": action,
-                    "allowed": action in {"allow", "allow-always"},
-                },
-            )
-        except Exception:
-            logger.exception("[dsh][task_service] dump approval_decision failed")
-
-        if action not in {"allow", "allow-always"}:
-            rejected = self._step(
-                pending.step_id,
-                f"已拒绝：{pending.title}",
-                "failed",
-                "action",
-                path=pending.path,
-            )
-            yield self._emit_step(task_id, rejected)
-
-            self._session_provider().add_message(
-                pending.session_id,
-                "assistant",
-                f"已拒绝工具操作：{pending.tool_call.tool_name}",
-            )
-            self._persist_task_status(task_id, "failed")
-            yield sse_event("done", task_status="failed")
-            return
-
-        # ── 执行工具（内联，避免走 _execute_tool 的抽象层） ──
-        tool_call = pending.tool_call
-        step_id = pending.step_id
-        label = f"执行工具：{tool_call.tool_name}"
-
-        # 审批路径独立，需自己维护 accumulated_resources
-        accumulated_resources: List[Dict[str, Any]] = []
-
-        yield self._emit_step(
-            task_id,
-            self._step(
-                step_id,
-                label,
-                "running",
-                "action",
-                path=self._tool_path(tool_call),
-            ),
+        # ── 设置当前 turn 上下文（供 dump_llm_call 用）──
+        from infra.debug_log.llm import begin_turn, end_turn
+        begin_turn(
+            session_id=pending.session_id,
+            task_id=task_id,
+            question=f"approval-{approval_id}",
         )
-
-        logger.info(
-            "[dsh][task_service] approval executing: %s params=%r",
-            tool_call.tool_name, tool_call.parameters,
-        )
-
-
-        # ── 新增：注入 approval_id，供 execute_tool_async 的 verify 用 ──
         try:
-            from tools.security.gateway import get_security_context
-            _ctx = get_security_context()
-            if _ctx is not None:
-                _ctx.approved_approval_ids.add(approval_id)
-        except Exception:
-            logger.exception("注入 approved_approval_ids 失败: %s", approval_id)
-
-        tool_call.parameters = dict(tool_call.parameters or {})
-        tool_call.parameters["__approval_id__"] = approval_id
-
-        try:
-            result = await self._agent_provider().execute_tool_async(tool_call)
-        except Exception as error:
-            logger.exception(
-                "[dsh][task_service] approval execution raised: %s",
-                tool_call.tool_name,
-            )
-            from tools.types import ToolCallResult
-            result = ToolCallResult(
-                tool_name=tool_call.tool_name,
-                success=False,
-                error=str(error),
-            )
-
-        log = self._agent_provider().format_tool_result(result)
-        status = "done" if result.success else "failed"
-        logger.info(
-            "[dsh][task_service] approval executed: %s\n"
-            "  params=%r\n"
-            "  success=%r\n"
-            "  error=%r\n"
-            "  result_type=%s\n"
-            "  result_preview=%r",
-            tool_call.tool_name,
-            tool_call.parameters,
-            result.success,
-            result.error,
-            type(result.result).__name__,
-            (
-                str(result.result)[:500]
-                if result.result is not None
-                else None
-            ),
-        )
-
-        # ── 先提取资源（需要读原始 bytes） ──
-        try:
-            found = self._extract_resources_from_tool_result(
-                result,
-                task_id=task_id,
-                session_id=pending.session_id,
-            )
-            if found:
-                # 跨多次工具调用去重（同一 rid 只保留一次）
-                existing_ids = {r.get("id") for r in accumulated_resources if r.get("id")}
-                new_items = [r for r in found if r.get("id") and r["id"] not in existing_ids]
-                if new_items:
-                    accumulated_resources.extend(new_items)
-                yield self._emit_step(
-                    task_id,
-                    self._step(
-                        f"{task_id}:{step_id}:resources",
-                        f"工具产生 {len(new_items)} 个新资源",
-                        "done",
-                        "resource",
-                        resources=new_items,
-                    ),
-                )
-        except Exception:
-            logger.exception("提取工具资源失败")
-
-        # ── 再剥离 bytes（防止污染 context / json） ──
-        if isinstance(getattr(result, "result", None), dict):
-            result.result = self._strip_bytes(result.result)
-
-        # 审批路径没有 orchestrator event；log 已是 format_tool_result 的结果，
-        # 已包含 structuredContent / content / 错误原文，不再追加 result.result。
-        log_parts: List[str] = []
-        if log:
-            log_parts.append(str(log))
-
-        if not result.success and getattr(result, "error", None):
-            err_text = f"【错误】{result.error}"
-            head = log_parts[0] if log_parts else ""
-            if err_text not in head and str(result.error) not in head:
-                log_parts.append(err_text)
-
-        combined_log = "\n\n".join(log_parts) if log_parts else None
-
-        yield self._emit_step(
-            task_id,
-            self._step(
-                step_id,
-                label if result.success else f"{label}（失败）",
-                status,
-                "action",
-                path=self._tool_path(tool_call),
-                log=combined_log,
-            ),
-        )
-
-        file_log = self._file_log_entry(tool_call, result)
-        if file_log:
-            yield self._emit_file_log(pending.session_id, file_log)
-            # 删除动作且成功 → 额外发 trash 事件
-            if file_log["action"] == "delete" and file_log["status"] == "success":
-                trash_id = None
-                trash_path = None
-                if isinstance(result.result, dict):
-                    trash_id = result.result.get("trash_id")
-                    trash_path = result.result.get("new_path")
-                yield sse_event("trash", item={
-                    "id": trash_id or file_log["id"],
-                    "original_path": file_log["path"],
-                    "original_name": os.path.basename(file_log["path"]),
-                    "trash_path": trash_path or "",
-                    "deleted_at": datetime.now().isoformat(),
-                    "size": 0,
-                })
-
-        # ── 无法恢复 orchestrator → 直接结束 ──
-        if (
-            pending.state_snapshot is None
-            or self._orchestrator_provider is None
-        ):
-            final_status = "done" if result.success else "failed"
-            self._session_provider().add_message(
-                pending.session_id, "assistant", log
-            )
-            self._persist_task_status(task_id, final_status)
-            yield sse_event("done", task_status=final_status)
-            return
-
-        # ── 注入结果到 state，恢复 orchestrator ──
-        state = OrchestratorState.from_snapshot(pending.state_snapshot)
-        step_num = pending.step_index
-
-        if result.success:
-            state.mark_success(tool_call.tool_name, tool_call.parameters, step_num)
-            state.add_history(
-                f"Step {step_num}: {tool_call.tool_name}({tool_call.parameters}) "
-                f"→ OK: {log[:400]}"
-            )
-
-            # ── Mem0：审批后成功也写事实 ──
+            # ── 拿到 pending：落盘 approval_take ──
             try:
-                from core.memory.mem0_layer import remember_tool_success
-                _meta_for_origin = self._agent_provider().list_all_tools().get(
-                    tool_call.tool_name
-                )
-                _origin = getattr(_meta_for_origin, "origin", None) or "builtin"
-                remember_tool_success(
-                    session_id=state.session_id or pending.session_id,
-                    tool_name=tool_call.tool_name,
-                    params=tool_call.parameters,
-                    result=result.result,
-                    origin=_origin,
+                from infra.debug_log.llm import dump_llm_call
+                dump_llm_call(
+                    kind="approval_take",
+                    prompt="",
+                    response=None,
+                    tool_name=pending.tool_call.tool_name,
+                    extra={
+                        "approval_id": approval_id,
+                        "task_id": task_id,
+                        "session_id": pending.session_id,
+                        "tool_name": pending.tool_call.tool_name,
+                        "action": action,
+                        "params": pending.tool_call.parameters,
+                    },
                 )
             except Exception:
-                logger.exception("remember_tool_success (approval) 失败")
-        else:
-            state.mark_failure(
-                tool_call.tool_name, tool_call.parameters, result.error or ""
+                logger.exception("[dsh][task_service] dump approval_take failed")
+
+            # ── 同步 ApprovalStore 决策（供网关 verify 用） ──
+            try:
+                from tools.security.approval import get_approval_store
+                get_approval_store().decide(approval_id, pending.session_id, action)
+            except Exception:
+                logger.exception("同步 ApprovalStore.decide 失败: %s", approval_id)
+
+            # ── 落盘审批决策 ──
+            try:
+                from infra.debug_log.llm import dump_llm_call
+                dump_llm_call(
+                    kind="approval_decision",
+                    prompt="",
+                    response=None,
+                    tool_name=pending.tool_call.tool_name,
+                    extra={
+                        "approval_id": approval_id,
+                        "task_id": task_id,
+                        "session_id": pending.session_id,
+                        "action": action,
+                        "allowed": action in {"allow", "allow-always"},
+                    },
+                )
+            except Exception:
+                logger.exception("[dsh][task_service] dump approval_decision failed")
+
+            if action not in {"allow", "allow-always"}:
+                rejected = self._step(
+                    pending.step_id,
+                    f"已拒绝：{pending.title}",
+                    "failed",
+                    "action",
+                    path=pending.path,
+                )
+                yield self._emit_step(task_id, rejected)
+
+                self._session_provider().add_message(
+                    pending.session_id,
+                    "assistant",
+                    f"已拒绝工具操作：{pending.tool_call.tool_name}",
+                )
+                self._persist_task_status(task_id, "failed")
+                yield sse_event("done", task_status="failed")
+                return
+
+            # ── 执行工具（内联，避免走 _execute_tool 的抽象层） ──
+            tool_call = pending.tool_call
+            step_id = pending.step_id
+            label = f"执行工具：{tool_call.tool_name}"
+
+            # 审批路径独立，需自己维护 accumulated_resources
+            accumulated_resources: List[Dict[str, Any]] = []
+
+            yield self._emit_step(
+                task_id,
+                self._step(
+                    step_id,
+                    label,
+                    "running",
+                    "action",
+                    path=self._tool_path(tool_call),
+                ),
             )
-            # ── 补：更新连续失败计数，供 _intercept_call 拦截重复调用 ──
-            from tools.orchestration.state import params_key as _params_key
-            _fk = (tool_call.tool_name, _params_key(tool_call.parameters))
-            state._consecutive_failures[_fk] = (
-                state._consecutive_failures.get(_fk, 0) + 1
-            )
+
             logger.info(
-                "[dsh][task_service] approval failure count for %s: %d",
+                "[dsh][task_service] approval executing: %s params=%r",
+                tool_call.tool_name, tool_call.parameters,
+            )
+
+
+            # ── 新增：注入 approval_id，供 execute_tool_async 的 verify 用 ──
+            try:
+                from tools.security.gateway import get_security_context
+                _ctx = get_security_context()
+                if _ctx is not None:
+                    _ctx.approved_approval_ids.add(approval_id)
+            except Exception:
+                logger.exception("注入 approved_approval_ids 失败: %s", approval_id)
+
+            tool_call.parameters = dict(tool_call.parameters or {})
+            tool_call.parameters["__approval_id__"] = approval_id
+
+            try:
+                result = await self._agent_provider().execute_tool_async(tool_call)
+            except Exception as error:
+                logger.exception(
+                    "[dsh][task_service] approval execution raised: %s",
+                    tool_call.tool_name,
+                )
+                from tools.types import ToolCallResult
+                result = ToolCallResult(
+                    tool_name=tool_call.tool_name,
+                    success=False,
+                    error=str(error),
+                )
+
+            log = self._agent_provider().format_tool_result(result)
+            status = "done" if result.success else "failed"
+            logger.info(
+                "[dsh][task_service] approval executed: %s\n"
+                "  params=%r\n"
+                "  success=%r\n"
+                "  error=%r\n"
+                "  result_type=%s\n"
+                "  result_preview=%r",
                 tool_call.tool_name,
-                state._consecutive_failures[_fk],
+                tool_call.parameters,
+                result.success,
+                result.error,
+                type(result.result).__name__,
+                (
+                    str(result.result)[:500]
+                    if result.result is not None
+                    else None
+                ),
             )
-            state.add_history(
-                f"Step {step_num}: {tool_call.tool_name}({tool_call.parameters}) "
-                f"→ FAIL: {log[:400]}"
+
+            # ── 先提取资源（需要读原始 bytes） ──
+            try:
+                found = self._extract_resources_from_tool_result(
+                    result,
+                    task_id=task_id,
+                    session_id=pending.session_id,
+                )
+                if found:
+                    # 跨多次工具调用去重（同一 rid 只保留一次）
+                    existing_ids = {r.get("id") for r in accumulated_resources if r.get("id")}
+                    new_items = [r for r in found if r.get("id") and r["id"] not in existing_ids]
+                    if new_items:
+                        accumulated_resources.extend(new_items)
+                    yield self._emit_step(
+                        task_id,
+                        self._step(
+                            f"{task_id}:{step_id}:resources",
+                            f"工具产生 {len(new_items)} 个新资源",
+                            "done",
+                            "resource",
+                            resources=new_items,
+                        ),
+                    )
+            except Exception:
+                logger.exception("提取工具资源失败")
+
+            # ── 再剥离 bytes（防止污染 context / json） ──
+            if isinstance(getattr(result, "result", None), dict):
+                result.result = self._strip_bytes(result.result)
+
+            # 审批路径没有 orchestrator event；log 已是 format_tool_result 的结果，
+            # 已包含 structuredContent / content / 错误原文，不再追加 result.result。
+            log_parts: List[str] = []
+            if log:
+                log_parts.append(str(log))
+
+            if not result.success and getattr(result, "error", None):
+                err_text = f"【错误】{result.error}"
+                head = log_parts[0] if log_parts else ""
+                if err_text not in head and str(result.error) not in head:
+                    log_parts.append(err_text)
+
+            combined_log = "\n\n".join(log_parts) if log_parts else None
+
+            yield self._emit_step(
+                task_id,
+                self._step(
+                    step_id,
+                    label if result.success else f"{label}（失败）",
+                    status,
+                    "action",
+                    path=self._tool_path(tool_call),
+                    log=combined_log,
+                ),
             )
 
-        logger.info(
-            "[dsh][task_service] stream_approval: resuming orchestrator "
-            "from step %d (success=%r)",
-            pending.step_index + 1, result.success,
-        )
+            file_log = self._file_log_entry(tool_call, result)
+            if file_log:
+                yield self._emit_file_log(pending.session_id, file_log)
+                # 删除动作且成功 → 额外发 trash 事件
+                if file_log["action"] == "delete" and file_log["status"] == "success":
+                    trash_id = None
+                    trash_path = None
+                    if isinstance(result.result, dict):
+                        trash_id = result.result.get("trash_id")
+                        trash_path = result.result.get("new_path")
+                    yield sse_event("trash", item={
+                        "id": trash_id or file_log["id"],
+                        "original_path": file_log["path"],
+                        "original_name": os.path.basename(file_log["path"]),
+                        "trash_path": trash_path or "",
+                        "deleted_at": datetime.now().isoformat(),
+                        "size": 0,
+                    })
 
-        # ── 恢复 orchestrator ──
-        async for evt in self._resume_orchestrator(
-            pending=pending,
-            state=state,
-            start_step=pending.step_index + 1,
-            last_tool_name=tool_call.tool_name,
-            last_tool_ok=result.success,
-            last_tool_log=log,
-        ):
-            yield evt
+            # ── 无法恢复 orchestrator → 直接结束 ──
+            if (
+                pending.state_snapshot is None
+                or self._orchestrator_provider is None
+            ):
+                final_status = "done" if result.success else "failed"
+                self._session_provider().add_message(
+                    pending.session_id, "assistant", log
+                )
+                self._persist_task_status(task_id, final_status)
+                yield sse_event("done", task_status=final_status)
+                return
+
+            # ── 注入结果到 state，恢复 orchestrator ──
+            state = OrchestratorState.from_snapshot(pending.state_snapshot)
+            step_num = pending.step_index
+
+            # 通用：审批路径也要从错误里回填 known_enums
+            # （run.py 的 tool_result 分支只覆盖非审批路径，审批后执行的结果流经这里）
+            try:
+                if state is not None:
+                    orch = self._orchestrator_provider() if self._orchestrator_provider else None
+                    extractor = getattr(orch, "_extract_enum_from_error", None) if orch else None
+                    if extractor is None:
+                        # 兜底：直接用 RunMixin 的静态方法
+                        from tools.orchestration.run import RunMixin
+                        extractor = RunMixin._extract_enum_from_error
+                    _enum_map = extractor(result)
+                    if _enum_map:
+                        for _tn, _vals in _enum_map.items():
+                            state.known_enums[_tn] = _vals
+                            logger.info(
+                                "[dsh][task_service] learned %d enum values for %s from error (approval path): %r",
+                                len(_vals), _tn, _vals[:10],
+                            )
+                    # 通用：检测工具级不可用
+                    detect = getattr(orch, "_detect_unavailable_from_error", None) if orch else None
+                    if detect is None:
+                        from tools.orchestration.run import RunMixin
+                        detect = RunMixin._detect_unavailable_from_error
+                    _unavail_reason = detect(result)
+                    if _unavail_reason:
+                        _tn = getattr(result, "tool_name", None)
+                        if _tn:
+                            state.unavailable_tools[_tn] = _unavail_reason
+                            logger.warning(
+                                "[dsh][task_service] tool %s auto-marked unavailable (approval path): %s",
+                                _tn, _unavail_reason[:100],
+                            )
+            except Exception:
+                logger.exception("[dsh][task_service] extract enum / unavailable from error failed (approval path)")
+
+            if result.success:
+                state.mark_success(tool_call.tool_name, tool_call.parameters, step_num)
+                state.add_history(
+                    f"Step {step_num}: {tool_call.tool_name}({tool_call.parameters}) "
+                    f"→ OK: {log[:400]}"
+                )
+
+                # ── Mem0：审批后成功也写事实 ──
+                try:
+                    from core.memory.mem0_layer import remember_tool_success
+                    _meta_for_origin = self._agent_provider().list_all_tools().get(
+                        tool_call.tool_name
+                    )
+                    _origin = getattr(_meta_for_origin, "origin", None) or "builtin"
+                    remember_tool_success(
+                        session_id=state.session_id or pending.session_id,
+                        tool_name=tool_call.tool_name,
+                        params=tool_call.parameters,
+                        result=result.result,
+                        origin=_origin,
+                    )
+                except Exception:
+                    logger.exception("remember_tool_success (approval) 失败")
+            else:
+                state.mark_failure(
+                    tool_call.tool_name, tool_call.parameters, result.error or ""
+                )
+                # ── 补：更新连续失败计数，供 _intercept_call 拦截重复调用 ──
+                from core.task.state import params_key as _params_key
+                _fk = (tool_call.tool_name, _params_key(tool_call.parameters))
+                state._consecutive_failures[_fk] = (
+                    state._consecutive_failures.get(_fk, 0) + 1
+                )
+                logger.info(
+                    "[dsh][task_service] approval failure count for %s: %d",
+                    tool_call.tool_name,
+                    state._consecutive_failures[_fk],
+                )
+                state.add_history(
+                    f"Step {step_num}: {tool_call.tool_name}({tool_call.parameters}) "
+                    f"→ FAIL: {log[:400]}"
+                )
+
+            logger.info(
+                "[dsh][task_service] stream_approval: resuming orchestrator "
+                "from step %d (success=%r)",
+                pending.step_index + 1, result.success,
+            )
+
+            # ── 恢复 orchestrator ──
+            async for evt in self._resume_orchestrator(
+                pending=pending,
+                state=state,
+                start_step=pending.step_index + 1,
+                last_tool_name=tool_call.tool_name,
+                last_tool_ok=result.success,
+                last_tool_log=log,
+            ):
+                yield evt
 
 
+        finally:
+            try:
+                end_turn()
+            except Exception:
+                logger.exception("end_turn (stream_approval) 失败")
     async def _resume_orchestrator(
         self,
         *,

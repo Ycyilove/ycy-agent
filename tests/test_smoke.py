@@ -33,6 +33,7 @@ def test_prompt_has_statement_vs_instruction():
     assert "指令" in ORCHESTRATOR_PROMPT
 
 
+@pytest.mark.asyncio
 async def test_smoke_decide_empty_history():
     """_decide 在空 history 下能返回决策，不崩。"""
     agent = MagicMock()
@@ -51,7 +52,6 @@ async def test_smoke_decide_empty_history():
     orch = AgentOrchestrator(
         agent_provider=lambda: agent,
         llm_provider=lambda: llm,
-        enable_intent_router=False,
     )
     state = OrchestratorState(goal="测试", session_id="s")
     decision = await orch._decide("测试", state, agent.list_all_tools())

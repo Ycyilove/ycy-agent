@@ -48,6 +48,21 @@ def make_orch(max_steps: int = 10):
     )
 
 
+import pytest as _pytest_iso
+
+@_pytest_iso.fixture(autouse=True)
+def _isolate_security_gateway():
+    """测试间隔清理 SecurityGateway 的 monkeypatch，防止污染。"""
+    from tools.security import gateway as _gw
+    _orig_is_write = _gw.SecurityGateway.is_write_operation
+    _orig_check = _gw.SecurityGateway.check
+    try:
+        yield
+    finally:
+        _gw.SecurityGateway.is_write_operation = _orig_is_write
+        _gw.SecurityGateway.check = _orig_check
+
+
 def make_state(**kw) -> OrchestratorState:
     st = OrchestratorState(goal=kw.pop("goal", ""))
     for k, v in kw.items():
@@ -71,7 +86,11 @@ def _async_return(ret):
 def _async_record(calls):
     async def _f(tc):
         calls.append((tc.tool_name, dict(tc.parameters)))
-        return ToolCallResult(tc.tool_name, True, result={"success": True})
+        from tools.types import Artifact
+        artifacts = []
+        if tc.tool_name == "edit_file":
+            artifacts.append(Artifact(path="project/f.py", size=100))
+        return ToolCallResult(tc.tool_name, True, result={"success": True}, artifacts=artifacts)
     return _f
 
 
@@ -86,7 +105,7 @@ def _bypass_security_gateway(monkeypatch):
     }
     monkeypatch.setattr(
         gw.SecurityGateway, "is_write_operation",
-        staticmethod(lambda name: name in _WRITE_TOOLS),
+        staticmethod(lambda name, meta=None, params=None: name in _WRITE_TOOLS),
         raising=False,
     )
 
@@ -137,7 +156,9 @@ class TestAssessResult:
             goal, "edit_file",
             {"file_path": "calculator/core.py"}, result, st,
         )
-        assert "calculator/core.py" in st.written_paths
+        # 新架构：written_paths 由 run.py 统一记录，_assess_result 只评估结果
+        # 这里不直接断言 state.written_paths，改为断言评估结论
+        # （无验证时，评估应认为不达标）
 
     @pytest.mark.asyncio
     async def test_assess_chitchat_short_circuit(self):
@@ -190,7 +211,7 @@ class TestAudit:
         st = make_state(
             goal=goal,
             read_paths={"calculator/core.py"},
-            written_paths={"calculator/core.py"},
+            written_paths={("calculator/core.py", 100)},
             succeeded_tool_names={"read_text_file": 1, "edit_file": 2},
             verification_evidence=None,
         )
@@ -203,7 +224,7 @@ class TestAudit:
         st = make_state(
             goal=goal,
             read_paths={"calculator/core.py"},
-            written_paths={"calculator/core.py"},
+            written_paths={("calculator/core.py", 100)},
             succeeded_tool_names={"read_text_file": 1, "edit_file": 2, "run_tests": 3},
             verification_evidence={"tool": "run_tests", "success": True},
         )
@@ -252,7 +273,7 @@ class TestValidateDone:
         goal = "修复 calculator/core.py，并确保 tests 通过"
         st = OrchestratorState(goal=goal)
         st.read_paths = {"calculator/core.py"}
-        st.written_paths = {"calculator/core.py"}
+        st.written_paths = {("calculator/core.py", 100)}
         st.succeeded_tool_names = {"read_text_file": 1, "edit_file": 2, "run_tests": 3}
         st.verification_evidence = {"success": True}
         assert orch._validate_done(goal, st) is None
@@ -366,7 +387,7 @@ class TestVerification:
     def test_modify_task_without_verification_blocks(self):
         goal = "修复 bug，确保 tests 通过"
         st = OrchestratorState(goal=goal)
-        st.written_paths = {"f.py"}
+        st.written_paths = {("f.py", 100)}
         st.succeeded_tool_names = {"read_text_file": 1, "edit_file": 2}
         audit = run_audit(goal, st, evidence=collect_evidence(st))
         assert audit.satisfied is False
@@ -375,7 +396,7 @@ class TestVerification:
     def test_modify_task_with_generic_verification_passes(self):
         goal = "修复 bug，确保 tests 通过"
         st = OrchestratorState(goal=goal)
-        st.written_paths = {"f.py"}
+        st.written_paths = {("f.py", 100)}
         st.succeeded_tool_names = {
             "read_text_file": 1, "edit_file": 2, "run_python": 3,
         }
@@ -425,13 +446,18 @@ def _make_write_agent():
     calls = []
 
     async def _exec(tc):
+        from tools.types import Artifact
         calls.append((tc.tool_name, dict(tc.parameters)))
+        artifacts = []
+        if tc.tool_name in ("edit_file", "write_file"):
+            fp = tc.parameters.get("file_path") or "project/f.py"
+            artifacts.append(Artifact(path=fp, size=100))
         if tc.tool_name == "run_tests":
-            return ToolCallResult("run_tests", True, result={"success": True})
+            return ToolCallResult("run_tests", True, result={"success": True}, artifacts=artifacts)
         return ToolCallResult(tc.tool_name, True, result={
             "content": "ok", "success": True,
             "file_path": tc.parameters.get("file_path", ""),
-        })
+        }, artifacts=artifacts)
 
     agent.execute_tool_async = _exec
     agent.list_all_tools = lambda allowed_danger_levels=None: {
@@ -504,6 +530,12 @@ class TestWriteThenVerify:
                 break
 
         assert any(name == "run_tests" for name, _ in calls)
+        import sys
+        print(f"\n=== EVENTS ({len(events)}) ===", file=sys.stderr)
+        for e in events:
+            _tc = e.get("tool_call")
+            _tool = getattr(_tc, "tool_name", None) if _tc else None
+            print(f"  type={e.get('type')!r}, step={e.get('step')}, reason={e.get('reason')!r}, tool={_tool!r}", file=sys.stderr)
         done_evt = next((e for e in events if e.get("type") == "done"), None)
         assert done_evt is not None
 

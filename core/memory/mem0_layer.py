@@ -34,9 +34,15 @@ from core import ports
 
 
 def _mem0_cfg():
+    """运行时配置。未注入时降级返回默认值（import 期还没注入）。"""
     cfg = ports.get_config()
     if cfg is None:
-        raise RuntimeError("core.ports.config 未注入")
+        import types
+        return types.SimpleNamespace(
+            MEM0_ENABLED=os.getenv("MEM0_ENABLED", "1") != "0",
+            MEM0_API_KEY=os.getenv("MEM0_API_KEY", ""),
+            MEM0_CONFIG=os.getenv("MEM0_CONFIG", ""),
+        )
     return cfg
 from infra.embedding import resolve_local_model_dir
 
@@ -191,7 +197,12 @@ def _build_config() -> Dict[str, Any]:
     project_root = os.path.dirname(
         os.path.dirname(os.path.dirname(__file__))
     )
-    _mini_name = "sentence-transformers/all-MiniLM-L6-v2"
+    # B12 改：用 RAG_EMBEDDING_MODEL（bge-small-zh-v1.5），与 RAG 同模型
+    try:
+        from backend.config import RAG_EMBEDDING_MODEL as _embed_model
+    except ImportError:
+        _embed_model = "BAAI/bge-small-zh-v1.5"
+    _mini_name = _embed_model
     _local_snap = resolve_local_model_dir(_mini_name) or _mini_name
     hf_cache = os.path.join(project_root, "models")
     qdrant_path = os.path.join(project_root, "data", "mem0_qdrant")
@@ -209,7 +220,7 @@ def _build_config() -> Dict[str, Any]:
             "provider": "huggingface",
             "config": {
                 "model": _local_snap,
-                "embedding_dims": 384,
+                "embedding_dims": 512,   # B12 改：bge-small-zh-v1.5 dim=512
                 "model_kwargs": {
                     "device": "cpu",
                     "cache_folder": hf_cache,
@@ -221,7 +232,7 @@ def _build_config() -> Dict[str, Any]:
             "config": {
                 "collection_name": "agent_facts",
                 "path": qdrant_path,
-                "embedding_model_dims": 384,   # ← 关键
+                "embedding_model_dims": 512,   # B12 改：bge-small-zh-v1.5 dim=512
             },
         },
     }
@@ -572,13 +583,43 @@ def recall_recent_facts(session_id: str, limit: int = 8) -> List[str]:
 
     out: List[str] = []
     seen = set()
+    intent_count = 0  # 通用：user_intent 只取最近 1 条（避免多轮意图污染）
+    import re as _re
     for t in texts:
         if t in seen:
             continue
         seen.add(t)
+        is_path = bool(_re.match(r"^[A-Za-z]:[\\/]|^/", t))
+        if not is_path:
+            if intent_count >= 1:
+                continue
+            intent_count += 1
         out.append(t)
         if len(out) >= limit:
             break
 
     record_recall(session_id=session_id, limit=limit, results=out)
     return out
+
+def shutdown() -> None:
+    """显式关闭 mem0 的 Qdrant 客户端，避免 __del__ 在解释器关闭时崩。
+
+    在 bootstrap.startup.shutdown_all 里调用。
+    """
+    global _memory
+    if _memory is None:
+        return
+    try:
+        vs = getattr(_memory, "vector_store", None)
+        if vs is not None:
+            client = getattr(vs, "client", None)
+            if client is not None and hasattr(client, "close"):
+                try:
+                    client.close()
+                except Exception:
+                    logger.exception("[mem0] qdrant client.close() failed")
+        _memory = None
+        logger.info("[mem0] shutdown complete")
+    except Exception:
+        logger.exception("[mem0] shutdown failed")
+

@@ -76,11 +76,18 @@ class SecurityGateway:
         self._ssrf_check = ssrf_checker
 
     @classmethod
-    def is_write_operation(cls, tool_name: str, meta: Any = None) -> bool:
+    def is_write_operation(cls, tool_name: str, meta: Any = None, params: Dict[str, Any] = None) -> bool:
         if meta is not None:
             dl = getattr(meta, "danger_level", "")
             if dl in ("medium", "high"):
                 return True
+                
+        # 通用：只要有明确的输出路径，就是写操作（无视工具名字）
+        if params:
+            _OUT_KEYS = ("output_path", "new_path", "save_path", "target_path", "output", "destination")
+            if any(k in params and params.get(k) for k in _OUT_KEYS):
+                return True
+
         lower = (tool_name or "").lower()
         return any(h in lower for h in cls._WRITE_HINTS)
 
@@ -119,7 +126,7 @@ class SecurityGateway:
                 )
 
         # 4. workspace（所有写操作）
-        is_write = self.is_write_operation(tool_name, meta)
+        is_write = self.is_write_operation(tool_name, meta, params)
         if is_write:
             if not ctx.workspace_roots:
                 # workspace 为空 → 无法校验，写操作一律需审批
@@ -134,10 +141,10 @@ class SecurityGateway:
                 for key, val in params.items():
                     if key not in self._WORKSPACE_KEYS or not isinstance(val, str) or not val:
                         continue
-                    abs_path = os.path.abspath(val)
+                    abs_path = os.path.realpath(val)
                     ok = any(
                         abs_path == os.path.abspath(r)
-                        or abs_path.startswith(os.path.abspath(r) + os.sep)
+                        or abs_path.startswith(os.path.realpath(r) + os.sep)
                         for r in ctx.workspace_roots
                     )
                     if not ok:

@@ -60,8 +60,18 @@ class ShortlistStrategy:
             return True
 
     def shortlist(
-        self, goal: str, tools: Dict[str, Any],
+        self,
+        goal: str,
+        tools: Dict[str, Any],
+        *,
+        weight_overrides: Optional[Dict[str, float]] = None,
+        top_k: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
+        """goal -> top-k 工具。
+
+        weight_overrides: {tool_name: weight}，降权（<1.0）不剔除。
+        top_k: 动态 top_k，None 时用 self._top_k。
+        """
         if not goal or not tools:
             return None
         if not self._ensure_index(tools):
@@ -74,6 +84,9 @@ class ShortlistStrategy:
             logger.exception("[shortlist] encode_query failed")
             return None
 
+        _k = top_k if top_k is not None else self._top_k
+        _w = weight_overrides or {}
+
         scores = []
         for name, vec in self._tool_vectors.items():
             if name not in tools:
@@ -81,10 +94,12 @@ class ShortlistStrategy:
             dot = 0.0
             for a, b in zip(goal_vec, vec):
                 dot += a * b
+            if name in _w:
+                dot = dot * float(_w[name])
             scores.append((name, dot))
 
         scores.sort(key=lambda x: -x[1])
-        kept = [n for n, s in scores if s >= self._min_score][: self._top_k]
+        kept = [n for n, s in scores if s >= self._min_score][: _k]
         if len(kept) < self._min_keep:
             logger.info(
                 "[shortlist] kept=%d < min_keep=%d, fallback to full",
@@ -108,5 +123,7 @@ def get_shortlist_strategy() -> ShortlistStrategy:
     return _default_strategy
 
 
-def shortlist(goal: str, tools: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    return get_shortlist_strategy().shortlist(goal, tools)
+def shortlist(
+    goal: str, tools: Dict[str, Any], **kwargs: Any,
+) -> Optional[Dict[str, Any]]:
+    return get_shortlist_strategy().shortlist(goal, tools, **kwargs)

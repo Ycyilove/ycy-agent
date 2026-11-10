@@ -1,0 +1,40 @@
+B9 完成于 2026-11-09 20:47:01
+
+新增：
+- backend/deps.py（8 全局 + 7 factory + _rss）
+  - 从 backend/app.py 提取，import tools.loader
+
+改动：
+- backend/app.py 从 355 行 -> ~290 行
+  - 删 _rss / 8 全局 / 7 factory（挪 deps.py）
+  - 加 from .deps import (get_tool_agent, ...) + from . import deps
+  - app_lifespan 里 global mcp_worker -> from . import deps; deps.mcp_worker = worker
+  - include_router 按 domain 分组（Health / Sessions / Workbench / Capabilities / Knowledge）
+  - 删重复 @asynccontextmanager
+
+修复：
+- infra/sandbox.py::_cfg 降级（未注入时返回 SANDBOX_BACKEND="local" 默认值）
+- infra/observability.py::_cfg 降级（未注入时返回 LANGFUSE_ENABLED=False）
+- app.py 顶部加 from . import deps（修 mcp_manager_provider 的 NameError）
+
+验收：
+- app_lifespan 完整跑通（boot_all + shutdown）
+- 5 个 endpoint 冒烟全 200：/、/api/tools、/api/skills、/api/session/list、/api/mcp/status
+- b0 / b1 仍绿
+
+已知问题（非 B9 引入，留后续）：
+- mcp_client/worker.py::stop 的 RuntimeError: Attempted to exit a cancel scope
+  （mcp SDK 的 anyio task group 跨 task 退出问题，不影响功能，只在 shutdown 时打 warning）
+
+B0-B9 累计：
+- B0: 9 bug
+- B1: core/task/answer/ 8 文件
+- B2: core/ports.py + bootstrap/，deps 7 -> 2
+- B3: fallback_search 走 SearchPort
+- B4: 审批唯一真源 + 8 单测
+- B5: semantics/vocab.py 词表收敛
+- B6: semantics/index/ 3 套索引统一
+- B7: capability/pipeline/ 7 阶段
+- B8: orchestration/core.py 2367 -> 156 行，拆 4 Mixin
+- B9: backend/app.py 355 -> ~290 行，拆 deps.py，deps 仍 1 条
+- B15: prompts.py 去 rag，deps 2 -> 1

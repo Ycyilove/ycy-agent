@@ -1,5 +1,4 @@
 """服务端权威审批状态。"""
-
 from __future__ import annotations
 
 import hashlib
@@ -32,8 +31,10 @@ class ApprovalStore:
 
     @staticmethod
     def _hash_params(tool_name: str, params: dict) -> str:
+        # 去掉 __approval_id__（create 时没这个字段，verify 时有，要去掉才能一致）
+        clean = {k: v for k, v in (params or {}).items() if k != "__approval_id__"}
         payload = json.dumps(
-            {"tool": tool_name, "params": params},
+            {"tool": tool_name, "params": clean},
             sort_keys=True, ensure_ascii=False, default=str,
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -73,13 +74,13 @@ class ApprovalStore:
                 return False
             if time.time() > rec.expires_at:
                 return False
+            # _hash_params 已去掉 __approval_id__，与 create 时一致
             return rec.params_hash == self._hash_params(tool_name, params)
 
     def has(self, approval_id: str) -> bool:
-        """是否已存在（幂等检查用）。"""
         with self._lock:
             return approval_id in self._records
-            
+
     def purge_expired(self) -> int:
         now = time.time()
         with self._lock:

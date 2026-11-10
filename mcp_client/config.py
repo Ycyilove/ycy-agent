@@ -22,6 +22,8 @@ class MCPServerConfig:
     args: tuple[str, ...] = ()
     url: Optional[str] = None
     env_from: Dict[str, str] = field(default_factory=dict)
+    # env: 明文环境变量 {子进程变量名: 值}，直接注入子进程
+    env: Dict[str, str] = field(default_factory=dict)
     header_env: Dict[str, str] = field(default_factory=dict)
     # headers: 明文 header 值（如 {"Authorization": "Bearer sk-xxx"}）。
     # 与 header_env 的区别：header_env 是「header名 -> 本机环境变量名」，
@@ -57,10 +59,12 @@ class MCPServerConfig:
         # 为了兼容配置文件里直接写 env，这里把 env 的 key 转成「同名引用」，
         # 值不直接注入（否则会绕过白名单，且和 env_from 语义冲突）。
         env_from = dict(value.get("env_from", {}))
+        env_plain: Dict[str, str] = {}
         raw_env = value.get("env")
         if isinstance(raw_env, dict):
-            for key in raw_env.keys():
-                env_from.setdefault(str(key), str(key))
+            for key, val in raw_env.items():
+                # env 的 value 是明文值，直接注入子进程（不再丢弃）
+                env_plain[str(key)] = str(val)
 
         return cls(
             name=name,
@@ -69,6 +73,7 @@ class MCPServerConfig:
             args=tuple(str(item) for item in value.get("args", [])),
             url=url,
             env_from=env_from,
+            env=env_plain,
             header_env=dict(value.get("header_env", {})),
             headers={
                 str(k): str(v)

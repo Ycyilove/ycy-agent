@@ -1,0 +1,31 @@
+B15 完成于 2026-11-09 20:21:51
+
+新增：
+- core/attachments.py（附件解析，延迟 import rag）
+
+改动：
+- core/llm/prompts.py 从 110 行 -> ~86 行
+  - 删 from rag import DocumentParserFactory
+  - 删 TEXT_EXTENSIONS
+  - attachment_context 改为委托 core.attachments.attachment_context
+  - attachment_label 保留（下游 prompt_build.py 用）
+
+验收：
+- deps: 1 条（只剩 core/task/service.py:33 core -> tools.orchestration.state）
+- b0 / b1 仍绿
+- 手动 attachment_context / attachment_label / build_prompt 通过
+
+B15 解决 deps 违规：core/llm/prompts.py:11 core -> rag
+剩余 deps 违规：core/task/service.py:33 core -> tools.orchestration.state（B11 解决）
+
+B0-B15 累计：
+- B0: 9 bug
+- B1: core/task/answer/ 8 文件
+- B2: core/ports.py + bootstrap/，deps 7 -> 2
+- B3: fallback_search 走 SearchPort
+- B4: 审批唯一真源 + 8 单测
+- B5: semantics/vocab.py 词表收敛
+- B6: semantics/index/ 3 套索引统一
+- B7: capability/pipeline/ 7 阶段
+- B8: orchestration/core.py 2367 -> 156 行，拆 4 Mixin
+- B15: prompts.py 去 rag，deps 2 -> 1

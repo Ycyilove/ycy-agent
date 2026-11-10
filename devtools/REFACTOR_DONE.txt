@@ -1,0 +1,55 @@
+# 重构完成 - B0 到 B15
+
+完成于 2026-11-09 20:58:11
+
+## 最终状态
+
+- deps 违规：0 条（依赖方向铁律全满足）
+- b0 / b1：全绿
+- 上帝文件：全部拆分
+  - orchestration/core.py: 2367 -> 156 行
+  - rag/service.py: 823 -> 6 文件（__init__ + facade + ingest + search + answer + lifecycle）
+  - core/task/service.py: _stream_answer 287 -> 44 行
+  - backend/app.py: 355 -> ~290 行 + deps.py
+
+## 批次摘要
+
+- B0: 9 bug 修复
+- B1: core/task/answer/ 8 文件（_stream_answer 拆）
+- B2: core/ports.py + bootstrap/（deps 7 -> 2）
+- B3: fallback_search 走 SearchPort
+- B4: 审批唯一真源 + 8 单测
+- B5: semantics/vocab.py 词表收敛
+- B6: semantics/index/ 3 套索引统一
+- B7: capability/pipeline/ 7 阶段
+- B8: orchestration/core.py 拆 4 Mixin
+- B9: backend/app.py 拆 deps.py
+- B11-1: OrchestratorState/task_types 搬到 core/task/（deps 1 -> 0）
+- B12: embedding 收敛 + mem0 dim 对齐
+- B13: scripts/ -> devtools/
+- B14: rag/service.py 拆 6 文件
+- B15: prompts.py 去 rag（deps 2 -> 1）
+
+## 新增模块
+
+- core/ports.py（8 端口 + 注入/获取）
+- core/attachments.py（附件解析，延迟 import rag）
+- core/task/answer/（8 文件，answer_stream 拆）
+- core/task/state.py / core/task/task_types.py（从 tools/orchestration/ 搬）
+- bootstrap/（startup.py + ports.py）
+- backend/deps.py（8 全局 + 7 factory）
+- tools/semantics/vocab.py（词表唯一真源）
+- tools/semantics/index/（encoder + store + 3 策略 + facade）
+- tools/capability/pipeline/（7 阶段）
+- tools/orchestration/decision.py / fill_params.py / assess.py / run.py（4 Mixin）
+- rag/service/（6 文件）
+- devtools/final_check.py / check_intent_stability.py / check_recall_stability.py
+
+## 已知遗留（非重构引入）
+
+- mcp_client/worker.py::stop 的 RuntimeError: Attempted to exit a cancel scope
+  （mcp SDK 的 anyio task group 跨 task 退出问题，不影响功能）
+
+## 回滚点
+
+每个批次有独立的 .bak 备份（已删），如需要可回滚到 B*_DONE.txt 记录的批次。

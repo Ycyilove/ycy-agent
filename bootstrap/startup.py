@@ -106,9 +106,9 @@ async def boot_all(
             sl = get_tool_shortlister()
             if sl is None:
                 return
+            # ToolShortlister.warmup() 已内部委托 ShortlistStrategy 完成索引预热，
+            # 不需要再调 _ensure_index（ToolShortlister 没这方法，B6/B7 重构后 API 变了）
             await asyncio.to_thread(sl.warmup)
-            agent = get_tool_agent()
-            await asyncio.to_thread(sl._ensure_index, agent.list_all_tools())
             logger.info("[boot] ToolShortlister warmed up")
         except Exception:
             logger.exception("[boot] shortlister warmup failed")
@@ -150,3 +150,10 @@ async def shutdown_all(*, mcp_worker: Any) -> None:
         close_sandbox_backend()
     except Exception:
         logger.exception("关闭 E2B 沙箱失败")
+
+    # 显式关闭 mem0 的 Qdrant 客户端，避免 __del__ 在解释器关闭时崩
+    try:
+        from core.memory.mem0_layer import shutdown as mem0_shutdown
+        mem0_shutdown()
+    except Exception:
+        logger.exception("mem0 shutdown failed")

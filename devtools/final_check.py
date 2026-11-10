@@ -117,7 +117,7 @@ def check_b0() -> None:
     assert "LANGFUSE_BASE_URL" in src, "config.py LANGFUSE_HOST 未兼容 LANGFUSE_BASE_URL"
 
     src = _read("backend/app.py")
-    n = sum(1 for ln in src.splitlines() if ln.strip() == "mcp_worker = worker")
+    n = sum(1 for ln in src.splitlines() if ln.strip() in ("mcp_worker = worker", "deps.mcp_worker = worker"))
     assert n == 1, f"app.py 有 {n} 处 mcp_worker = worker（期望 1）"
 
     assert re.search(
@@ -240,6 +240,75 @@ def check_approval() -> None:
         raise AssertionError("approval 单测失败：\n" + (r.stdout or "") + "\n" + (r.stderr or ""))
 
 
+def check_imports_runtime() -> None:
+    """真 import 所有重构后模块。
+
+    与 check_imports（ast.parse 扫顶层 import）互补：
+        - check_imports 只查"本地包是否存在"，不真 import
+        - check_imports_runtime 真 import，能抓 NameError / ImportError / 循环 import
+
+    B8-a 到 B8-d 的 _build_structured_history 丢失、DecisionMixin 丢失，
+    都是 ast.parse 通过、import 报 NameError —— 只有真 import 能抓。
+    """
+    import importlib
+    import sys as _sys
+    if str(ROOT) not in _sys.path:
+        _sys.path.insert(0, str(ROOT))
+
+    targets = [
+        "backend.app",
+        "backend.deps",
+        "rag.service.facade",
+        "rag.service.ingest",
+        "rag.service.search",
+        "rag.service.answer",
+        "rag.service.lifecycle",
+        "tools.orchestration.core",
+        "tools.orchestration.decision",
+        "tools.orchestration.fill_params",
+        "tools.orchestration.assess",
+        "tools.orchestration.run",
+        "tools.orchestration.helpers",
+        "tools.capability.pipeline.facade",
+        "tools.capability.pipeline.pipeline",
+        "tools.semantics.index.facade",
+        "tools.semantics.index.encoder",
+        "tools.semantics.index.store",
+        "tools.semantics.index.strategies.shortlist",
+        "tools.semantics.index.strategies.intent_search",
+        "tools.semantics.index.strategies.hybrid",
+        "core.task.answer.orchestrator",
+        "core.task.answer.multimodal",
+        "core.task.answer.prompt_build",
+        "core.task.answer.provider_call",
+        "core.task.answer.splitter_bridge",
+        "core.task.answer.asset_resolve",
+        "core.task.answer.fallback_search",
+        "core.task.service",
+        "core.task.stream_parser",
+        "core.task.state",
+        "core.task.task_types",
+        "core.ports",
+        "bootstrap.ports",
+        "bootstrap.startup",
+    ]
+
+    errors = []
+    for m in targets:
+        try:
+            importlib.import_module(m)
+            print(f"  [OK] {m}")
+        except Exception as exc:
+            errors.append(f"{m}: {type(exc).__name__}: {exc}")
+            print(f"  [FAIL] {m}: {type(exc).__name__}: {exc}")
+
+    if errors:
+        raise AssertionError(
+            f"运行时 import 失败 {len(errors)}/{len(targets)} 个：\n"
+            + "\n".join(errors)
+        )
+    print(f"  全部 {len(targets)} 个模块 import OK")
+
 def check_pytest() -> None:
     r = subprocess.run([PY, "-m", "pytest", "tests/", "-q", "--no-header"],
                        cwd=str(ROOT), capture_output=True, text=True, timeout=900)
@@ -249,7 +318,7 @@ def check_pytest() -> None:
 
 CHECKS = {
     "deps": check_deps, "imports": check_imports, "b0": check_b0, "b1": check_b1,
-    "approval": check_approval, "pytest": check_pytest,
+    "approval": check_approval, "imports_runtime": check_imports_runtime, "pytest": check_pytest,
 }
 
 

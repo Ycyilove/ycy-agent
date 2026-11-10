@@ -1,0 +1,25 @@
+B8-a 完成于 2026-11-09 00:14:48
+
+新增：
+- tools/orchestration/decision.py（DecisionMixin + OrchestratorStep，~500 行）
+  - _format_tool_directory / _format_single_tool_schema / _resolve_tool_name
+  - _select_shortlist / _assemble_decide_prompt / _decide
+
+改动：
+- tools/orchestration/core.py 从 2367 行 -> 1803 行（删 564 行）
+  - 删 OrchestratorStep dataclass（L64-L131）
+  - 删 6 个方法（L218-L326 + L514-L903）
+  - class AgentOrchestrator -> class AgentOrchestrator(DecisionMixin)
+  - 顶部 from .decision import OrchestratorStep, DecisionMixin
+
+验收：
+- import OK + 6 methods accessible via AgentOrchestrator
+- OrchestratorStep 一致（core.OrchestratorStep is decision.OrchestratorStep）
+- 手动 _decide 空 history: done=True, type=OrchestratorStep
+- b0 / b1 仍绿
+
+B8 进度：
+- B8-a: decision.py ✅（1803 行）
+- B8-b: fill_params.py（待做，_fill_params 250 行）
+- B8-c: assess.py（待做，3 个评估方法）
+- B8-d: run.py（待做，主循环 + 辅助）

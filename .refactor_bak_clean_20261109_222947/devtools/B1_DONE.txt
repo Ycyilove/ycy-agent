@@ -1,0 +1,5 @@
+B1 完成于 2026-11-08 23:46:14
+- core/task/answer/ 8 文件已落盘
+- service.py::_stream_answer 从 287 行 -> 44 行
+- b0 / b1 / approval / imports 全绿
+- 剩余 deps 违规 7 条，属 B2/B3/B8/B15 目标，非 B1 引入

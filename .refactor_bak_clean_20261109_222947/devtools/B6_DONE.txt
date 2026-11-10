@@ -1,0 +1,31 @@
+B6 完成于 2026-11-09 00:03:11
+
+新增：
+- tools/semantics/index/encoder.py（唯一编码：build_tool_text + encode_texts + encode_query）
+- tools/semantics/index/store.py（FAISS 原子读写 + fingerprint）
+- tools/semantics/index/facade.py（对外统一 API）
+- tools/semantics/index/strategies/shortlist.py（ShortlistStrategy，带缓存）
+- tools/semantics/index/strategies/intent_search.py
+- tools/semantics/index/strategies/hybrid.py（vector + BM25 + RRF）
+- devtools/check_recall_stability.py（10 goal 召回基线）
+
+改动（3 文件薄壳化）：
+- tools/orchestration/tool_shortlister.py：ToolShortlister 委托 ShortlistStrategy
+- tools/mcp_intent_index.py：search_intents 委托 strategies.intent_search
+- tools/capability/index.py：CapabilityIndex.search 委托 strategies.hybrid
+
+验收：
+- 10 goal 召回完全一致（tool_shortlister 行为等价）
+- search_intents 签名不变
+- CapabilityIndex.search 签名不变
+- b0 / b1 仍绿
+- deps 仍 2 条
+
+B0-B6 累计：
+- B0: 9 个 bug 修复
+- B1: core/task/answer/ 8 文件
+- B2: core/ports.py + bootstrap/，deps 7 -> 2
+- B3: fallback_search 走 SearchPort
+- B4: 审批唯一真源 + 8 个单测
+- B5: semantics/vocab.py 收敛词表，20 goal 稳定性
+- B6: semantics/index/ 收敛 3 套索引，10 goal 召回稳定性

@@ -184,12 +184,24 @@ def _is_fetch_tool(name: str) -> bool:
     return any(h in low for h in _FETCH_TOOL_HINTS)
 
 
+def _artifact_is_valid(art_tuple: Any) -> bool:
+    """硬校验：路径存在且大小 > 0。
+    
+    ⚠️ 严格模式：必须传入 (path, size) 元组。不接受裸字符串。
+    """
+    if not isinstance(art_tuple, tuple) or len(art_tuple) < 2:
+        return False
+    path, size = art_tuple
+    return bool(path) and size > 0
+
+
 def collect_evidence(state: Any) -> Dict[str, Any]:
     succeeded = dict(getattr(state, "succeeded_tool_names", {}) or {})
     fetch_tools = {n for n in succeeded if _is_fetch_tool(n)}
     return {
         "history": list(getattr(state, "history", []) or []),
         "succeeded_tools": succeeded,
+        "grounding_chunks": getattr(state, "grounding_chunks", 0),
         "failed_calls": dict(getattr(state, "failed_calls", {}) or {}),
         "read_paths": set(getattr(state, "read_paths", set()) or set()),
         "written_paths": set(getattr(state, "written_paths", set()) or set()),
@@ -240,32 +252,15 @@ def run_audit(
     # ── 规则层 ──
     for r in reqs:
         if r.kind == "modify":
-            if evidence["written_paths"]:
+            valid_written = [
+                a for a in evidence["written_paths"]
+                if _artifact_is_valid(a)
+            ]
+            if valid_written:
                 r.satisfied = True
-                r.evidence = f"written: {sorted(evidence['written_paths'])}"
+                r.evidence = f"物理证据：已成功生成有效文件 {valid_written[:3]}"
             else:
-                # 兜底：写类工具成功但没记录到路径（如返回 bytes、
-                # 或路径参数名不在 _OUTPUT_PATH_KEYS 里）。
-                # 只要写类工具成功执行过，就视为 modify 满足，
-                # 避免因路径采集不全导致 done 被反复拒绝。
-                write_succeeded = [
-                    name for name in evidence["succeeded_tools"]
-                    if _looks_like_write_tool(name)
-                ]
-                if write_succeeded:
-                    r.satisfied = True
-                    r.evidence = (
-                        f"写类工具已成功（未记录路径）: "
-                        f"{write_succeeded[:5]}"
-                    )
-                else:
-                    # 写尝试过但失败：不视为满足，但记录
-                    write_failed = any(
-                        _looks_like_write_tool(name)
-                        for name in evidence["failed_calls"]
-                    )
-                    if write_failed:
-                        r.evidence = "写操作尝试过但失败"
+                r.evidence = "写操作未产生有效文件（可能为空文件或执行失败）"
 
         elif r.kind == "read":
             target = extract_target_files(goal, state)
@@ -295,7 +290,16 @@ def run_audit(
                 r.evidence = str(v)[:200]
 
         elif r.kind == "answer":
-            r.satisfied = any_success
+            grounding = evidence.get("grounding_chunks", 0)
+            if grounding > 0:
+                r.satisfied = True
+                r.evidence = f"知识库召回 {grounding} 个片段"
+            elif evidence["read_paths"]:
+                r.satisfied = True
+                r.evidence = "本地文件读取"
+            elif any_success:
+                r.satisfied = True
+                r.evidence = "普通工具调用成功"
 
     missing = [r for r in reqs if not r.satisfied]
     if not missing:
@@ -303,10 +307,15 @@ def run_audit(
     missing.sort(key=lambda r: _GAP_PRIORITY.get(r.kind, 9))
     first = missing[0]
 
+    # 优先用 r.evidence（更精确的诊断），没有才退回通用模板
+    _gap_text = first.evidence if first.evidence else (
+        f"要求「{first.text}」尚无证据（期望：{first.evidence_hint or first.kind}）"
+    )
+
     return AuditResult(
         satisfied=False,
         requirements=reqs,
-        gap=f"要求「{first.text}」尚无证据（期望：{first.evidence_hint or first.kind}）",
+        gap=_gap_text,
         gap_kind=_KIND_TO_GAP.get(first.kind, GapKind.NONE),
         next_hint=_KIND_TO_HINT.get(first.kind, ""),
     )

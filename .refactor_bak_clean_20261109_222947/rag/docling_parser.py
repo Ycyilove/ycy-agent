@@ -1,0 +1,605 @@
+"""Docling 适配层：替换 pypdf，提供带层级结构的文档解析。
+
+设计：
+    - 用 Docling 的版面分析模型直接从 PDF 读取标题层级
+    - 用 ThreadedPdfPipelineOptions 做 OCR/版面批处理加速
+    - 用 HybridChunker 做 token 感知的语义切块
+    - chunk.meta.headings 是解析器原生输出的祖先路径，不需要正则猜测
+
+参考：
+    - Docling: https://github.com/docling-project/docling
+    - HybridChunker: https://docling-project.github.io/docling/concepts/chunking/
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+
+# ── 必须在 import docling 之前设缓存路径 ──
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+os.environ.setdefault("HF_HOME", os.path.join(_PROJECT_ROOT, "models"))
+os.environ.setdefault("HUGGINGFACE_HUB_CACHE", os.environ["HF_HOME"])
+# Xet 后端在 hf-mirror.com 镜像下会返回 401，禁用后兼容镜像站
+os.environ["HF_HUB_DISABLE_XET"] = "1"
+
+from typing import Dict, List, Optional
+
+logger = logging.getLogger(__name__)
+
+
+# ── 延迟初始化 Docling（首次 import 会加载模型，约 1-2 秒）──
+
+_converter = None
+_chunker = None
+
+# ── OCR 预检：根据文本层自动决定是否启用 OCR ──
+
+# 每页文本层字符数低于此阈值，视为"扫描页"
+_TEXT_LAYER_MIN_CHARS = 50
+# 扫描页占比超过此比例，才启用 OCR
+_SCANNED_PAGE_RATIO_THRESHOLD = 0.3
+
+
+def _detect_need_ocr(file_path: str) -> bool:
+    """用 PyMuPDF 快速预检：是否需要 OCR。
+
+    返回 True 表示"需要 OCR"（存在较多扫描页），
+    返回 False 表示"不需要 OCR"（文本层充足）。
+    """
+    import fitz  # PyMuPDF
+
+    try:
+        doc = fitz.open(file_path)
+    except Exception as e:
+        logger.warning("[dsh][docling] OCR 预检打开失败，回退到启用 OCR: %s", e)
+        return True
+
+    total_pages = len(doc)
+    if total_pages == 0:
+        doc.close()
+        return True
+
+    scanned_pages = 0
+    for page in doc:
+        text = page.get_text()
+        if len(text.strip()) < _TEXT_LAYER_MIN_CHARS:
+            scanned_pages += 1
+
+    doc.close()
+
+    ratio = scanned_pages / total_pages
+    need_ocr = ratio > _SCANNED_PAGE_RATIO_THRESHOLD
+
+    logger.info(
+        "[dsh][docling] OCR 预检: %d/%d 页文本层不足 (%.1f%%) → %s",
+        scanned_pages, total_pages, ratio * 100,
+        "启用 OCR" if need_ocr else "跳过 OCR",
+    )
+    return need_ocr
+
+
+def _get_converter(file_path: str | None = None):
+    """惰性创建 Docling DocumentConverter。
+
+    file_path 用于 OCR 预检：如果文本层充足，则跳过 OCR 加速。
+    注意：converter 是全局单例，首次创建时决定 do_ocr；
+    如果同一进程内处理混合类型的 PDF，需要按文件重建 converter。
+    """
+    global _converter, _converter_do_ocr
+    if _converter is not None:
+        # 如果已有 converter，检查 do_ocr 是否需要切换
+        if file_path is not None:
+            need_ocr = _detect_need_ocr(file_path)
+            if need_ocr != _converter_do_ocr:
+                logger.info(
+                    "[dsh][docling] do_ocr 需要从 %s 切换到 %s，重建 converter",
+                    _converter_do_ocr, need_ocr,
+                )
+                _converter = None  # 触发重建
+            else:
+                return _converter
+        else:
+            return _converter
+
+    from docling.datamodel.base_models import InputFormat
+    from docling.datamodel.accelerator_options import (
+        AcceleratorDevice,
+        AcceleratorOptions,
+    )
+    from docling.datamodel.pipeline_options import (
+        HeadingHierarchyOptions,
+        ThreadedPdfPipelineOptions,
+    )
+    from docling.document_converter import DocumentConverter, PdfFormatOption
+
+    # ── 决定是否启用 OCR ──
+    do_ocr = _detect_need_ocr(file_path) if file_path else True
+
+    pipeline_options = ThreadedPdfPipelineOptions(
+        do_ocr=do_ocr,
+        ocr_batch_size=64,
+        layout_batch_size=64,
+        table_batch_size=4,
+        generate_parsed_pages=True,
+    )
+    pipeline_options.accelerator_options = AcceleratorOptions(
+        num_threads=8,
+        device=AcceleratorDevice.AUTO,
+    )
+    pipeline_options.heading_hierarchy_options = HeadingHierarchyOptions(
+        enabled=True,
+        use_bookmarks=True,
+        use_numbering=True,
+        use_style=True,
+        bookmark_match_threshold=0.8,
+    )
+
+    _converter = DocumentConverter(
+        format_options={
+            InputFormat.PDF: PdfFormatOption(
+                pipeline_options=pipeline_options,
+            ),
+        }
+    )
+    _converter_do_ocr = do_ocr
+    logger.info(
+        "[dsh][docling] DocumentConverter created "
+        "(do_ocr=%s, ocr_batch_size=64, threads=8, heading hierarchy enabled)",
+        do_ocr,
+    )
+    return _converter
+
+
+def _get_chunker():
+    """惰性创建 HybridChunker（token 感知切块）。"""
+    global _chunker
+    if _chunker is not None:
+        return _chunker
+
+    from docling.chunking import HybridChunker
+    from docling_core.transforms.chunker.tokenizer.huggingface import (
+        HuggingFaceTokenizer,
+    )
+    from transformers import AutoTokenizer
+
+    # ── P0：默认用中文 tokenizer，避免英文模型切中文导致 p50≈50 的均匀碎片化 ──
+    # all-MiniLM-L6-v2 是英文模型，中文 1 字 ≈ 1-1.5 token 且切分极碎，
+    # max_tokens=256 实际只装得下 ~50 中文字，一半 chunk 落在 46-50 字。
+    # bge-small-zh-v1.5 是中文模型，512 token ≈ 400-500 中文字，
+    # p50 可从 50 升到 300+，chunk 粒度恢复到"一支队伍/一个条目"级别。
+    tokenizer_id = os.getenv(
+        "RAG_CHUNKER_TOKENIZER",
+        "BAAI/bge-small-zh-v1.5",
+    )
+    max_tokens = int(os.getenv("RAG_CHUNKER_MAX_TOKENS", "512"))
+
+    # 中文 tokenizer 的本地缓存路径（项目 models/ 下已有，避免联网）
+    _model_root = os.path.join(_PROJECT_ROOT, "models")
+    try:
+        hf_tokenizer_obj = AutoTokenizer.from_pretrained(
+            tokenizer_id,
+            cache_dir=_model_root,
+            local_files_only=False,   # 本地有则命中缓存，无则回退下载
+        )
+    except Exception:
+        # ── 兜底：中文 tokenizer 不可用时回退英文模型，但放宽 max_tokens ──
+        logger.exception(
+            "[dsh][docling] 中文 tokenizer %s 加载失败，回退 all-MiniLM-L6-v2",
+            tokenizer_id,
+        )
+        tokenizer_id = "sentence-transformers/all-MiniLM-L6-v2"
+        max_tokens = int(os.getenv("RAG_CHUNKER_MAX_TOKENS", "512"))
+        hf_tokenizer_obj = AutoTokenizer.from_pretrained(
+            tokenizer_id,
+            cache_dir=_model_root,
+        )
+
+    hf_tokenizer = HuggingFaceTokenizer(
+        tokenizer=hf_tokenizer_obj,
+        max_tokens=max_tokens,
+    )
+    _chunker = HybridChunker(
+        tokenizer=hf_tokenizer,
+        merge_peers=True,   # 合并同层级相邻段落，减少碎片
+    )
+    logger.info(
+        "[dsh][docling] HybridChunker created (tokenizer=%s, max_tokens=%d)",
+        tokenizer_id, max_tokens,
+    )
+    return _chunker
+
+
+class DoclingParser:
+    """Docling 解析器封装。"""
+
+    def __init__(self):
+        # 最近一次解析的 Docling Document（含 tables/lists），
+        # 供 service.add_file 提取结构化 Record 用；快路径下为 None。
+        self.last_document = None
+
+    def parse_to_chunks(self, file_path: str):
+        # ── 阶段 1：快速候选（< 3s，必跑）──
+        fast_candidates = []
+        try:
+            from rag.pdf_fast_parser import parse_fast
+            # 只跑 plain，heading 版对名单类文档是负优化
+            plain = parse_fast(file_path, detect_headings=False)
+            if plain:
+                fast_candidates.append(("pymupdf_plain", self._wrap_fast_chunks(plain)))
+        except Exception:
+            logger.exception("[parse] PyMuPDF plain 失败")
+
+        # heading 版作为可选候选（只在 plain 质量不足时才尝试）
+        # （本次验证显示 heading 对名单类文档有害，默认不跑）
+
+        # ── 阶段 2：质量评估 ──
+        best_fast = None
+        best_score = 0.0
+        for name, chunks in fast_candidates:
+            s = self._quality_score(chunks, file_path)
+            logger.info("[parse] %s quality=%.3f", name, s)
+            if s > best_score:
+                best_fast, best_score = (name, chunks), s
+
+        # ── 阶段 3：短路 ──
+        if best_fast and best_score >= 0.75:
+            logger.info(
+                "[parse] short-circuit: %s (%.3f) >= 0.75, skip Docling",
+                best_fast[0], best_score,
+            )
+            chunks = best_fast[1]
+            chunks = self._repair_fragmented_chunks(chunks, file_path)
+            chunks = self._merge_cross_page_chunks(chunks)
+            return chunks
+
+        # ── 阶段 4：快速候选不足，跑 Docling ──
+        logger.info("[parse] fast candidates insufficient (max=%.3f), fallback to Docling", best_score)
+        try:
+            docling_chunks = self._parse_with_text_layer(file_path)
+            docling_score = self._quality_score(docling_chunks, file_path)
+            if docling_score > best_score:
+                best_fast = ("docling", docling_chunks)
+                best_score = docling_score
+        except Exception:
+            logger.exception("[parse] Docling failed")
+
+        # ── 阶段 5：修复 + 兜底 ──
+        if best_fast is None:
+            return self._rechunk_from_pdf_text(file_path)
+
+        chunks = best_fast[1]
+        chunks = self._repair_fragmented_chunks(chunks, file_path)
+        chunks = self._merge_cross_page_chunks(chunks)
+
+        if not self._integrity_check(chunks, file_path):
+            logger.warning("[parse] integrity check failed, full-text rechunk")
+            chunks = self._rechunk_from_pdf_text(file_path)
+
+        return chunks
+
+    # ── P0-修正：把 Docling 原生 chunk 包成可写的 _Chunk/_Meta ──
+    @staticmethod
+    def _wrap_docling_chunks(docling_chunks):
+        """把 Docling 原生 chunk 包成可写 _Chunk/_Meta。
+
+        根因：DocMeta 是 pydantic BaseModel，未声明 page_numbers 字段且
+        extra!='allow'，直接 meta.page_numbers = [...] 会被拒写（异常被
+        静默吞掉）。这里统一包一层可写对象，把 headings / doc_items /
+        从 doc_items[].prov[].page_no 汇总出的 page_numbers 一并搬过去。
+        """
+
+        class _Meta:
+            def __init__(self, headings, heading_levels, page_numbers, doc_items):
+                self.headings = headings
+                self.heading_levels = heading_levels
+                self.page_numbers = page_numbers
+                self.doc_items = doc_items
+
+        class _Chunk:
+            def __init__(self, text, meta):
+                self.text = text
+                self.meta = meta
+
+        out = []
+        for c in docling_chunks:
+            src_meta = getattr(c, "meta", None)
+
+            headings = list(getattr(src_meta, "headings", None) or [])
+            heading_levels = list(getattr(src_meta, "heading_levels", None) or [])
+            doc_items = list(getattr(src_meta, "doc_items", None) or [])
+
+            # 汇总 prov.page_no
+            pages = []
+            for item in doc_items:
+                for p in (getattr(item, "prov", None) or []):
+                    pno = getattr(p, "page_no", None)
+                    if pno is not None:
+                        pages.append(pno)
+            pages = sorted(set(pages))
+
+            out.append(
+                _Chunk(
+                    getattr(c, "text", "") or "",
+                    _Meta(headings, heading_levels, pages, doc_items),
+                )
+            )
+
+        logger.info(
+            "[dsh][docling] _wrap_docling_chunks: %d chunks, %d 带页号",
+            len(out), sum(1 for c in out if c.meta.page_numbers),
+        )
+        return out
+        
+    # ── P0-修正：合并相邻小 chunk，治 HybridChunker 对名单/列表的 p50=50 碎片化 ──
+    @staticmethod
+    def _merge_small_chunks(
+        chunks,
+        min_chars: int = 200,
+        max_chars: int = 800,
+    ):
+        """合并相邻小 chunk。
+
+        根因：HybridChunker 把名单的每个列表项识别成独立结构单元，
+        切出大量 ~50 字 chunk；换 tokenizer 只放大"单单元上限"，
+        不改变结构边界，故 p50 仍 50。这里做后处理合并。
+
+        合并条件（三者同时满足）：
+            1. 当前 buffer 长度 < min_chars（小 chunk 才合并）
+            2. 合并后长度 <= max_chars（不产生超大 chunk）
+            3. 两 chunk 的 headings 相同（不跨标题边界）
+        """
+        if not chunks:
+            return chunks
+
+        def _headings(c):
+            meta = getattr(c, "meta", None)
+            return tuple(getattr(meta, "headings", None) or [])
+
+        def _pages(c):
+            meta = getattr(c, "meta", None)
+            pages = list(getattr(meta, "page_numbers", None) or []) if meta else []
+            # 兜底：page_numbers 为空时回退到 doc_items[].prov[].page_no
+            if not pages and meta is not None:
+                for item in (getattr(meta, "doc_items", None) or []):
+                    for p in (getattr(item, "prov", None) or []):
+                        pno = getattr(p, "page_no", None)
+                        if pno is not None:
+                            pages.append(pno)
+            return sorted(set(pages))
+
+        merged = []
+        buffer = None
+        for c in chunks:
+            if buffer is None:
+                buffer = c
+                continue
+
+            buf_len = len(getattr(buffer, "text", "") or "")
+            cur_len = len(getattr(c, "text", "") or "")
+            same_heading = _headings(buffer) == _headings(c)
+
+            if (
+                buf_len < min_chars
+                and buf_len + cur_len <= max_chars
+                and same_heading
+            ):
+                # 合并文本
+                buffer.text = (buffer.text or "") + "\n" + (c.text or "")
+                # 合并 page_numbers（DocMeta 无此字段时静默跳过，页号由 doc_items.prov 提供）
+                pages = sorted(set(_pages(buffer)) | set(_pages(c)))
+                try:
+                    buffer.meta.page_numbers = pages
+                except (AttributeError, ValueError):
+                    pass
+                # 合并 doc_items（保留来源，供后续需要）
+                try:
+                    items = list(getattr(buffer.meta, "doc_items", None) or [])
+                    items += list(getattr(c.meta, "doc_items", None) or [])
+                    buffer.meta.doc_items = items
+                except (AttributeError, ValueError):
+                    pass
+            else:
+                merged.append(buffer)
+                buffer = c
+
+        if buffer is not None:
+            merged.append(buffer)
+
+        logger.info(
+            "[dsh][docling] _merge_small_chunks: %d → %d chunks",
+            len(chunks), len(merged),
+        )
+        return merged
+
+    def _parse_with_ocr(self, file_path: str):
+        """Docling + OCR 路径。"""
+        converter = _get_converter(file_path)
+        chunker = _get_chunker()
+
+        import time
+        t0 = time.perf_counter()
+        result = converter.convert(file_path)
+        logger.info(
+            "[dsh][docling] OCR 版面分析完成，耗时 %.1fs",
+            time.perf_counter() - t0,
+        )
+
+        # ── 后处理：推断并修正标题层级 (docling-hierarchical-pdf) ──
+        try:
+            from hierarchical.postprocessor import ResultPostprocessor
+            ResultPostprocessor(result, source=file_path).process()
+            logger.info("[dsh][docling] 层级后处理完成")
+        except Exception:
+            logger.exception("[dsh][docling] 层级后处理失败，继续使用原始层级")
+
+        doc = result.document
+        self.last_document = doc
+        raw_chunks = list(chunker.chunk(dl_doc=doc))
+        logger.info("[dsh][docling] OCR 切块完成: %d 个 chunk", len(raw_chunks))
+        # ── P0-修正：DocMeta 为 pydantic 不可写，先包成可写 _Chunk/_Meta，
+        #    同时把 prov.page_no 汇总到 meta.page_numbers ──
+        chunks = self._wrap_docling_chunks(raw_chunks)
+        chunks = self._merge_small_chunks(chunks)
+        return chunks
+
+    def _parse_with_text_layer(self, file_path: str):
+        """有文本层：Docling 关闭 OCR，保留版面分析。"""
+        from docling.datamodel.base_models import InputFormat
+        from docling.datamodel.accelerator_options import (
+            AcceleratorDevice,
+            AcceleratorOptions,
+        )
+        from docling.datamodel.pipeline_options import (
+            HeadingHierarchyOptions,
+            ThreadedPdfPipelineOptions,
+        )
+        from docling.document_converter import DocumentConverter, PdfFormatOption
+
+        pipeline_options = ThreadedPdfPipelineOptions(
+            do_ocr=False,
+            ocr_batch_size=64,
+            layout_batch_size=64,
+            table_batch_size=4,
+            generate_parsed_pages=True,
+        )
+        pipeline_options.accelerator_options = AcceleratorOptions(
+            num_threads=8,
+            device=AcceleratorDevice.AUTO,
+        )
+        pipeline_options.heading_hierarchy_options = HeadingHierarchyOptions(
+            enabled=True,
+            use_bookmarks=True,
+            use_numbering=True,
+            use_style=True,
+        )
+
+        converter = DocumentConverter(
+            format_options={
+                InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
+            }
+        )
+
+        import time
+        t0 = time.perf_counter()
+        result = converter.convert(file_path)
+        logger.info(
+            "[dsh][docling] 版面分析完成，耗时 %.1fs", time.perf_counter() - t0
+        )
+
+        # ── 后处理：推断并修正标题层级 (docling-hierarchical-pdf) ──
+        try:
+            from hierarchical.postprocessor import ResultPostprocessor
+            ResultPostprocessor(result, source=file_path).process()
+            logger.info("[dsh][docling] 层级后处理完成")
+        except Exception:
+            logger.exception("[dsh][docling] 层级后处理失败，继续使用原始层级")
+
+        doc = result.document
+        self.last_document = doc
+        chunker = _get_chunker()
+        raw_chunks = list(chunker.chunk(dl_doc=doc))
+        logger.info("[dsh][docling] 切块完成: %d 个 chunk", len(raw_chunks))
+        # ── P0-修正：DocMeta 为 pydantic 不可写，先包成可写 _Chunk/_Meta，
+        #    同时把 prov.page_no 汇总到 meta.page_numbers ──
+        chunks = self._wrap_docling_chunks(raw_chunks)
+        chunks = self._merge_small_chunks(chunks)
+        return chunks
+
+    @staticmethod
+    def _headings_look_clean(fast_chunks) -> bool:
+        """判断 parse_fast 的 heading 是否可信。
+
+        异常信号：
+            - 超过 50% 的 chunk 带有 >= 5 个 heading（正文被误判）
+            - 任一 chunk 的 heading 平均长度 > 60（长句被当 heading）
+        """
+        if not fast_chunks:
+            return False
+        deep = sum(1 for c in fast_chunks if len(c.headings or []) >= 5)
+        if deep / len(fast_chunks) > 0.5:
+            return False
+        for c in fast_chunks:
+            hs = c.headings or []
+            if hs and sum(len(h) for h in hs) / len(hs) > 60:
+                return False
+        return True
+
+    @staticmethod
+    def _wrap_fast_chunks(fast_chunks):
+        """把 FastChunk 包装成和 Docling chunk 兼容的对象。"""
+        class _Meta:
+            def __init__(self, headings, heading_levels, page_numbers):
+                self.headings = headings
+                self.heading_levels = heading_levels
+                self.page_numbers = page_numbers
+                self.doc_items = []
+
+        class _Chunk:
+            def __init__(self, text, headings, heading_levels, page_numbers):
+                self.text = text
+                self.meta = _Meta(headings, heading_levels, page_numbers)
+
+        out = []
+        for c in fast_chunks:
+            # ── P0：优先用 FastChunk.page_numbers（跨页多值），回退到 page_no 单值 ──
+            page_numbers = list(getattr(c, "page_numbers", None) or [])
+            if not page_numbers:
+                page_no = getattr(c, "page_no", None)
+                page_numbers = [page_no] if page_no is not None else []
+
+            heading_levels = list(getattr(c, "heading_levels", None) or [])
+            out.append(
+                _Chunk(
+                    c.text,
+                    list(c.headings or []),
+                    heading_levels,
+                    page_numbers,
+                )
+            )
+        return out
+        
+    def get_enriched_text(self, chunk) -> str:
+        # 快路径的 chunk 没有 Docling 的 meta.doc_items，直接拼 headings
+        headings = list(getattr(chunk.meta, "headings", None) or [])
+        if headings:
+            prefix = " > ".join(headings) + "\n"
+            return prefix + chunk.text
+        return chunk.text
+
+
+# ── 便捷函数 ──
+
+def parse_file_to_chunks(file_path: str):
+    """从文件路径解析为 Docling chunk 列表。"""
+    return DoclingParser().parse_to_chunks(file_path)
+
+def extract_pictures_from_doc(doc, filename: str, document_id: str):
+    """从 Docling Document 提取图片，作为 pypdf 提图失败时的兜底。
+
+    返回 List[ParsedResource]（与 rag.resources.ParsedResource 兼容）。
+    """
+    from io import BytesIO
+    from rag.resources import ParsedResource, ResourceKind
+
+    out = []
+    for pic in getattr(doc, "pictures", []) or []:
+        try:
+            img = pic.get_image(doc)          # PIL Image
+            buf = BytesIO()
+            img.save(buf, format="PNG")
+            content = buf.getvalue()
+            prov = getattr(pic, "prov", None) or []
+            page_no = getattr(prov[0], "page_no", None) if prov else None
+            out.append(ParsedResource(
+                filename=f"{document_id}_p{page_no or 0}_{len(out)}.png",
+                mime_type="image/png",
+                content=content,
+                kind=ResourceKind.IMAGE,
+                page_no=page_no,
+            ))
+        except Exception:
+            logger.exception("[dsh][docling] 提取 picture 失败，跳过")
+            continue
+    return out

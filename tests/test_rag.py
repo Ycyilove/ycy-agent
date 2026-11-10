@@ -8,12 +8,18 @@
 
 from __future__ import annotations
 
+import pytest
+
+
 import os
 import time
 
-import pytest
+
 
 from rag.bm25_store import rrf_fuse
+
+pytestmark = pytest.mark.slow
+
 
 
 # ═════════════════════════════════════════════════════════════

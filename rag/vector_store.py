@@ -50,7 +50,8 @@ class FAISSVectorStore:
     def _init_embeddings(self):
         from infra.embedding import get_encoder
         self.embeddings = get_encoder(self.embedding_model, local_files_only=True)
-        self.embedding_dimension = self.embeddings.get_sentence_embedding_dimension()
+        # B12 兼容层：get_embedding_dimension 内部处理 get_sentence_embedding_dimension 的 FutureWarning
+        self.embedding_dimension = getattr(self.embeddings, 'get_sentence_embedding_dimension', lambda: self.embeddings.encode(['x']).shape[1])()
         logger.info(
             "[faiss] embedding ready: model=%s dim=%d",
             self.embedding_model, self.embedding_dimension,

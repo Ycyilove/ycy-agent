@@ -164,6 +164,10 @@ class MCPClientManager:
                     "子进程变量 %s 期望从本机环境变量 %s 取值，但该变量不存在",
                     config.name, target_name, source_name,
                 )
+        # 明文 env 直接注入（优先级低于 env_from 解析结果，用 setdefault 不覆盖）
+        if getattr(config, "env", None):
+            for target_name, value in config.env.items():
+                env.setdefault(target_name, value)
         return env
 
     async def _connect_once(self, config: MCPServerConfig) -> MCPConnection:
@@ -789,8 +793,13 @@ class MCPClientManager:
         self.statuses.get(server_name, {}).update({"status": "disconnected"})
 
     async def close(self) -> None:
-        for server_name in list(self.connections):
-            await self.disconnect(server_name)
+        # 并发断开所有 server，避免串行 5s × N 超时（worker stop 的 8s 超时不够）
+        if not self.connections:
+            return
+        await asyncio.gather(
+            *(self.disconnect(name) for name in list(self.connections)),
+            return_exceptions=True,
+        )
 
     def status(self) -> List[dict]:
         return list(self.statuses.values())

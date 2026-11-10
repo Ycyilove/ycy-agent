@@ -8,10 +8,35 @@
 
 from __future__ import annotations
 
+import pytest
+from unittest.mock import MagicMock, patch
+
+
+@pytest.fixture(autouse=True)
+def _inject_fake_config():
+    """B2/B9 重构后 ModelScopeLLM.__init__ 从 ports.get_config() 读配置，测试要注入。"""
+    from core import ports
+    fake = MagicMock()
+    fake.DEFAULT_MODEL = "fake-model"
+    fake.MODEL_SOURCE = "ONLINE"
+    fake.LOCAL_MODEL_CONFIG = {}
+    fake.YUNDU_API_KEY = "fake-key"
+    fake.YUNDU_BASE_URL = "http://fake"
+    fake.MODESCOPE_BASE_URL = "http://fake"
+    fake.MODESCOPE_API_KEY = "fake-key"
+    fake.RAG_EMBEDDING_MODEL = "fake-embed"
+    old = ports.get_config()
+    ports.set_config(fake)
+    try:
+        yield
+    finally:
+        ports.set_config(old)
+
+
 import json
 from unittest.mock import MagicMock
 
-import pytest
+
 
 from core.task.tool_result_store import (
     build_handle_summary,
@@ -22,6 +47,7 @@ from tools.agent import ToolCallResult
 from tools.orchestration.core import AgentOrchestrator
 from tools.orchestration.state import OrchestratorState
 from tools.tools_def.tool_result_reader import read_tool_result
+
 
 
 # ─────────────────────────────────────────────────────────────
@@ -201,7 +227,6 @@ class TestLargeFileHandle:
         orch = AgentOrchestrator(
             agent_provider=lambda: agent,
             llm_provider=lambda: fake_llm,
-            enable_intent_router=False,
         )
 
         tools = {"edit_file": _make_edit_file_meta()}
@@ -240,7 +265,6 @@ class TestLargeFileHandle:
         orch = AgentOrchestrator(
             agent_provider=lambda: agent,
             llm_provider=lambda: fake_llm,
-            enable_intent_router=False,
         )
 
         small = "def f():\n    return 1\n"

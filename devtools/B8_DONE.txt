@@ -1,0 +1,33 @@
+B8 完成于 2026-11-09 20:19:18
+
+新增：
+- tools/orchestration/decision.py（DecisionMixin，~500 行，6 方法）
+- tools/orchestration/fill_params.py（FillParamsMixin，~516 行，1 方法）
+- tools/orchestration/assess.py（AssessMixin，~230 行，5 方法）
+- tools/orchestration/run.py（RunMixin，~930 行，13 方法）
+
+改动：
+- tools/orchestration/core.py 从 2367 行 -> 156 行（删 2211 行，剩 __init__ + 类属性）
+- class AgentOrchestrator(DecisionMixin, FillParamsMixin, AssessMixin, RunMixin)
+
+验收：
+- core.py methods (1): ['__init__']
+- MRO: AgentOrchestrator -> DecisionMixin -> FillParamsMixin -> AssessMixin -> RunMixin
+- all 18 methods accessible
+- 手动 _decide / _fill_params / _validate_done / _goal_needs_verification 全通过
+- b0 / b1 仍绿
+
+deps 仍 2 条（B8 不动 deps）：
+- core/llm/prompts.py:11 core -> rag（B15）
+- core/task/service.py:33 core -> tools.orchestration.state（B11 或单独处理）
+
+B0-B8 累计：
+- B0: 9 bug
+- B1: core/task/answer/ 8 文件
+- B2: core/ports.py + bootstrap/，deps 7 -> 2
+- B3: fallback_search 走 SearchPort
+- B4: 审批唯一真源 + 8 单测
+- B5: semantics/vocab.py 词表收敛
+- B6: semantics/index/ 3 套索引统一
+- B7: capability/pipeline/ 7 阶段
+- B8: orchestration/core.py 2367 -> 156 行，拆 4 Mixin

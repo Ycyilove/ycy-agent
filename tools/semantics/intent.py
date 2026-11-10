@@ -72,6 +72,9 @@ class IntentSet:
     primary: str = ""
     # 副标签：辅助信息，供 _select_shortlist 的声明式保底用
     secondary: FrozenSet[str] = field(default_factory=frozenset)
+    # 副标签按"格式词首次出现位置"排序：((fmt, pos), ...)，第 1 个是主格式
+    # 老代码构造 IntentSet(tags=..., primary=..., secondary=...) 时本字段为 ()
+    secondary_ordered: tuple = ()
     # 调试用
     matched: tuple = ()
 
@@ -116,12 +119,32 @@ def _match_action(
 
 
 def _match_formats(text: str) -> list:
-    """匹配格式分组，返回命中的分组名列表。"""
+    """匹配格式分组，返回命中的分组名列表（无序）。"""
     hit = []
     for fmt, kws in _FORMAT_GROUPS.items():
         if any(k in text for k in kws):
             hit.append(fmt)
     return hit
+
+
+def _match_formats_with_position(text: str) -> list:
+    """匹配格式分组，返回 [(fmt, first_pos), ...]，按 first_pos 升序。
+
+    第 1 个是"主格式"（用户最先提到的），供 _fallback_decide / _select_shortlist
+    区分主次（"生成 PPT，另外提 Excel" 主是 presentation，次是 spreadsheet）。
+
+    注意：text 先 lower()，因为 _FORMAT_GROUPS 里的关键词都是小写。
+    """
+    if not text:
+        return []
+    text_lower = text.lower()
+    hits = []
+    for fmt, kws in _FORMAT_GROUPS.items():
+        positions = [text_lower.find(k) for k in kws if k in text_lower]
+        if positions:
+            hits.append((fmt, min(positions)))
+    hits.sort(key=lambda x: (x[1], x[0]))
+    return hits
 
 
 def _is_pure_chitchat(text: str) -> bool:
@@ -273,13 +296,18 @@ def _classify_segments(goal: str) -> dict:
             "aggregated_tags": set(),
             "aggregated_primary": INTENT_UNKNOWN,
             "aggregated_secondary": set(),
+            "aggregated_secondary_ordered": (),
         }
 
     all_tags = set()
     all_secondary = set()
+    all_secondary_ordered = []
     for seg, it in instruction_segments:
         all_tags.update(it.tags)
         all_secondary.update(it.secondary)
+        # 位置排序取第一个指令段的 ordered（主段决定主次）
+        if not all_secondary_ordered and getattr(it, "secondary_ordered", ()):
+            all_secondary_ordered = list(it.secondary_ordered)
 
     priority = [
         INTENT_GENERATE, INTENT_MODIFY, INTENT_CODE, INTENT_DB,
@@ -294,6 +322,7 @@ def _classify_segments(goal: str) -> dict:
         "aggregated_tags": all_tags,
         "aggregated_primary": primary,
         "aggregated_secondary": all_secondary,
+        "aggregated_secondary_ordered": tuple(all_secondary_ordered),
     }
 
 
@@ -308,6 +337,7 @@ def classify(goal: str) -> IntentSet:
         tags=frozenset(seg["aggregated_tags"]),
         primary=seg["aggregated_primary"],
         secondary=frozenset(seg["aggregated_secondary"]),
+        secondary_ordered=tuple(seg.get("aggregated_secondary_ordered", ())),
         matched=(),
     )
 
@@ -444,12 +474,14 @@ def _classify_single(goal: str) -> IntentSet:
     # ── 格式副标签：所有意图都给，供 _select_shortlist 排序用。
     # 之前只在 generate 时给，导致"读 PDF"的 read_pdf_text
     # 在排序时拿不到 pdf 加分，排 read_csv 后面。 ──
-    secondary = set(_fmt_hits)
+    fmt_ordered = _match_formats_with_position(g_stripped) or _match_formats_with_position(g)
+    secondary = {fmt for fmt, _pos in fmt_ordered} or set(_fmt_hits)
 
     return IntentSet(
         tags=frozenset(tags),
         primary=primary,
         secondary=frozenset(secondary),
+        secondary_ordered=tuple(fmt_ordered),
         matched=tuple(matched),
     )
 
@@ -476,4 +508,5 @@ __all__ = [
     "_split_goal_segments",
     "_classify_segments",
     "_classify_single",
+    "_match_formats_with_position",
 ]

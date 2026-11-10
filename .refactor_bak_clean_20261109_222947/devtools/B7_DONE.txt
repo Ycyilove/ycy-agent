@@ -1,0 +1,31 @@
+B7 完成于 2026-11-09 00:09:37
+
+新增：
+- tools/capability/pipeline/context.py（DiscoveryContext）
+- tools/capability/pipeline/pipeline.py（7 阶段编排 + make_local_pipeline / make_registry_pipeline）
+- tools/capability/pipeline/facade.py（maybe_discover + search_and_connect_mcp 薄壳）
+- tools/capability/pipeline/stages/（7 阶段）
+  - normalize.py / cover.py / local_search.py / trust.py
+  - registry.py / rank.py / connect.py
+- tools/capability/pipeline/__init__.py（导出 + 延迟 import DiscoveryPipeline）
+
+改动：
+- tools/capability/pipeline.py 删除（与 pipeline/ 包冲突，移到 pipeline/facade.py）
+- tools/mcp_discovery.py::search_and_connect_mcp 从 400 行 -> @tool 包装 1 行转发
+- 改 rank.py / trust.py / connect.py 兼容 dict + RankedCandidate
+- 改 local_search.py：intent_index 命中 → 短路 + 转 RankedCandidate
+
+验收：
+- discovery 实测：search_and_connect_mcp 连上 tavily，返回 5 个工具
+- b0 / b1 仍绿
+- deps 仍 2 条
+
+B0-B7 累计：
+- B0: 9 个 bug
+- B1: core/task/answer/ 8 文件
+- B2: core/ports.py + bootstrap/，deps 7 -> 2
+- B3: fallback_search 走 SearchPort
+- B4: 审批唯一真源 + 8 单测
+- B5: semantics/vocab.py 词表收敛，20 goal 稳定性
+- B6: semantics/index/ 3 套索引统一，10 goal 召回稳定性
+- B7: capability/pipeline/ 7 阶段，search_and_connect_mcp 400 -> 1 行

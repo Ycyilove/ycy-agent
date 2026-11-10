@@ -1,0 +1,36 @@
+B11-1 完成于 2026-11-09 20:53:14
+
+新增：
+- core/task/task_types.py（TaskType / GapKind / StopReason / AssessResult / can_upgrade / TERMINAL_REASONS）
+- core/task/state.py（OrchestratorState + params_key）
+
+改动：
+- tools/orchestration/task_types.py -> re-export 壳（from core.task.task_types import *）
+- tools/orchestration/state.py -> re-export 壳（from core.task.state import *）
+- core/task/service.py:
+  - L33: from tools.orchestration.state import OrchestratorState -> from core.task.state import
+  - L2055: from tools.orchestration.state import params_key -> from core.task.state import
+
+验收：
+- deps: 0 条（7 -> 0，全绿！）
+- b0 / b1 仍绿
+- 旧 import (tools.orchestration.state / task_types) 一致
+- AgentOrchestrator import OK
+
+B0-B13 累计：
+- B0: 9 bug
+- B1: core/task/answer/ 8 文件
+- B2: core/ports.py + bootstrap/，deps 7 -> 2
+- B3: fallback_search 走 SearchPort
+- B4: 审批唯一真源 + 8 单测
+- B5: semantics/vocab.py 词表收敛
+- B6: semantics/index/ 3 套索引统一
+- B7: capability/pipeline/ 7 阶段
+- B8: orchestration/core.py 2367 -> 156 行，拆 4 Mixin
+- B9: backend/app.py 355 -> ~290 行，拆 deps.py
+- B11-1: OrchestratorState / task_types 搬到 core/task/，deps 1 -> 0
+- B12: embedding 收敛，mem0 dim 对齐
+- B13: scripts/ + verify_all.ps1 -> devtools/
+- B15: prompts.py 去 rag
+
+deps: 7 -> 0（全绿）✅
